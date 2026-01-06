@@ -60,7 +60,7 @@ NeuralRP keeps the UI minimal but exposes the essentials:
   Customize the global behavior and style (narrator vs character focus, tone, formatting).
 
 - **Temperature Control**  
-  Adjust creativity (0.0–1.0).
+  Adjust creativity (0.0–1.0+).
 
 - **Reply Length**  
   Set maximum response length in tokens.
