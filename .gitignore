@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Application specific
+app/images/*.png
+app/images/*.jpg
+app/images/*.jpeg
+app/images/dt_*.db
+# Keep the .gitkeep file to preserve folder structure
+!app/images/.gitkeep
+
+# Personal data - keep folders but ignore content
+app/data/chats/*.json
+app/data/characters/*.json
+app/data/worldinfo/*.json
+# Keep the .gitkeep files to preserve folder structure
+!app/data/chats/.gitkeep
+!app/data/characters/.gitkeep
+!app/data/worldinfo/.gitkeep
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local

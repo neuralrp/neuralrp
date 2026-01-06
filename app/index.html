@@ -1,0 +1,1249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuralRP</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%231e293b'/><text x='50' y='65' font-size='40' text-anchor='middle' fill='%2394a3b8'>*-*</text></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        [x-cloak] { display: none !important; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 h-screen overflow-hidden font-sans" x-data="chatUI()">
+    <div class="flex h-full">
+        <!-- Sidebar -->
+        <div class="w-80 bg-slate-800 border-r border-slate-700 flex flex-col transition-all duration-300" :class="showSidebar === 'none' ? '-ml-80' : ''">
+            <div class="p-4 border-b border-slate-700 font-bold flex justify-between items-center bg-slate-900/50">
+                <span class="text-xs tracking-widest text-slate-400" x-text="showSidebar.toUpperCase()"></span>
+                <button @click="showSidebar = 'none'" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="flex-1 overflow-y-auto p-4 space-y-4">
+                
+                <!-- Chats Sidebar -->
+                <template x-if="showSidebar === 'chats'">
+                    <div class="space-y-4">
+                        <div class="flex gap-2">
+                            <button @click="saveNewChat()" class="flex-1 bg-green-600 hover:bg-green-500 py-2 rounded-lg text-xs font-bold shadow-lg shadow-green-900/20 transition-all uppercase tracking-widest">Save Session</button>
+                            <button @click="fetchChats()" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-slate-300" title="Refresh List"><i class="fa-solid fa-rotate"></i></button>
+                        </div>
+                        <div class="space-y-2">
+                            <template x-for="chatName in savedChats" :key="chatName">
+                                <div class="group flex items-center gap-2 p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent transition-all">
+                                    <div @click="loadChat(chatName)" class="flex-1 min-w-0">
+                                        <div class="font-bold text-sm truncate" x-text="chatName"></div>
+                                    </div>
+                                    <button @click.stop="deleteChat(chatName)" class="hidden group-hover:flex w-6 h-6 rounded-lg bg-slate-800 hover:bg-red-600 text-white items-center justify-center transition-all"><i class="fa-solid fa-trash text-[10px]"></i></button>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Character Sidebar -->
+                <template x-if="showSidebar === 'characters'">
+                    <div class="space-y-4">
+                        <div class="flex gap-2">
+                            <button @click="startNewCharacter()" class="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded-lg text-xs font-bold shadow-lg shadow-blue-900/20 transition-all uppercase tracking-widest">New Character</button>
+                            <button @click="fetchCharacters()" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-slate-300" title="Refresh List"><i class="fa-solid fa-rotate"></i></button>
+                        </div>
+                        
+                        <div x-show="editingChar" class="bg-slate-900 p-3 rounded-xl border border-slate-700 space-y-3 shadow-xl">
+                            <input x-model="editingChar.data.name" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-blue-500" placeholder="Name">
+                            <label class="text-[9px] text-slate-500 font-black uppercase">Label Description (Personal Notes)</label>
+                            <textarea x-model="editingChar.data.extensions.label_description" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] h-14 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Plaintext description for labeling only..."></textarea>
+                            <label class="text-[9px] text-slate-500 font-black uppercase">Danbooru Tag</label>
+                            <input x-model="editingChar.data.extensions.danbooru_tag" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] outline-none focus:ring-1 focus:ring-blue-500" placeholder="e.g. 1girl, blond hair, blue eyes...">
+                            <label class="text-[9px] text-slate-500 font-black uppercase">LLM Description/Dialogue</label>
+                            <textarea x-model="editingChar.data.description" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Description/Example Dialogue"></textarea>
+                            <label class="text-[9px] text-slate-500 font-black uppercase">Reinforcement Prompt</label>
+                            <textarea x-model="editingChar.data.extensions.depth_prompt.prompt" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Personality/Scenario..."></textarea>
+                            
+                            <!-- Multi-Character Capsule -->
+                            <div class="border-t border-slate-700 pt-3 mt-2">
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="text-[9px] text-purple-400 font-black uppercase">Multi-Char Capsule (Auto-generated)</label>
+                                    <button @click="generateCapsule()" class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase" :disabled="isGeneratingCapsule">
+                                        <i class="fa-solid mr-1" :class="isGeneratingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Generate
+                                    </button>
+                                </div>
+                                <textarea x-model="editingChar.data.extensions.multi_char_summary" class="w-full bg-slate-950 border border-purple-900/50 rounded-lg px-2 py-1.5 text-[10px] h-16 outline-none focus:ring-1 focus:ring-purple-500" placeholder="Compact capsule for group chats (auto-generated on first group chat)..."></textarea>
+                                <p class="text-[8px] text-slate-600 mt-1">Used instead of full description when 2+ characters are active. Leave blank to auto-generate.</p>
+                            </div>
+                            
+                            <div class="flex gap-2">
+                                <button @click="saveCharacter()" class="flex-1 bg-green-600 hover:bg-green-500 py-1.5 rounded-lg text-xs font-bold uppercase text-white shadow-lg shadow-green-900/20">Save Card</button>
+                                <button @click="editingChar = null" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-xs font-bold uppercase">Cancel</button>
+                            </div>
+                        </div>
+
+                        <div class="space-y-2">
+                            <template x-for="char in characters">
+                                <div @click="toggleCharacter(char)" class="p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent hover:border-slate-600 group flex justify-between items-center transition-all" :class="isCharacterActive(char) ? 'border-blue-500/50 bg-blue-500/10' : ''">
+                                    <div class="flex flex-col flex-1 min-w-0">
+                                        <div class="flex items-center gap-2">
+                                            <div x-show="isCharacterActive(char)" class="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_5px_rgba(59,130,246,0.8)]"></div>
+                                            <span class="font-bold text-sm" x-text="char.data?.name"></span>
+                                        </div>
+                                        <span class="text-[10px] text-slate-500 truncate" x-text="char.data?.extensions?.label_description || char.data?.description"></span>
+                                    </div>
+                                    <div class="hidden group-hover:flex gap-1">
+                                        <button @click.stop="startEditCharacter(char)" class="flex items-center justify-center w-6 h-6 rounded-lg bg-slate-800 hover:bg-blue-600 text-white transition-all"><i class="fa-solid fa-pen text-[10px]"></i></button>
+                                        <button @click.stop="deleteCharacter(char)" class="flex items-center justify-center w-6 h-6 rounded-lg bg-slate-800 hover:bg-red-600 text-white transition-all"><i class="fa-solid fa-trash text-[10px]"></i></button>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- World Info Sidebar -->
+                <template x-if="showSidebar === 'world-info'">
+                    <div class="space-y-4">
+                        <div class="flex gap-2">
+                            <input id="wi-name" class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500" placeholder="New World Name">
+                            <button @click="saveWorldInfo(document.getElementById('wi-name').value, [])" class="bg-slate-700 hover:bg-slate-600 p-1 px-3 rounded-lg"><i class="fa-solid fa-plus text-xs"></i></button>
+                            <button @click="fetchWorldInfo()" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-slate-300" title="Refresh World Info"><i class="fa-solid fa-rotate"></i></button>
+                        </div>
+                        <div class="space-y-2">
+                            <template x-for="wi in worldInfos">
+                                <div class="bg-slate-900/50 rounded-xl overflow-hidden border border-slate-700/50">
+                                    <button @click="activeWI = activeWI?.name === wi.name ? null : wi" class="w-full text-left font-black text-[10px] tracking-widest uppercase p-3 transition-all hover:bg-slate-700/30 flex justify-between items-center" :class="activeWI?.name === wi.name ? 'text-green-400 bg-green-500/10' : 'text-slate-500'">
+                                        <span x-text="wi.name"></span>
+                                        <div class="flex items-center gap-2">
+                                            <i class="fa-solid" :class="activeWI?.name === wi.name ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+                                        </div>
+                                    </button>
+                                    <div x-show="activeWI?.name === wi.name" class="p-3 pt-0 space-y-3">
+                                        <template x-for="(entry, uid) in wi.entries" :key="uid">
+                                            <div class="p-2 bg-slate-800 rounded-lg border border-slate-700 transition-all hover:border-slate-600">
+                                                <div class="flex justify-between items-start mb-1">
+                                                    <div @click="toggleCanonLaw(wi, uid)" 
+                                                         class="font-black text-[9px] uppercase tracking-widest cursor-pointer hover:opacity-80 transition-all" 
+                                                         :class="entry.is_canon_law ? 'text-red-500' : 'text-green-500'"
+                                                         x-text="entry.key.join(' • ')"></div>
+                                                    <div class="flex gap-1 items-center">
+                                                        <div x-show="entry.is_canon_law" class="text-[7px] bg-red-500/20 text-red-500 px-1 rounded uppercase font-black">Canon Law</div>
+                                                        <div x-show="entry.constant" class="text-[8px] bg-green-500/20 text-green-400 px-1 rounded uppercase font-black">Constant</div>
+                                                    </div>
+                                                </div>
+                                                <div class="text-[10px] text-slate-400 leading-tight line-clamp-3 font-medium" x-text="entry.content"></div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Settings Sidebar -->
+                <template x-if="showSidebar === 'settings'">
+                    <div class="space-y-6">
+                        <div class="space-y-4 pt-2">
+                            <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">Neural Connection</h3>
+                            <div class="space-y-3">
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">System Prompt</label>
+                                    <textarea x-model="settings.system_prompt" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500"></textarea>
+                                </div>
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Your Persona (You)</label>
+                                    <textarea x-model="settings.user_persona" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Describe your character..."></textarea>
+                                </div>
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Reinforce Every X Turns</label>
+                                    <input type="number" x-model.number="settings.reinforce_freq" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                </div>
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div class="space-y-1">
+                                        <label class="text-[10px] text-slate-450 uppercase font-bold">Temperature</label>
+                                        <input type="number" step="0.1" x-model.number="settings.temperature" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                    </div>
+                                    <div class="space-y-1">
+                                        <label class="text-[10px] text-slate-450 uppercase font-bold">Max Resp Tokens</label>
+                                        <input type="number" x-model.number="settings.max_length" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div class="space-y-1">
+                                        <label class="text-[10px] text-slate-450 uppercase font-bold">Max Context</label>
+                                        <input type="number" x-model.number="settings.max_context" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                    </div>
+                                    <div class="space-y-1">
+                                        <label class="text-[10px] text-slate-450 uppercase font-bold">Summ Threshold</label>
+                                        <input type="number" step="0.01" x-model.number="settings.summarize_threshold" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Current Summary View -->
+                        <div x-show="summary" class="space-y-2 pt-4 border-t border-slate-700">
+                            <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">Long-Term Memory</h3>
+                            <textarea x-model="summary" class="w-full bg-slate-950/50 border border-slate-700 rounded-lg p-2 text-[10px] h-32 text-slate-400 outline-none focus:ring-1 focus:ring-blue-500/30" readonly></textarea>
+                            <button @click="if(confirm('Clear long-term memory?')) summary = ''" class="text-[8px] text-red-400 uppercase font-bold tracking-widest hover:text-red-300 transition-colors">Clear Memory</button>
+                        </div>
+
+                        <div class="space-y-4 pt-4 border-t border-slate-700">
+                            <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">API Configuration</h3>
+                            <div class="space-y-3">
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Kobold URL</label>
+                                    <input x-model="config.kobold_url" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                </div>
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">SD API URL</label>
+                                    <input x-model="config.sd_url" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-purple-500">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="flex-1 flex flex-col min-w-0 relative">
+            <!-- Header -->
+            <div class="h-14 border-b border-slate-700 flex items-center justify-between px-6 bg-slate-800/80 backdrop-blur shrink-0 z-10">
+                <div class="flex gap-6">
+                    <button @click="showSidebar = 'chats'" class="hover:text-green-400 flex items-center gap-2.5 text-xs font-black uppercase tracking-widest transition-all" :class="showSidebar === 'chats' ? 'text-green-400' : 'text-slate-400'">
+                        <i class="fa-solid fa-message text-sm"></i><span class="hidden sm:inline">Chats</span>
+                    </button>
+                    <button @click="showSidebar = 'characters'" class="hover:text-blue-400 flex items-center gap-2.5 text-xs font-black uppercase tracking-widest transition-all" :class="showSidebar === 'characters' ? 'text-blue-400' : 'text-slate-400'">
+                        <i class="fa-solid fa-users text-sm"></i><span class="hidden sm:inline">Characters</span>
+                    </button>
+                    <button @click="showSidebar = 'world-info'" class="hover:text-green-400 flex items-center gap-2.5 text-xs font-black uppercase tracking-widest transition-all" :class="showSidebar === 'world-info' ? 'text-green-400' : 'text-slate-400'">
+                        <i class="fa-solid fa-earth-americas text-sm"></i><span class="hidden sm:inline">World Info</span>
+                    </button>
+                    <button @click="openCardGen()" class="hover:text-purple-400 flex items-center gap-2.5 text-xs font-black uppercase tracking-widest transition-all text-slate-400">
+                        <i class="fa-solid fa-id-card text-sm"></i><span class="hidden sm:inline">Gen Card</span>
+                    </button>
+                    <button @click="openWorldGen()" class="hover:text-orange-400 flex items-center gap-2.5 text-xs font-black uppercase tracking-widest transition-all text-slate-400">
+                        <i class="fa-solid fa-earth-europe text-sm"></i><span class="hidden sm:inline">Gen World</span>
+                    </button>
+                </div>
+                <!-- Active Character Indicator -->
+                <div class="flex-1 flex justify-center overflow-hidden mx-4 text-center">
+                    <div x-show="activeCharacters.length > 0" class="flex items-center gap-2 overflow-x-auto no-scrollbar py-1" x-cloak x-transition>
+                        <template x-for="char in activeCharacters" :key="char.data.name">
+                            <div class="flex items-center gap-2 bg-slate-950/50 px-3 py-1 rounded-full text-[9px] border border-slate-700/50 shadow-inner whitespace-nowrap shrink-0">
+                                <span class="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]"></span>
+                                <span class="font-black tracking-wide uppercase" x-text="char.data?.name"></span>
+                                <button @click="toggleCharacter(char)" class="text-slate-500 hover:text-red-400 ml-1 transition-all"><i class="fa-solid fa-xmark"></i></button>
+                            </div>
+                        </template>
+                    </div>
+                    <div x-show="activeCharacters.length === 0" class="flex items-center gap-2.5 bg-slate-950/50 px-4 py-1.5 rounded-full text-xs border border-slate-700/50 shadow-inner" x-cloak x-transition>
+                        <span class="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.5)]"></span>
+                        <span class="font-black tracking-wide uppercase text-[10px]">Narrator Mode</span>
+                    </div>
+                </div>
+                <button @click="showSidebar = 'settings'" class="text-slate-400 hover:text-slate-200 transition-all" :class="showSidebar === 'settings' ? 'text-blue-400' : ''">
+                    <i class="fa-solid fa-sliders text-sm"></i>
+                </button>
+            </div>
+
+            <!-- Chat Area -->
+            <div id="chat-container" class="flex-1 overflow-y-auto p-6 space-y-8 bg-slate-900 border-x border-slate-800/50 max-w-5xl mx-auto w-full">
+                <template x-if="messages.length === 0">
+                    <div class="h-full flex flex-col items-center justify-center text-slate-600 space-y-6 opacity-50">
+                        <div class="w-20 h-20 rounded-3xl bg-slate-800/50 border border-slate-700 flex items-center justify-center shadow-2xl">
+                            <span class="text-3xl rotate-12">*-*</span>
+                        </div>
+                        <div class="text-center group">
+                            <p class="text-[10px] font-black uppercase tracking-[0.3em] mb-1 group-hover:text-blue-500 transition-colors">Neural Connection Ready</p>
+                            <p class="text-[9px] font-medium text-slate-500">Awaiting user input or vision sequence</p>
+                        </div>
+                    </div>
+                </template>
+                <div class="space-y-8">
+                    <template x-for="(msg, index) in messages" :key="msg.id">
+                        <div class="flex group" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
+                            <div class="max-w-[85%] space-y-1.5 relative">
+                                <div x-show="msg.role !== 'user' && msg.speaker !== 'Visual System'" class="text-[9px] font-black text-blue-500 uppercase tracking-[0.2em] ml-4 mb-1" x-text="msg.speaker || 'Narrator'"></div>
+                                
+                                <div class="relative px-5 py-3.5 shadow-xl transition-all border border-transparent" :class="msg.role === 'user' ? 'bg-blue-600 text-white rounded-3xl rounded-tr-[4px] shadow-blue-900/20' : 'bg-slate-800 border border-slate-700/50 text-slate-200 rounded-3xl rounded-tl-[4px] shadow-black/20 hover:border-slate-600'" :style="msg.speaker === 'Visual System' ? 'padding: 0; background: transparent; border: none; box-shadow: none;' : ''">
+                                    
+                                    <!-- Message Controls -->
+                                    <div class="absolute -top-3 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-all z-10 h-6">
+                                        <template x-if="msg.role === 'user'">
+                                            <button @click="regenerate(index)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-green-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50" title="Regenerate from here"><i class="fa-solid fa-rotate text-[8px]"></i></button>
+                                        </template>
+                                        <button @click="editingMessageId = msg.id; editBuffer = msg.content" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50"><i class="fa-solid fa-pen text-[8px]"></i></button>
+                                        <button @click="deleteMessage(index)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-red-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50"><i class="fa-solid fa-trash text-[8px]"></i></button>
+                                    </div>
+
+                                    <template x-if="editingMessageId !== msg.id">
+                                        <div>
+                                            <div x-show="msg.content" class="whitespace-pre-wrap leading-relaxed text-[13px] font-medium" x-text="msg.content"></div>
+                                            <template x-if="msg.image">
+                                                <div :class="msg.content ? 'mt-3 -mx-2' : ''">
+                                                    <a :href="msg.image" target="_blank">
+                                                        <img :src="msg.image" class="rounded-2xl border border-slate-700/50 max-w-full shadow-2xl hover:brightness-110 transition-all cursor-zoom-in">
+                                                    </a>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
+
+                                    <!-- Edit Interface -->
+                                    <template x-if="editingMessageId === msg.id">
+                                        <div class="space-y-3">
+                                            <textarea x-model="editBuffer" class="w-full bg-slate-900/50 text-slate-100 p-3 rounded-xl border border-slate-600 outline-none text-[13px] font-medium leading-relaxed resize-none h-32"></textarea>
+                                            <div class="flex gap-2 justify-end">
+                                                <button @click="updateMessage(index)" class="px-3 py-1 bg-blue-500 hover:bg-blue-400 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Update</button>
+                                                <button @click="editingMessageId = null" class="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Cancel</button>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                    <div x-show="isLoading" class="flex justify-start" x-cloak>
+                        <div class="bg-slate-800/50 border border-slate-700/50 rounded-2xl rounded-tl-[4px] px-5 py-4">
+                            <div class="flex gap-2 item-center">
+                                <div class="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce"></div>
+                                <div class="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" style="animation-delay: 0.2s"></div>
+                                <div class="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" style="animation-delay: 0.4s"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Image Generator (Collapsible) -->
+            <div class="bg-slate-800 border-t border-slate-700 transition-all duration-500 ease-in-out overflow-hidden z-20 shadow-2xl shrink-0" :class="showImagePanel ? 'max-h-[500px]' : 'max-h-0 border-transparent'">
+                <div class="p-6 space-y-6 max-w-4xl mx-auto">
+                    <div class="flex flex-col md:flex-row gap-6">
+                        <div class="flex-1">
+                            <label class="text-[9px] text-slate-500 uppercase font-black mb-2 block tracking-widest">Vision Input</label>
+                            <textarea x-model="sdParams.prompt" class="w-full bg-slate-900 border border-slate-700 rounded-2xl p-4 text-xs h-28 resize-none focus:ring-2 focus:ring-purple-500/30 outline-none transition-all font-mono leading-relaxed" placeholder="Prompt..."></textarea>
+                        </div>
+                        <div class="flex-1">
+                            <label class="text-[9px] text-slate-500 uppercase font-black mb-2 block tracking-widest">Negative Prompt</label>
+                            <textarea x-model="sdParams.negative_prompt" class="w-full bg-slate-950 border border-slate-700 rounded-2xl p-4 text-xs h-28 resize-none focus:ring-2 focus:ring-red-500/30 outline-none transition-all font-mono leading-relaxed" placeholder="Omit..."></textarea>
+                        </div>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-8 pt-4 border-t border-slate-700/50">
+                        <div class="flex gap-6 text-center">
+                            <div class="flex flex-col gap-1.5">
+                                <label class="text-[8px] text-slate-500 uppercase font-black tracking-widest">Steps</label>
+                                <input type="number" x-model.number="sdParams.steps" class="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-purple-500 font-bold">
+                            </div>
+                            <div class="flex flex-col gap-1.5">
+                                <label class="text-[8px] text-slate-500 uppercase font-black tracking-widest">Scale</label>
+                                <input type="number" step="0.5" x-model.number="sdParams.cfg_scale" class="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-purple-500 font-bold">
+                            </div>
+                            <div class="flex flex-col gap-1.5">
+                                <label class="text-[8px] text-slate-500 uppercase font-black tracking-widest">Resolution</label>
+                                <div class="flex items-center gap-2">
+                                    <input type="number" x-model.number="sdParams.width" class="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-purple-500 font-bold">
+                                    <span class="text-slate-600 text-[10px] font-black">×</span>
+                                    <input type="number" x-model.number="sdParams.height" class="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-purple-500 font-bold">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex-1 flex justify-end">
+                            <button @click="generateImage()" class="bg-purple-600 hover:bg-purple-500 text-white px-8 py-3 rounded-2xl text-xs font-black uppercase tracking-[0.2em] shadow-xl shadow-purple-900/40 transition-all active:scale-95 disabled:opacity-50 flex items-center gap-3" :disabled="isLoading">
+                                <span x-show="!isLoading">Generate Vision Sequence</span>
+                                <span x-show="isLoading">Generating...</span>
+                                <i class="fa-solid" :class="isLoading ? 'fa-spinner fa-spin' : 'fa-wand-magic-sparkles'"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="p-6 bg-slate-800 border-t border-slate-700 flex flex-col gap-2 shrink-0 z-10 shadow-[0_-10px_30px_-5px_rgba(0,0,0,0.3)]">
+                <!-- Token Counter Display -->
+                <div class="flex justify-between items-center px-4">
+                    <div class="text-[9px] font-black tracking-widest uppercase text-slate-500 flex items-center gap-2">
+                        <span :class="tokenCount > settings.max_context * 0.85 ? 'text-orange-500' : 'text-slate-500'">Context: <span x-text="tokenCount">0</span> / <span x-text="settings.max_context">4096</span></span>
+                        <template x-if="isCountingTokens">
+                            <i class="fa-solid fa-circle-notch fa-spin text-blue-500"></i>
+                        </template>
+                    </div>
+                    <button @click="updateTokenCount()" class="text-[9px] font-bold text-blue-400 hover:text-blue-300 transition-colors uppercase tracking-tight">Manual Refresh</button>
+                </div>
+                
+                <div class="flex gap-4 items-end">
+                    <button @click="showImagePanel = !showImagePanel" class="p-4 rounded-2xl transition-all relative group shadow-lg shadow-black/20" :class="showImagePanel ? 'bg-purple-600 text-white shadow-purple-900/40' : 'bg-slate-700/50 text-slate-400 hover:bg-slate-700 hover:text-slate-200'">
+                        <i class="fa-solid fa-wand-magic-sparkles text-lg group-hover:scale-110 transition-transform"></i>
+                    </button>
+                    
+                    <!-- Mode Selector Dropdown -->
+                    <div class="relative">
+                        <select x-model="selectedMode" 
+                                class="appearance-none bg-slate-700/50 border border-slate-600 text-slate-300 rounded-2xl px-4 py-3 pr-10 text-[10px] font-bold uppercase tracking-widest outline-none focus:ring-2 focus:ring-blue-500/30 cursor-pointer shadow-lg shadow-black/20 hover:bg-slate-700 transition-all"
+                                :class="isClassifyingMode ? 'opacity-50' : ''">
+                            <option value="auto">🤖 Auto</option>
+                            <option value="narrator">🎭 Narrator</option>
+                            <template x-for="char in activeCharacters" :key="char.data.name">
+                                <option :value="'focus:' + char.data.name" x-text="'👤 ' + char.data.name"></option>
+                            </template>
+                        </select>
+                        <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">
+                            <i class="fa-solid fa-chevron-down text-[8px]" x-show="!isClassifyingMode"></i>
+                            <i class="fa-solid fa-circle-notch fa-spin text-[10px] text-blue-400" x-show="isClassifyingMode"></i>
+                        </div>
+                    </div>
+                    
+                    <div class="flex-1 relative group">
+                        <textarea x-model="input" @keydown.enter.prevent="if(!$event.shiftKey) sendMessage()" class="w-full bg-slate-950/50 border border-slate-700 rounded-[24px] p-4 pr-14 max-h-44 resize-none focus:ring-2 focus:ring-blue-500/20 border-slate-700/50 outline-none text-[13px] font-medium leading-relaxed transition-all shadow-inner" :placeholder="activeCharacters.length > 0 ? 'Chatting with party...' : 'Input neural prompt...'" rows="1"></textarea>
+                        <button @click="sendMessage()" class="absolute right-2.5 bottom-2.5 p-3 bg-blue-600 hover:bg-blue-500 rounded-2xl text-white shadow-xl shadow-blue-900/40 disabled:opacity-20 transition-all active:scale-90" :disabled="!input.trim() || isLoading">
+                            <i class="fa-solid fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Character Card Generation Modal -->
+    <div x-show="showCardGen" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak x-transition>
+        <div class="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
+                <h2 class="text-xs font-black uppercase tracking-widest text-blue-400">Generate Character Card from Chat</h2>
+                <button @click="showCardGen = false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                <div class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Target Character Name</label>
+                    <div class="flex gap-2">
+                        <input x-model="cardGen.char_name" class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500/30" placeholder="e.g. Mark, Sarah, The Barkeeper...">
+                        <button @click="generateAllFields()" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-blue-900/20 transition-all" :disabled="!cardGen.char_name || isGenLoading">
+                            <span x-show="!isGenLoading">Auto-Generate All</span>
+                            <i x-show="isGenLoading" class="fa-solid fa-circle-notch fa-spin"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- Personality -->
+                    <div class="space-y-1.5">
+                        <div class="flex justify-between items-center">
+                            <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Personality (PList)</label>
+                            <button @click="generateField('personality')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['personality']">
+                                <i class="fa-solid mr-1" :class="cardGen.loading['personality'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                            </button>
+                        </div>
+                        <textarea x-model="cardGen.fields.personality" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500/50 resize-none font-mono"></textarea>
+                    </div>
+
+                    <!-- Body -->
+                    <div class="space-y-1.5">
+                        <div class="flex justify-between items-center">
+                            <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Physical Body (PList)</label>
+                            <button @click="generateField('body')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['body']">
+                                <i class="fa-solid mr-1" :class="cardGen.loading['body'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                            </button>
+                        </div>
+                        <textarea x-model="cardGen.fields.body" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500/50 resize-none font-mono"></textarea>
+                    </div>
+
+                    <!-- Genre & Tags -->
+                    <div class="space-y-1.5">
+                        <div class="flex justify-between items-center">
+                            <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Genre & Tags</label>
+                            <button @click="generateField('genre'); generateField('tags')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['genre'] || cardGen.loading['tags']">
+                                <i class="fa-solid mr-1" :class="cardGen.loading['genre'] || cardGen.loading['tags'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                            </button>
+                        </div>
+                        <div class="flex gap-2">
+                            <input x-model="cardGen.fields.genre" class="w-1/3 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-blue-500/50" placeholder="Genre">
+                            <input x-model="cardGen.fields.tags" class="w-2/3 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-blue-500/50" placeholder="Tags (comma separated)">
+                        </div>
+                    </div>
+
+                    <!-- Scenario -->
+                    <div class="space-y-1.5">
+                        <div class="flex justify-between items-center">
+                            <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Scenario</label>
+                            <button @click="generateField('scenario')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['scenario']">
+                                <i class="fa-solid mr-1" :class="cardGen.loading['scenario'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                            </button>
+                        </div>
+                        <input x-model="cardGen.fields.scenario" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-blue-500/50" placeholder="One sentence situation">
+                    </div>
+                </div>
+
+                <!-- Dialogue Examples -->
+                <div class="space-y-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Dialogue Examples (Likes & Story)</label>
+                        <button @click="generateField('dialogue_likes'); generateField('dialogue_story')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['dialogue_likes'] || cardGen.loading['dialogue_story']">
+                            <i class="fa-solid mr-1" :class="cardGen.loading['dialogue_likes'] || cardGen.loading['dialogue_story'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                        </button>
+                    </div>
+                    <textarea x-model="cardGen.fields.dialogue" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-32 outline-none focus:ring-1 focus:ring-blue-500/50 font-medium"></textarea>
+                </div>
+
+                <!-- First Message -->
+                <div class="space-y-1.5">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">First Message</label>
+                        <button @click="generateField('first_message')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['first_message']">
+                            <i class="fa-solid mr-1" :class="cardGen.loading['first_message'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                        </button>
+                    </div>
+                    <textarea x-model="cardGen.fields.first_message" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500/50 font-medium"></textarea>
+                </div>
+            </div>
+
+            <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
+                <button @click="saveGeneratedCard()" class="flex-1 bg-green-600 hover:bg-green-500 text-white py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg shadow-green-900/20 transition-all" :disabled="!cardGen.char_name">Save Character Card</button>
+                <button @click="showCardGen = false" class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- World Info Generation Modal -->
+    <div x-show="showWorldGen" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak x-transition>
+        <div class="bg-slate-900 border border-slate-700 w-full max-w-3xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
+                <div class="flex items-center gap-3">
+                    <h2 class="text-xs font-black uppercase tracking-widest text-orange-400">World Evolution & Lore Extraction</h2>
+                    <div class="flex gap-1 bg-slate-950 p-1 rounded-lg border border-slate-700">
+                        <template x-for="t in ['sfw', 'spicy', 'veryspicy']">
+                            <button @click="worldGen.tone = t" class="px-2 py-0.5 text-[8px] font-black uppercase rounded transition-all" :class="worldGen.tone === t ? 'bg-orange-600 text-white' : 'text-slate-500 hover:text-slate-300'" x-text="t"></button>
+                        </template>
+                    </div>
+                </div>
+                <button @click="showWorldGen = false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                <div class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">World / Location Name</label>
+                    <div class="flex gap-2">
+                        <input x-model="worldGen.world_name" class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-orange-500/30" placeholder="e.g. Farlandia, Mystic Island...">
+                        <button @click="generateAllWorldStuff()" class="bg-orange-600 hover:bg-orange-500 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-orange-900/20 transition-all" :disabled="!worldGen.world_name || isWorldLoading">
+                            <span x-show="!isWorldLoading">Analyze All Lore</span>
+                            <i x-show="isWorldLoading" class="fa-solid fa-circle-notch fa-spin"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <template x-for="section in ['history', 'locations', 'creatures', 'factions']">
+                        <div class="space-y-2">
+                            <div class="flex justify-between items-center">
+                                <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest" x-text="section"></label>
+                                <button @click="generateWorldSection(section)" class="text-[8px] text-orange-400 hover:text-orange-300 font-bold uppercase"><i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Extract</button>
+                            </div>
+                            <textarea x-model="worldGen.fields[section]" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-[10px] h-32 outline-none focus:ring-1 focus:ring-orange-500/50 font-mono" :placeholder="'[Lore Entry: type(...), details(...)]'"></textarea>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
+                <button @click="saveWorldEvolution()" class="flex-1 bg-green-600 hover:bg-green-500 text-white py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg shadow-green-900/20 transition-all" :disabled="!worldGen.world_name">Finalize & Update World Lore</button>
+                <button @click="showWorldGen = false" class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function chatUI() {
+            return {
+                messages: [],
+                input: '',
+                summary: '',
+                isLoading: false,
+                isCountingTokens: false,
+                tokenCount: 0,
+                showSidebar: 'none',
+                showImagePanel: false,
+                activeCharacters: [],
+                characters: [],
+                savedChats: [],
+                editingChar: null,
+                worldInfos: [],
+                activeWI: null,
+                newWIEntry: { keys: '', content: '' },
+                editingMessageId: null,
+                editBuffer: '',
+                settings: {
+                    system_prompt: 'Write a highly detailed, creative, and immersive response. Stay in character at all times.',
+                    user_persona: '',
+                    reinforce_freq: 5,
+                    temperature: 0.7,
+                    max_length: 250,
+                    max_context: 4096,
+                    summarize_threshold: 0.85
+                },
+                config: {
+                    kobold_url: 'http://127.0.0.1:5001',
+                    sd_url: 'http://127.0.0.1:7861'
+                },
+                sdParams: {
+                    prompt: '',
+                    negative_prompt: '',
+                    steps: 20,
+                    cfg_scale: 7.0,
+                    width: 512,
+                    height: 512,
+                    sampler_name: 'Euler a',
+                    scheduler: 'Automatic'
+                },
+                showCardGen: false,
+                isGenLoading: false,
+                cardGen: {
+                    char_name: '',
+                    loading: {},
+                    fields: {
+                        personality: '',
+                        body: '',
+                        dialogue: '',
+                        genre: '',
+                        tags: '',
+                        scenario: '',
+                        first_message: ''
+                    }
+                },
+                showWorldGen: false,
+                isWorldLoading: false,
+                worldGen: {
+                    world_name: '',
+                    tone: 'sfw',
+                    fields: {
+                        history: '',
+                        locations: '',
+                        creatures: '',
+                        factions: ''
+                    }
+                },
+                isGeneratingCapsule: false,
+                
+                // Mode selector state
+                selectedMode: 'auto', // 'auto', 'narrator', or 'focus:CharacterName'
+                isClassifyingMode: false,
+
+                async init() {
+                    this.loadSettings();
+                    await this.fetchCharacters();
+                    await this.fetchWorldInfo();
+                    await this.fetchChats();
+                    
+                    // Watch for settings changes to persist
+                    this.$watch('settings', () => this.saveSettings());
+                    this.$watch('sdParams', () => this.saveSettings());
+                    
+                    // Periodic token count update
+                    setInterval(() => {
+                        if (this.messages.length > 0 && !this.isLoading) this.updateTokenCount();
+                    }, 30000);
+                },
+
+                loadSettings() {
+                    const saved = localStorage.getItem('ai_chat_settings');
+                    if (saved) {
+                        try {
+                            const parsed = JSON.parse(saved);
+                            if (parsed.settings) this.settings = { ...this.settings, ...parsed.settings };
+                            if (parsed.sdParams) this.sdParams = { ...this.sdParams, ...parsed.sdParams };
+                            // Backward compatibility for old format where settings was the root
+                            if (!parsed.settings && !parsed.sdParams) this.settings = { ...this.settings, ...parsed };
+                        } catch (e) { console.error('Failed to load settings', e); }
+                    }
+                },
+
+                saveSettings() {
+                    const toSave = {
+                        settings: this.settings,
+                        sdParams: this.sdParams
+                    };
+                    localStorage.setItem('ai_chat_settings', JSON.stringify(toSave));
+                },
+
+                async updateTokenCount() {
+                    if (this.isCountingTokens) return;
+                    this.isCountingTokens = true;
+                    try {
+                        const prompt = this.constructPromptLocally();
+                        const res = await axios.post('/api/extra/tokencount', { prompt });
+                        this.tokenCount = res.data.count;
+                    } catch (e) {
+                        console.error('Token count failed', e);
+                    } finally {
+                        this.isCountingTokens = false;
+                    }
+                },
+
+                constructPromptLocally() {
+                    // Mimic main.py logic for local preview/counting
+                    let p = `### System: ${this.settings.system_prompt}\n`;
+                    if (this.summary) p += `### Long-Term Context (Summary of earlier turns):\n${this.summary}\n`;
+                    if (this.settings.user_persona) p += `### Your Character Description:\n${this.settings.user_persona}\n`;
+                    
+                    this.activeCharacters.forEach(c => {
+                        p += `### Character Profile: ${c.data.name}\n${c.data.description}\n`;
+                        if (c.data?.extensions?.depth_prompt?.prompt) p += `### Context for ${c.data.name}: ${c.data.extensions.depth_prompt.prompt}\n`;
+                    });
+
+                    p += "\n### Chat History:\n";
+                    this.messages.forEach(m => {
+                        if (m.speaker === 'Visual System') return;
+                        const speaker = m.speaker || (m.role === 'user' ? 'User' : 'Narrator');
+                        p += `${speaker}: ${m.content}\n`;
+                    });
+                    
+                    return p;
+                },
+
+                async fetchChats() {
+                    try {
+                        const res = await axios.get('/api/chats');
+                        this.savedChats = res.data;
+                    } catch (e) { console.error(e); }
+                },
+
+                async saveNewChat() {
+                    const name = prompt("Name this chat session:");
+                    if (!name) return;
+                    
+                    const data = {
+                        messages: this.messages,
+                        summary: this.summary,
+                        activeCharacters: this.activeCharacters,
+                        activeWI: this.activeWI,
+                        settings: this.settings
+                    };
+                    
+                    try {
+                        await axios.post('/api/chats', { name, data });
+                        await this.fetchChats();
+                    } catch (e) { console.error(e); }
+                },
+
+                async loadChat(name) {
+                    if (this.messages.length > 0 && !confirm('Load chat? Current progress will be lost.')) return;
+                    try {
+                        const res = await axios.get(`/api/chats/${name}`);
+                        const d = res.data;
+                        this.messages = d.messages || [];
+                        this.summary = d.summary || '';
+                        this.activeCharacters = d.activeCharacters || [];
+                        this.activeWI = d.activeWI || null;
+                        this.settings = { ...this.settings, ...(d.settings || {}) };
+                        this.showSidebar = 'none';
+                        this.scrollToBottom();
+                        this.updateTokenCount();
+                    } catch (e) { console.error(e); }
+                },
+
+                async deleteChat(name) {
+                    if (confirm(`Delete chat "${name}"?`)) {
+                        try {
+                            await axios.delete(`/api/chats/${name}`);
+                            await this.fetchChats();
+                        } catch (e) { console.error(e); }
+                    }
+                },
+
+                startNewCharacter() {
+                    this.editingChar = {
+                        data: {
+                            name: 'New',
+                            description: '',
+                            extensions: {
+                                depth_prompt: { depth: 4, prompt: '' }
+                            }
+                        }
+                    };
+                },
+
+                startEditCharacter(char) {
+                    const clone = JSON.parse(JSON.stringify(char));
+                    if (!clone.data.extensions) clone.data.extensions = {};
+                    if (!clone.data.extensions.depth_prompt) {
+                        clone.data.extensions.depth_prompt = { depth: 4, prompt: '' };
+                    }
+                    this.editingChar = clone;
+                },
+
+                isCharacterActive(char) {
+                    return this.activeCharacters.some(c => c.data?.name === char.data?.name);
+                },
+
+                toggleCharacter(char) {
+                    const index = this.activeCharacters.findIndex(c => c.data?.name === char.data?.name);
+                    if (index > -1) {
+                        this.activeCharacters.splice(index, 1);
+                    } else {
+                        this.activeCharacters.push(char);
+                        if (char.data?.first_mes && this.messages.length === 0) {
+                            this.messages.push({
+                                role: 'assistant',
+                                speaker: char.data.name,
+                                content: char.data.first_mes,
+                                id: Date.now()
+                            });
+                        }
+                    }
+                },
+
+                async deleteMessage(index) {
+                    if (confirm('Delete this turn from history?')) {
+                        this.messages.splice(index, 1);
+                        this.updateTokenCount();
+                    }
+                },
+
+                updateMessage(index) {
+                    this.messages[index].content = this.editBuffer;
+                    this.editingMessageId = null;
+                    this.editBuffer = '';
+                    this.updateTokenCount();
+                },
+
+                async regenerate(index) {
+                    if (this.isLoading) return;
+                    this.messages = this.messages.slice(0, index + 1);
+                    this.isLoading = true;
+                    this.scrollToBottom();
+
+                    try {
+                        // Get the user message content for mode resolution
+                        const lastUserMsg = this.messages[index];
+                        const mode = await this.resolveMode(lastUserMsg?.content || '');
+                        
+                        const res = await axios.post('/api/chat', { 
+                            messages: this.messages,
+                            summary: this.summary,
+                            characters: this.activeCharacters,
+                            world_info: this.activeWI,
+                            settings: this.settings,
+                            mode: mode
+                        });
+
+                        // Only replace messages if summarization/truncation occurred (summary changed)
+                        if (res.data._updated_state) {
+                            if (res.data._updated_state.summary !== this.summary) {
+                                // Summarization happened - use backend's truncated message list
+                                this.messages = res.data._updated_state.messages;
+                            }
+                            this.summary = res.data._updated_state.summary;
+                        }
+
+                        const aiMsg = { 
+                            role: 'assistant', 
+                            speaker: this.getSpeakerFromMode(mode),
+                            content: res.data.results[0].text.trim(), 
+                            id: Date.now() + 1 
+                        };
+                        this.messages.push(aiMsg);
+                    } catch (e) {
+                        console.error(e);
+                    } finally {
+                        this.isLoading = false;
+                        this.scrollToBottom();
+                        this.updateTokenCount();
+                    }
+                },
+
+                async fetchCharacters() {
+                    try {
+                        const res = await axios.get('/api/characters');
+                        this.characters = res.data;
+                    } catch (e) { console.error(e); }
+                },
+
+                async saveCharacter() {
+                    try {
+                        await axios.post('/api/characters', this.editingChar);
+                        this.editingChar = null;
+                        await this.fetchCharacters();
+                    } catch (e) { console.error(e); }
+                },
+
+                async deleteCharacter(char) {
+                    if (confirm(`Delete character card: ${char.data.name}?`)) {
+                        try {
+                            const filename = char._filename || `${char.data.name}.json`;
+                            await axios.delete(`/api/characters/${filename}`);
+                            await this.fetchCharacters();
+                        } catch (e) { console.error(e); }
+                    }
+                },
+
+                async fetchWorldInfo() {
+                    try {
+                        const res = await axios.get('/api/world-info');
+                        this.worldInfos = res.data;
+                        // If we have an active world info, update it from the list to get latest flags
+                        if (this.activeWI) {
+                            const updated = this.worldInfos.find(w => w.name === this.activeWI.name);
+                            if (updated) this.activeWI = updated;
+                        }
+                    } catch (e) { console.error(e); }
+                },
+
+                toggleCanonLaw(wi, uid) {
+                    const entry = wi.entries[uid];
+                    entry.is_canon_law = !entry.is_canon_law;
+                    this.saveWorldInfo(wi.name, wi.entries);
+                },
+
+                async saveWorldInfo(name, data) {
+                    try {
+                        await axios.post('/api/world-info', { name, data });
+                        await this.fetchWorldInfo();
+                    } catch (e) { console.error(e); }
+                },
+
+                // Resolve the mode to use - handles "auto" by calling the classifier API
+                async resolveMode(userMessage) {
+                    // For single character, default to that character's focus mode (unless user chose narrator)
+                    if (this.activeCharacters.length === 1) {
+                        if (this.selectedMode === 'narrator') return 'narrator';
+                        if (this.selectedMode === 'auto') return 'focus:' + this.activeCharacters[0].data.name;
+                        return this.selectedMode;
+                    }
+                    
+                    // For 0 characters, always narrator
+                    if (this.activeCharacters.length === 0) {
+                        return 'narrator';
+                    }
+                    
+                    // For multiple characters with non-auto selection, use that
+                    if (this.selectedMode !== 'auto') {
+                        return this.selectedMode;
+                    }
+                    
+                    // Auto mode with multiple characters - call the classifier
+                    this.isClassifyingMode = true;
+                    try {
+                        const charNames = this.activeCharacters.map(c => c.data.name);
+                        const res = await axios.post('/api/classify-mode', {
+                            user_message: userMessage,
+                            character_names: charNames
+                        });
+                        
+                        if (res.data.success) {
+                            console.log(`Auto-classified mode: ${res.data.mode}`);
+                            return res.data.mode;
+                        }
+                    } catch (e) {
+                        console.error('Mode classification failed, defaulting to narrator', e);
+                    } finally {
+                        this.isClassifyingMode = false;
+                    }
+                    
+                    // Fallback to narrator mode
+                    return 'narrator';
+                },
+
+                // Determine speaker label for AI response based on mode
+                getSpeakerFromMode(resolvedMode) {
+                    if (resolvedMode.startsWith('focus:')) {
+                        return resolvedMode.split(':')[1];
+                    }
+                    return 'Narrator';
+                },
+
+                async sendMessage() {
+                    if (!this.input.trim() || this.isLoading) return;
+                    
+                    const userMsg = { role: 'user', content: this.input, id: Date.now() };
+                    this.messages.push(userMsg);
+                    const currentInput = this.input;
+                    this.input = '';
+                    this.isLoading = true;
+                    this.scrollToBottom();
+
+                    try {
+                        // Resolve the mode (may call auto-classifier)
+                        const mode = await this.resolveMode(currentInput);
+                        
+                        const res = await axios.post('/api/chat', { 
+                            messages: this.messages,
+                            summary: this.summary,
+                            characters: this.activeCharacters,
+                            world_info: this.activeWI,
+                            settings: this.settings,
+                            mode: mode
+                        });
+
+                        // Only replace messages if summarization/truncation occurred (summary changed)
+                        if (res.data._updated_state) {
+                            if (res.data._updated_state.summary !== this.summary) {
+                                // Summarization happened - use backend's truncated message list
+                                this.messages = res.data._updated_state.messages;
+                            }
+                            this.summary = res.data._updated_state.summary;
+                        }
+
+                        const aiMsg = { 
+                            role: 'assistant', 
+                            speaker: this.getSpeakerFromMode(mode),
+                            content: res.data.results[0].text.trim(), 
+                            id: Date.now() + 1 
+                        };
+                        this.messages.push(aiMsg);
+                    } catch (e) {
+                        console.error(e);
+                    } finally {
+                        this.isLoading = false;
+                        this.scrollToBottom();
+                        this.updateTokenCount();
+                    }
+                },
+
+                async generateImage() {
+                    this.isLoading = true;
+                    this.showImagePanel = false;
+                    try {
+                        const res = await axios.post('/api/generate-image', this.sdParams);
+                        // Push a new message for the image instead of attaching it to the last one
+                        const imageMsg = {
+                            role: 'assistant',
+                            speaker: 'Visual System',
+                            content: '',
+                            image: res.data.url,
+                            id: Date.now()
+                        };
+                        this.messages.push(imageMsg);
+                    } catch (e) {
+                        console.error(e);
+                    } finally {
+                        this.isLoading = false;
+                        this.scrollToBottom();
+                    }
+                },
+
+                openCardGen() {
+                    if (this.messages.length === 0) {
+                        alert("Start a conversation first to extract character details!");
+                        return;
+                    }
+                    this.showCardGen = true;
+                },
+
+                openWorldGen() {
+                    if (this.messages.length === 0) {
+                        alert("Start a conversation first to extract world lore!");
+                        return;
+                    }
+                    this.showWorldGen = true;
+                },
+
+                async generateField(fieldType) {
+                    if (!this.cardGen.char_name) {
+                        alert("Please enter a character name first.");
+                        return;
+                    }
+                    
+                    this.cardGen.loading[fieldType] = true;
+                    
+                    // Simple context extraction: last 20 messages
+                    const contextText = this.messages.slice(-20).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
+                    
+                    try {
+                        const res = await axios.post('/api/card-gen/generate-field', {
+                            char_name: this.cardGen.char_name,
+                            field_type: fieldType,
+                            context: contextText
+                        });
+                        
+                        if (res.data.success) {
+                            if (fieldType.startsWith('dialogue')) {
+                                if (!this.cardGen.fields.dialogue.includes('<START>')) this.cardGen.fields.dialogue = '';
+                                this.cardGen.fields.dialogue += (this.cardGen.fields.dialogue ? '\n' : '') + '<START>\n' + res.data.text;
+                            } else {
+                                this.cardGen.fields[fieldType] = res.data.text;
+                            }
+                        } else {
+                            alert(`Error generating ${fieldType}: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error(`Failed to gen ${fieldType}`, e);
+                        alert(`Connection error generating ${fieldType}. Is the backend running?`);
+                    } finally {
+                        this.cardGen.loading[fieldType] = false;
+                    }
+                },
+
+                async generateAllFields() {
+                    this.isGenLoading = true;
+                    const fields = ['personality', 'body', 'genre', 'tags', 'scenario', 'first_message', 'dialogue_likes', 'dialogue_story'];
+                    this.cardGen.fields.dialogue = ''; // Clear dialogue before fresh gen
+                    
+                    for (const f of fields) {
+                        await this.generateField(f);
+                    }
+                    this.isGenLoading = false;
+                },
+
+                async saveGeneratedCard() {
+                    // Create SillyTavern V2 format
+                    const character_note_parts = [];
+                    if (this.cardGen.fields.personality) character_note_parts.push(this.cardGen.fields.personality);
+                    if (this.cardGen.fields.body) character_note_parts.push(this.cardGen.fields.body);
+                    
+                    const metadata = [];
+                    if (this.cardGen.fields.genre) metadata.push(`Genre: ${this.cardGen.fields.genre}`);
+                    if (this.cardGen.fields.tags) metadata.push(`Tags: ${this.cardGen.fields.tags}`);
+                    if (this.cardGen.fields.scenario) metadata.push(`Scenario: ${this.cardGen.fields.scenario}`);
+                    
+                    if (metadata.length > 0) character_note_parts.push(`[${metadata.join('; ')}]`);
+                    const character_note = character_note_parts.join('\n');
+
+                    const newCard = {
+                        spec: "chara_card_v2",
+                        spec_version: "2.0",
+                        data: {
+                            name: this.cardGen.char_name,
+                            description: this.cardGen.fields.dialogue,
+                            personality: "",
+                            scenario: "",
+                            first_mes: this.cardGen.fields.first_message,
+                            mes_example: "",
+                            creator_notes: character_note,
+                            system_prompt: "",
+                            post_history_instructions: "",
+                            alternate_greetings: [],
+                            character_book: null,
+                            tags: this.cardGen.fields.tags ? this.cardGen.fields.tags.split(',').map(t => t.trim()) : [],
+                            creator: "",
+                            character_version: "",
+                            extensions: {
+                                depth_prompt: {
+                                    prompt: character_note,
+                                    depth: 4
+                                },
+                                danbooru_tag: '',
+                                label_description: ''
+                            }
+                        }
+                    };
+
+                    try {
+                        const res = await axios.post('/api/characters', newCard);
+                        if (res.data.success) {
+                            alert(`Character "${this.cardGen.char_name}" saved!`);
+                            this.showCardGen = false;
+                            await this.fetchCharacters();
+                        }
+                    } catch (e) {
+                        console.error("Save failed", e);
+                        alert("Failed to save character card.");
+                    }
+                },
+
+                async generateWorldSection(section) {
+                    if (!this.worldGen.world_name) return;
+                    // World info needs more context, take up to 50 messages
+                    const contextText = this.messages.slice(-50).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
+                    
+                    try {
+                        const res = await axios.post('/api/world-gen/generate', {
+                            world_name: this.worldGen.world_name,
+                            section: section,
+                            tone: this.worldGen.tone,
+                            context: contextText
+                        });
+                        
+                        if (res.data.success) {
+                            this.worldGen.fields[section] = res.data.text;
+                        }
+                    } catch (e) {
+                        console.error(`Failed to gen world lore: ${section}`, e);
+                    }
+                },
+
+                async generateAllWorldStuff() {
+                    this.isWorldLoading = true;
+                    const sections = ['history', 'locations', 'creatures', 'factions'];
+                    for (const s of sections) {
+                        await this.generateWorldSection(s);
+                    }
+                    this.isWorldLoading = false;
+                },
+
+                async saveWorldEvolution() {
+                    const allEntries = [
+                        this.worldGen.fields.history,
+                        this.worldGen.fields.locations,
+                        this.worldGen.fields.creatures,
+                        this.worldGen.fields.factions
+                    ].filter(t => t.trim()).join('\n');
+
+                    if (!allEntries) {
+                        alert("No lore entries generated to save!");
+                        return;
+                    }
+
+                    try {
+                        const res = await axios.post('/api/world-gen/save', {
+                            world_name: this.worldGen.world_name,
+                            plist_text: allEntries
+                        });
+                        
+                        if (res.data.success) {
+                            alert(`World Lore "${this.worldGen.world_name}" updated successfully!`);
+                            this.showWorldGen = false;
+                            await this.fetchWorldInfo();
+                        }
+                    } catch (e) {
+                        console.error("World save failed", e);
+                        alert("Failed to save world lore.");
+                    }
+                },
+
+                async generateCapsule() {
+                    if (!this.editingChar || !this.editingChar.data.name) {
+                        alert("Please enter a character name first.");
+                        return;
+                    }
+                    
+                    this.isGeneratingCapsule = true;
+                    
+                    try {
+                        const res = await axios.post('/api/card-gen/generate-capsule', {
+                            char_name: this.editingChar.data.name,
+                            description: this.editingChar.data.description || '',
+                            depth_prompt: this.editingChar.data.extensions?.depth_prompt?.prompt || ''
+                        });
+                        
+                        if (res.data.success) {
+                            // Ensure extensions object exists
+                            if (!this.editingChar.data.extensions) {
+                                this.editingChar.data.extensions = {};
+                            }
+                            this.editingChar.data.extensions.multi_char_summary = res.data.text;
+                        } else {
+                            alert(`Error generating capsule: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error("Capsule generation failed", e);
+                        alert("Failed to generate capsule. Is the backend running?");
+                    } finally {
+                        this.isGeneratingCapsule = false;
+                    }
+                },
+
+                scrollToBottom() {
+                    setTimeout(() => {
+                        const container = document.getElementById('chat-container');
+                        if (container) container.scrollTop = container.scrollHeight;
+                    }, 50);
+                }
+            }
+        }
+    </script>
+</body>
+</html>
