@@ -8,6 +8,7 @@ import time
 import base64
 import httpx
 import re
+import random
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
@@ -113,6 +114,7 @@ class CardGenRequest(BaseModel):
     char_name: str
     field_type: str
     context: str
+    source_mode: Optional[str] = "chat" # "chat" or "manual"
 
 class CapsuleGenRequest(BaseModel):
     char_name: str
@@ -124,6 +126,7 @@ class WorldGenRequest(BaseModel):
     section: str # history, locations, creatures, factions
     tone: str # sfw, spicy, veryspicy
     context: str
+    source_mode: Optional[str] = "chat" # "chat" or "manual"
 
 class WorldSaveRequest(BaseModel):
     world_name: str
@@ -142,6 +145,63 @@ async def get_token_count(text: str):
         except:
             # Fallback to rough estimate if API fails
             return len(text) // 4
+
+# World info optimization: Simple caching to avoid reprocessing
+WORLD_INFO_CACHE = {}
+
+def preprocess_world_info(world_info):
+    """Pre-process world info for case-insensitive matching"""
+    if not world_info or "entries" not in world_info:
+        return world_info
+    
+    for entry in world_info["entries"].values():
+        if "key" in entry:
+            entry["key"] = [k.lower() for k in entry["key"]]
+    return world_info
+
+def get_cached_world_entries(world_info, recent_text, max_entries=10):
+    """Get triggered world info entries with caching and optimizations"""
+    if not world_info or "entries" not in world_info:
+        return [], []
+    
+    # Preprocess world info for case-insensitive matching (only once per world)
+    world_info = preprocess_world_info(world_info)
+    
+    # Create cache key based on world info, recent text, and max_entries
+    cache_key = f"{str(world_info.get('entries', {}))}_{recent_text.lower()}_{max_entries}"
+    
+    if cache_key in WORLD_INFO_CACHE:
+        return WORLD_INFO_CACHE[cache_key]
+    
+    entries = world_info.get("entries", {})
+    triggered_lore = []
+    canon_entries = []
+    
+    # Process entries with optimizations
+    for uid, entry in entries.items():
+        # Always include canon law entries
+        if entry.get("is_canon_law"):
+            canon_entries.append(entry.get("content", ""))
+            continue
+        
+        # Skip if we already have enough regular entries (only if max_entries > 0)
+        if max_entries > 0 and len(triggered_lore) >= max_entries:
+            break
+            
+        keys = entry.get("key", [])
+        if any(k in recent_text for k in keys):  # Already lowercase from preprocessing
+            # Apply probability weighting if enabled
+            use_probability = entry.get("useProbability", False)
+            if use_probability:
+                probability = entry.get("probability", 100)
+                if random.random() * 100 <= probability:
+                    triggered_lore.append(entry.get("content", ""))
+            else:
+                triggered_lore.append(entry.get("content", ""))
+    
+    result = (triggered_lore, canon_entries)
+    WORLD_INFO_CACHE[cache_key] = result
+    return result
 
 # Prompt Construction Engine
 def construct_prompt(request: PromptRequest):
@@ -203,19 +263,8 @@ def construct_prompt(request: PromptRequest):
     canon_law_entries = []
     if request.world_info:
         recent_text = " ".join([m.content for m in request.messages[-5:]]).lower()
-        entries = request.world_info.get("entries", {})
-        triggered_lore = []
-        
-        if isinstance(entries, dict):
-            for uid, entry in entries.items():
-                # Separate Canon Law (will be pinned later)
-                if entry.get("is_canon_law"):
-                    canon_law_entries.append(entry.get("content", ""))
-                    continue
-
-                keys = entry.get("key", [])
-                if any(k.lower() in recent_text for k in keys):
-                    triggered_lore.append(entry.get("content", ""))
+        max_world_entries = settings.get("max_world_info_entries", 10)
+        triggered_lore, canon_law_entries = get_cached_world_entries(request.world_info, recent_text, max_world_entries)
         
         if triggered_lore:
             full_prompt += "### World Knowledge:\n" + "\n".join(triggered_lore) + "\n"
@@ -340,26 +389,29 @@ async def generate_card_field(req: CardGenRequest):
     field_type = req.field_type
     user_input = req.context
     
+    # Customize instructions based on source mode
+    source_desc = "provided chat context" if req.source_mode != "manual" else "provided text"
+    
     try:
         if field_type == 'personality':
-            system = "You are an expert at analyzing characters from chat and writing roleplay personality traits."
-            prompt = f"""Based on the provided chat context, identify {char_name}'s personality traits.
+            system = f"You are an expert at analyzing characters and writing roleplay personality traits."
+            prompt = f"""Based on the {source_desc}, identify {char_name}'s personality traits.
 Convert them into a PList personality array format.
 Use this exact format: [{char_name}'s Personality= "trait1", "trait2", "trait3", ...]
 
-Chat Context:
+Source Text:
 {user_input}
 
 Only output the personality array line, nothing else."""
             result = await call_llm_helper(system, prompt, 300)
             
         elif field_type == 'body':
-            system = "You are an expert at analyzing characters from chat and writing physical descriptions."
-            prompt = f"""Based on the provided chat context, identify {char_name}'s physical features.
+            system = f"You are an expert at analyzing characters and writing physical descriptions."
+            prompt = f"""Based on the {source_desc}, identify {char_name}'s physical features.
 Convert them into a PList body array format.
 Use this exact format: [{char_name}'s body= "feature1", "feature2", "feature3", ...]
 
-Chat Context:
+Source Text:
 {user_input}
 
 Only output the body array line, nothing else."""
@@ -367,9 +419,9 @@ Only output the body array line, nothing else."""
             
         elif field_type == 'dialogue_likes':
             system = "You are an expert at writing roleplay dialogue in markdown format with {{char}} and {{user}} placeholders."
-            prompt = f"""Based on {char_name}'s behavior in the chat context, write a dialogue exchange where {{user}} asks "{char_name}, what are your likes and dislikes?", and {{char}} responds in character.
+            prompt = f"""Based on {char_name}'s behavior in the {source_desc}, write a dialogue exchange where {{user}} asks "{char_name}, what are your likes and dislikes?", and {{char}} responds in character.
 
-Chat Context:
+Source Text:
 {user_input}
 
 Use this exact format:
@@ -381,9 +433,9 @@ Make the response 3-5 sentences, vivid and in-character. Only output the dialogu
             
         elif field_type == 'dialogue_story':
             system = "You are an expert at writing roleplay dialogue in markdown format with {{char}} and {{user}} placeholders."
-            prompt = f"""Based on {char_name}'s behavior in the chat context, write a dialogue exchange where {{user}} asks "{char_name}, tell me about your life story", and {{char}} responds with a brief life story in character.
+            prompt = f"""Based on {char_name}'s behavior in the {source_desc}, write a dialogue exchange where {{user}} asks "{char_name}, tell me about your life story", and {{char}} responds with a brief life story in character.
 
-Chat Context:
+Source Text:
 {user_input}
 
 Use this exact format:
@@ -580,7 +632,12 @@ async def generate_world_entries(req: WorldGenRequest):
     try:
         template = WORLD_PROMPTS.get(req.section, {}).get(req.tone, "")
         if not template: return {"success": False, "error": "Invalid section or tone"}
-        prompt = template.format(worldName=req.world_name, input=req.context)
+        
+        # If in manual mode, the instruction still says "Chat Context", 
+        # but the content is swapped. Let's make it more generic in the template swap.
+        source_text = req.context
+        
+        prompt = template.format(worldName=req.world_name, input=source_text)
         result = await call_llm_helper("You are a world-building expert.", prompt, 600)
         # Clean up output to only include bracketed entries
         lines = [line.strip() for line in result.split('\n') if line.strip().startswith('[')]
@@ -929,7 +986,20 @@ async def list_chats():
     chat_dir = os.path.join(DATA_DIR, "chats")
     for f in os.listdir(chat_dir):
         if f.endswith(".json"):
-            chats.append(f.replace(".json", ""))
+            file_path = os.path.join(chat_dir, f)
+            try:
+                with open(file_path, "r", encoding="utf-8") as chat_file:
+                    chat_data = json.load(chat_file)
+                    metadata = chat_data.get("metadata", {})
+                    chats.append({
+                        "id": f.replace(".json", ""),
+                        "branch_name": metadata.get("branch_name")
+                    })
+            except:
+                chats.append({
+                    "id": f.replace(".json", ""),
+                    "branch_name": None
+                })
     return chats
 
 @app.get("/api/chats/{name}")
@@ -957,6 +1027,177 @@ async def delete_chat(name: str):
         os.remove(file_path)
         return {"success": True}
     return {"error": "File not found"}
+
+# Forking functionality
+class ForkRequest(BaseModel):
+    origin_chat_name: str
+    fork_from_message_id: int
+    branch_name: Optional[str] = None
+
+@app.post("/api/chats/fork")
+async def fork_chat(request: ForkRequest):
+    """Create a new chat branch from a specific message in an existing chat."""
+    origin_chat_name = request.origin_chat_name
+    fork_from_message_id = request.fork_from_message_id
+    branch_name = request.branch_name
+    
+    # Load origin chat
+    origin_file_path = os.path.join(DATA_DIR, "chats", f"{origin_chat_name}.json")
+    if not os.path.exists(origin_file_path):
+        return {"success": False, "error": "Origin chat not found"}
+    
+    with open(origin_file_path, "r", encoding="utf-8") as f:
+        origin_chat = json.load(f)
+    
+    # Find the fork point
+    messages = origin_chat.get("messages", [])
+    fork_index = None
+    
+    for i, msg in enumerate(messages):
+        if msg.get("id") == fork_from_message_id:
+            fork_index = i
+            break
+    
+    if fork_index is None:
+        return {"success": False, "error": "Message not found in origin chat"}
+    
+    # Generate branch name if not provided
+    if not branch_name:
+        # Get a short preview of the message content
+        preview = messages[fork_index].get("content", "")
+        if len(preview) > 30:
+            preview = preview[:27] + "..."
+        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
+        branch_name = f"Fork from {timestamp} - '{preview}'"
+    
+    # Create new branch chat data
+    branch_messages = messages[:fork_index + 1]  # Include the fork point message
+    
+    branch_data = {
+        "messages": branch_messages,
+        "summary": origin_chat.get("summary", ""),
+        "activeCharacters": origin_chat.get("activeCharacters", []),
+        "activeWI": origin_chat.get("activeWI"),
+        "settings": origin_chat.get("settings", {}),
+        "metadata": {
+            "origin_chat_id": origin_chat_name,
+            "origin_message_id": fork_from_message_id,
+            "branch_name": branch_name,
+            "created_at": time.time()
+        }
+    }
+    
+    # Generate unique branch filename
+    base_name = f"{origin_chat_name}_fork_{int(time.time())}"
+    branch_file_path = os.path.join(DATA_DIR, "chats", f"{base_name}.json")
+    
+    # Save the branch
+    with open(branch_file_path, "w", encoding="utf-8") as f:
+        json.dump(branch_data, f, indent=2, ensure_ascii=False)
+    
+    return {
+        "success": True, 
+        "name": base_name,
+        "branch_name": branch_name,
+        "origin_chat_name": origin_chat_name,
+        "fork_from_message_id": fork_from_message_id
+    }
+
+@app.get("/api/chats/{name}/branches")
+async def get_chat_branches(name: str):
+    """Get all branches that originated from this chat."""
+    branches = []
+    chat_dir = os.path.join(DATA_DIR, "chats")
+    
+    for f in os.listdir(chat_dir):
+        if f.endswith(".json"):
+            file_path = os.path.join(chat_dir, f)
+            try:
+                with open(file_path, "r", encoding="utf-8") as chat_file:
+                    chat_data = json.load(chat_file)
+                    metadata = chat_data.get("metadata", {})
+                    
+                    # Check if this chat is a branch of the requested chat
+                    if metadata.get("origin_chat_id") == name:
+                        branches.append({
+                            "name": f.replace(".json", ""),
+                            "branch_name": metadata.get("branch_name", f.replace(".json", "")),
+                            "created_at": metadata.get("created_at", 0),
+                            "origin_message_id": metadata.get("origin_message_id")
+                        })
+            except Exception as e:
+                print(f"Failed to load chat {f}: {e}")
+                continue
+    
+    # Sort branches by creation time
+    branches.sort(key=lambda x: x["created_at"], reverse=True)
+    return branches
+
+@app.get("/api/chats/{name}/origin")
+async def get_chat_origin(name: str):
+    """Get origin information for a branch chat."""
+    file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
+    if not os.path.exists(file_path):
+        return {"success": False, "error": "Chat not found"}
+    
+    with open(file_path, "r", encoding="utf-8") as f:
+        chat_data = json.load(f)
+    
+    metadata = chat_data.get("metadata", {})
+    origin_chat_id = metadata.get("origin_chat_id")
+    origin_message_id = metadata.get("origin_message_id")
+    branch_name = metadata.get("branch_name")
+    
+    if not origin_chat_id:
+        return {"success": True, "is_branch": False}
+    
+    # Try to load origin chat to get more info
+    origin_file_path = os.path.join(DATA_DIR, "chats", f"{origin_chat_id}.json")
+    origin_info = None
+    
+    if os.path.exists(origin_file_path):
+        try:
+            with open(origin_file_path, "r", encoding="utf-8") as origin_file:
+                origin_data = json.load(origin_file)
+                origin_info = {
+                    "name": origin_chat_id,
+                    "branch_name": branch_name,
+                    "created_at": metadata.get("created_at"),
+                    "origin_message_id": origin_message_id
+                }
+        except:
+            pass
+    
+    return {
+        "success": True, 
+        "is_branch": True,
+        "origin": origin_info
+    }
+
+@app.put("/api/chats/{name}/rename-branch")
+async def rename_branch(name: str, request: dict):
+    """Rename a branch chat."""
+    branch_name = request.get("branch_name")
+    if not branch_name:
+        return {"success": False, "error": "Branch name is required"}
+    
+    file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
+    if not os.path.exists(file_path):
+        return {"success": False, "error": "Chat not found"}
+    
+    with open(file_path, "r", encoding="utf-8") as f:
+        chat_data = json.load(f)
+    
+    # Ensure metadata exists
+    if "metadata" not in chat_data:
+        chat_data["metadata"] = {}
+    
+    chat_data["metadata"]["branch_name"] = branch_name
+    
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(chat_data, f, indent=2, ensure_ascii=False)
+    
+    return {"success": True, "branch_name": branch_name}
 
 if __name__ == "__main__":
     import uvicorn

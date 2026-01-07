@@ -35,16 +35,43 @@
                             <button @click="saveNewChat()" class="flex-1 bg-green-600 hover:bg-green-500 py-2 rounded-lg text-xs font-bold shadow-lg shadow-green-900/20 transition-all uppercase tracking-widest">Save Session</button>
                             <button @click="fetchChats()" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-slate-300" title="Refresh List"><i class="fa-solid fa-rotate"></i></button>
                         </div>
+                        
+                        <!-- Main Chats -->
                         <div class="space-y-2">
-                            <template x-for="chatName in savedChats" :key="chatName">
-                                <div class="group flex items-center gap-2 p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent transition-all">
-                                    <div @click="loadChat(chatName)" class="flex-1 min-w-0">
-                                        <div class="font-bold text-sm truncate" x-text="chatName"></div>
+                            <div class="text-[9px] font-black uppercase tracking-widest text-slate-500 border-b border-slate-700 pb-1">Main Timelines</div>
+                            <template x-for="chat in savedChats" :key="chat.id">
+                                <div class="group flex items-center gap-2 p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent transition-all" :class="isBranch(chat.id) ? 'opacity-75' : ''">
+                                    <div @click="loadChat(chat.id)" class="flex-1 min-w-0">
+                                        <div class="font-bold text-sm truncate" x-text="chat.branch_name || getDisplayName(chat.id)"></div>
+                                        <template x-if="isBranch(chat.id)">
+                                            <div class="text-[9px] text-slate-500 truncate" x-text="'Branch of ' + getBranchOrigin(chat.id)"></div>
+                                        </template>
                                     </div>
-                                    <button @click.stop="deleteChat(chatName)" class="hidden group-hover:flex w-6 h-6 rounded-lg bg-slate-800 hover:bg-red-600 text-white items-center justify-center transition-all"><i class="fa-solid fa-trash text-[10px]"></i></button>
+                                    <div class="flex gap-1">
+                                        <button @click="deleteChat(chat.id)" class="hidden group-hover:flex w-6 h-6 rounded-lg bg-slate-800 hover:bg-red-600 text-white items-center justify-center transition-all"><i class="fa-solid fa-trash text-[10px]"></i></button>
+                                    </div>
                                 </div>
                             </template>
                         </div>
+                        
+                        <!-- Branches Section -->
+                        <template x-if="currentChatBranches.length > 0">
+                            <div class="space-y-2">
+                                <div class="text-[9px] font-black uppercase tracking-widest text-slate-500 border-b border-slate-700 pb-1">Active Branches</div>
+                                <template x-for="branch in currentChatBranches" :key="branch.name">
+                                    <div class="group flex items-center gap-2 p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent transition-all">
+                                        <div @click="loadChat(branch.name)" class="flex-1 min-w-0">
+                                            <div class="font-bold text-sm truncate" x-text="branch.branch_name || branch.name"></div>
+                                            <div class="text-[9px] text-slate-500 truncate" x-text="'Created ' + formatTime(branch.created_at)"></div>
+                                        </div>
+                                        <div class="flex gap-1">
+                                            <button @click="renameBranchDialog(branch)" class="hidden group-hover:flex w-6 h-6 rounded-lg bg-slate-800 hover:bg-yellow-600 text-white items-center justify-center transition-all" title="Rename Branch"><i class="fa-solid fa-pen text-[10px]"></i></button>
+                                            <button @click="deleteChat(branch.name)" class="hidden group-hover:flex w-6 h-6 rounded-lg bg-slate-800 hover:bg-red-600 text-white items-center justify-center transition-all"><i class="fa-solid fa-trash text-[10px]"></i></button>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
                     </div>
                 </template>
 
@@ -109,9 +136,8 @@
                 <template x-if="showSidebar === 'world-info'">
                     <div class="space-y-4">
                         <div class="flex gap-2">
-                            <input id="wi-name" class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500" placeholder="New World Name">
-                            <button @click="saveWorldInfo(document.getElementById('wi-name').value, [])" class="bg-slate-700 hover:bg-slate-600 p-1 px-3 rounded-lg"><i class="fa-solid fa-plus text-xs"></i></button>
-                            <button @click="fetchWorldInfo()" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-slate-300" title="Refresh World Info"><i class="fa-solid fa-rotate"></i></button>
+                            <div class="flex-1"></div>
+                            <button @click="fetchWorldInfo()" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-300" title="Refresh World Info"><i class="fa-solid fa-rotate"></i></button>
                         </div>
                         <div class="space-y-2">
                             <template x-for="wi in worldInfos">
@@ -162,6 +188,20 @@
                                 <div class="space-y-1">
                                     <label class="text-[10px] text-slate-450 uppercase font-bold">Reinforce Every X Turns</label>
                                     <input type="number" x-model.number="settings.reinforce_freq" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                </div>
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Enable World Info</label>
+                                    <div class="flex items-center gap-3">
+                                        <input type="checkbox" x-model="settings.world_info_enabled" class="w-4 h-4 text-blue-600 bg-slate-900 border-slate-700 rounded focus:ring-blue-500">
+                                        <span class="text-[9px] text-slate-500">Include world lore in prompts</span>
+                                    </div>
+                                </div>
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Max World Info Entries</label>
+                                    <div class="flex items-center gap-3">
+                                        <input type="number" x-model.number="settings.max_world_info_entries" class="w-24 bg-slate-900 border border-slate-700 rounded-lg p-1 text-xs outline-none focus:ring-1 focus:ring-blue-500" placeholder="10">
+                                        <span class="text-[9px] text-slate-500">0 = unlimited</span>
+                                    </div>
                                 </div>
                                 <div class="grid grid-cols-2 gap-3">
                                     <div class="space-y-1">
@@ -278,6 +318,7 @@
                                         <template x-if="msg.role === 'user'">
                                             <button @click="regenerate(index)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-green-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50" title="Regenerate from here"><i class="fa-solid fa-rotate text-[8px]"></i></button>
                                         </template>
+                                        <button @click="openForkDialog(msg.id)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50" title="Fork from here"><i class="fa-solid fa-code-branch text-[8px]"></i></button>
                                         <button @click="editingMessageId = msg.id; editBuffer = msg.content" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50"><i class="fa-solid fa-pen text-[8px]"></i></button>
                                         <button @click="deleteMessage(index)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-red-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50"><i class="fa-solid fa-trash text-[8px]"></i></button>
                                     </div>
@@ -410,6 +451,95 @@
         </div>
     </div>
 
+    <!-- Fork Dialog Modal -->
+    <div x-show="showForkDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak x-transition>
+        <div class="bg-slate-900 border border-slate-700 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden">
+            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
+                <h2 class="text-xs font-black uppercase tracking-widest text-blue-400">Create Branch</h2>
+                <button @click="showForkDialog = false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Branch Name</label>
+                    <input x-model="forkBranchName" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500/30" placeholder="e.g. 'Accepted the deal' or 'Refused the deal'">
+                </div>
+                
+                <div class="text-[9px] text-slate-500 leading-relaxed">
+                    <p class="font-bold mb-1">Forking creates a new independent chat session</p>
+                    <p>This branch will start from the selected message and maintain all current context (characters, world info, settings).</p>
+                </div>
+            </div>
+
+            <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
+                <button @click="createFork()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg shadow-blue-900/20 transition-all" :disabled="!forkBranchName || isForking">
+                    <span x-show="!isForking">Create Branch</span>
+                    <span x-show="isForking">Creating...</span>
+                </button>
+                <button @click="showForkDialog = false" class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Branch Management Dialog -->
+    <div x-show="showBranchDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak x-transition>
+        <div class="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
+                <h2 class="text-xs font-black uppercase tracking-widest text-blue-400">Branch Management</h2>
+                <button @click="showBranchDialog = false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="flex-1 overflow-y-auto p-6 space-y-4">
+                <div class="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Active Branches</div>
+                <template x-if="currentChatBranches.length === 0">
+                    <div class="text-[10px] text-slate-500 text-center py-8">No branches found for this chat.</div>
+                </template>
+                <template x-for="branch in currentChatBranches" :key="branch.name">
+                    <div class="flex items-center justify-between p-3 bg-slate-800 rounded-xl border border-slate-700/50">
+                        <div class="flex-1">
+                            <div class="font-bold text-sm" x-text="branch.branch_name || branch.name"></div>
+                            <div class="text-[9px] text-slate-500" x-text="'Created ' + formatTime(branch.created_at)"></div>
+                        </div>
+                        <div class="flex gap-2">
+                            <button @click="loadChat(branch.name)" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Switch</button>
+                            <button @click="renameBranchDialog(branch)" class="px-3 py-1 bg-yellow-600 hover:bg-yellow-500 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Rename</button>
+                            <button @click="deleteChat(branch.name)" class="px-3 py-1 bg-red-600 hover:bg-red-500 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Delete</button>
+                        </div>
+                    </div>
+                </template>
+            </div>
+
+            <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
+                <button @click="showBranchDialog = false" class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rename Branch Dialog -->
+    <div x-show="showRenameDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak x-transition>
+        <div class="bg-slate-900 border border-slate-700 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden">
+            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
+                <h2 class="text-xs font-black uppercase tracking-widest text-blue-400">Rename Branch</h2>
+                <button @click="showRenameDialog = false" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">New Branch Name</label>
+                    <input x-model="renameBranchName" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500/30" placeholder="Enter new branch name">
+                </div>
+            </div>
+
+            <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
+                <button @click="renameBranch()" class="flex-1 bg-yellow-600 hover:bg-yellow-500 text-white py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg shadow-yellow-900/20 transition-all" :disabled="!renameBranchName || isRenaming">
+                    <span x-show="!isRenaming">Rename</span>
+                    <span x-show="isRenaming">Renaming...</span>
+                </button>
+                <button @click="showRenameDialog = false" class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Character Card Generation Modal -->
     <div x-show="showCardGen" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak x-transition>
         <div class="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -419,6 +549,28 @@
             </div>
             
             <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                <!-- Source Mode Selector -->
+                <div class="flex gap-4 p-4 bg-slate-950/30 rounded-2xl border border-slate-700/50">
+                    <button @click="cardGen.source_mode = 'chat'" 
+                            class="flex-1 py-2 px-4 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border"
+                            :class="cardGen.source_mode === 'chat' ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-900/20' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'">
+                        <i class="fa-solid fa-comments mr-2"></i>Current Chat
+                    </button>
+                    <button @click="cardGen.source_mode = 'manual'" 
+                            class="flex-1 py-2 px-4 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border"
+                            :class="cardGen.source_mode === 'manual' ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-900/20' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'">
+                        <i class="fa-solid fa-file-lines mr-2"></i>Manual Input
+                    </button>
+                </div>
+
+                <!-- Manual Input Area -->
+                <div x-show="cardGen.source_mode === 'manual'" x-transition class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Manual Verbiage / Description</label>
+                    <textarea x-model="cardGen.manual_text" 
+                              class="w-full bg-slate-950 border border-slate-700 rounded-xl p-4 text-xs h-32 outline-none focus:ring-2 focus:ring-blue-500/30 font-medium leading-relaxed"
+                              placeholder="Paste any plain-text description, story snippets, or details about the character here. The LLM will use this as the source for generation."></textarea>
+                </div>
+
                 <div class="space-y-2">
                     <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Target Character Name</label>
                     <div class="flex gap-2">
@@ -435,8 +587,8 @@
                     <div class="space-y-1.5">
                         <div class="flex justify-between items-center">
                             <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Personality (PList)</label>
-                            <button @click="generateField('personality')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['personality']">
-                                <i class="fa-solid mr-1" :class="cardGen.loading['personality'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                            <button @click="generateField('personality')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading && cardGen.loading['personality']">
+                                <i class="fa-solid mr-1" :class="cardGen.loading && cardGen.loading['personality'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
                             </button>
                         </div>
                         <textarea x-model="cardGen.fields.personality" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500/50 resize-none font-mono"></textarea>
@@ -446,8 +598,8 @@
                     <div class="space-y-1.5">
                         <div class="flex justify-between items-center">
                             <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Physical Body (PList)</label>
-                            <button @click="generateField('body')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['body']">
-                                <i class="fa-solid mr-1" :class="cardGen.loading['body'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                            <button @click="generateField('body')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading && cardGen.loading['body']">
+                                <i class="fa-solid mr-1" :class="cardGen.loading && cardGen.loading['body'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
                             </button>
                         </div>
                         <textarea x-model="cardGen.fields.body" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500/50 resize-none font-mono"></textarea>
@@ -457,8 +609,8 @@
                     <div class="space-y-1.5">
                         <div class="flex justify-between items-center">
                             <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Genre & Tags</label>
-                            <button @click="generateField('genre'); generateField('tags')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['genre'] || cardGen.loading['tags']">
-                                <i class="fa-solid mr-1" :class="cardGen.loading['genre'] || cardGen.loading['tags'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                            <button @click="generateField('genre'); generateField('tags')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading && (cardGen.loading['genre'] || cardGen.loading['tags'])">
+                                <i class="fa-solid mr-1" :class="cardGen.loading && (cardGen.loading['genre'] || cardGen.loading['tags']) ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
                             </button>
                         </div>
                         <div class="flex gap-2">
@@ -471,8 +623,8 @@
                     <div class="space-y-1.5">
                         <div class="flex justify-between items-center">
                             <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Scenario</label>
-                            <button @click="generateField('scenario')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['scenario']">
-                                <i class="fa-solid mr-1" :class="cardGen.loading['scenario'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                            <button @click="generateField('scenario')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading && cardGen.loading['scenario']">
+                                <i class="fa-solid mr-1" :class="cardGen.loading && cardGen.loading['scenario'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
                             </button>
                         </div>
                         <input x-model="cardGen.fields.scenario" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-blue-500/50" placeholder="One sentence situation">
@@ -483,8 +635,8 @@
                 <div class="space-y-1.5">
                     <div class="flex justify-between items-center">
                         <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Dialogue Examples (Likes & Story)</label>
-                        <button @click="generateField('dialogue_likes'); generateField('dialogue_story')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['dialogue_likes'] || cardGen.loading['dialogue_story']">
-                            <i class="fa-solid mr-1" :class="cardGen.loading['dialogue_likes'] || cardGen.loading['dialogue_story'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                        <button @click="generateField('dialogue_likes'); generateField('dialogue_story')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading && (cardGen.loading['dialogue_likes'] || cardGen.loading['dialogue_story'])">
+                            <i class="fa-solid mr-1" :class="cardGen.loading && (cardGen.loading['dialogue_likes'] || cardGen.loading['dialogue_story']) ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
                         </button>
                     </div>
                     <textarea x-model="cardGen.fields.dialogue" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-32 outline-none focus:ring-1 focus:ring-blue-500/50 font-medium"></textarea>
@@ -494,8 +646,8 @@
                 <div class="space-y-1.5">
                     <div class="flex justify-between items-center">
                         <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">First Message</label>
-                        <button @click="generateField('first_message')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading['first_message']">
-                            <i class="fa-solid mr-1" :class="cardGen.loading['first_message'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                        <button @click="generateField('first_message')" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase" :disabled="cardGen.loading && cardGen.loading['first_message']">
+                            <i class="fa-solid mr-1" :class="cardGen.loading && cardGen.loading['first_message'] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
                         </button>
                     </div>
                     <textarea x-model="cardGen.fields.first_message" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500/50 font-medium"></textarea>
@@ -525,6 +677,28 @@
             </div>
             
             <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                <!-- Source Mode Selector -->
+                <div class="flex gap-4 p-4 bg-slate-950/30 rounded-2xl border border-slate-700/50">
+                    <button @click="worldGen.source_mode = 'chat'" 
+                            class="flex-1 py-2 px-4 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border"
+                            :class="worldGen.source_mode === 'chat' ? 'bg-orange-600 border-orange-500 text-white shadow-lg shadow-orange-900/20' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'">
+                        <i class="fa-solid fa-comments mr-2"></i>Current Chat
+                    </button>
+                    <button @click="worldGen.source_mode = 'manual'" 
+                            class="flex-1 py-2 px-4 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border"
+                            :class="worldGen.source_mode === 'manual' ? 'bg-orange-600 border-orange-500 text-white shadow-lg shadow-orange-900/20' : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'">
+                        <i class="fa-solid fa-file-lines mr-2"></i>Manual Input
+                    </button>
+                </div>
+
+                <!-- Manual Input Area -->
+                <div x-show="worldGen.source_mode === 'manual'" x-transition class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Manual Lore / Background Verbiage</label>
+                    <textarea x-model="worldGen.manual_text" 
+                              class="w-full bg-slate-950 border border-slate-700 rounded-xl p-4 text-xs h-32 outline-none focus:ring-2 focus:ring-orange-500/30 font-medium leading-relaxed"
+                              placeholder="Paste plain-text lore, history, or world details here. The LLM will extract PList entries from this text."></textarea>
+                </div>
+
                 <div class="space-y-2">
                     <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">World / Location Name</label>
                     <div class="flex gap-2">
@@ -541,7 +715,8 @@
                         <div class="space-y-2">
                             <div class="flex justify-between items-center">
                                 <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest" x-text="section"></label>
-                                <button @click="generateWorldSection(section)" class="text-[8px] text-orange-400 hover:text-orange-300 font-bold uppercase"><i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Extract</button>
+                                <button @click="generateWorldSection(section)" class="text-[8px] text-orange-400 hover:text-orange-300 font-bold uppercase" :disabled="worldGen.loading && worldGen.loading[section]">
+                                    <i class="fa-solid mr-1" :class="worldGen.loading && worldGen.loading[section] ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Extract</button>
                             </div>
                             <textarea x-model="worldGen.fields[section]" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-[10px] h-32 outline-none focus:ring-1 focus:ring-orange-500/50 font-mono" :placeholder="'[Lore Entry: type(...), details(...)]'"></textarea>
                         </div>
@@ -603,6 +778,8 @@
                 isGenLoading: false,
                 cardGen: {
                     char_name: '',
+                    source_mode: 'chat', // 'chat' or 'manual'
+                    manual_text: '',
                     loading: {},
                     fields: {
                         personality: '',
@@ -618,6 +795,8 @@
                 isWorldLoading: false,
                 worldGen: {
                     world_name: '',
+                    source_mode: 'chat', // 'chat' or 'manual'
+                    manual_text: '',
                     tone: 'sfw',
                     fields: {
                         history: '',
@@ -739,6 +918,11 @@
                         this.activeCharacters = d.activeCharacters || [];
                         this.activeWI = d.activeWI || null;
                         this.settings = { ...this.settings, ...(d.settings || {}) };
+                        this.currentChatName = name;
+                        // Ensure dialogs are closed when loading a chat
+                        this.showForkDialog = false;
+                        this.showBranchDialog = false;
+                        this.showRenameDialog = false;
                         this.showSidebar = 'none';
                         this.scrollToBottom();
                         this.updateTokenCount();
@@ -825,7 +1009,7 @@
                             messages: this.messages,
                             summary: this.summary,
                             characters: this.activeCharacters,
-                            world_info: this.activeWI,
+                            world_info: this.settings.world_info_enabled ? this.activeWI : null,
                             settings: this.settings,
                             mode: mode
                         });
@@ -973,7 +1157,7 @@
                             messages: this.messages,
                             summary: this.summary,
                             characters: this.activeCharacters,
-                            world_info: this.activeWI,
+                            world_info: this.settings.world_info_enabled ? this.activeWI : null,
                             settings: this.settings,
                             mode: mode
                         });
@@ -1026,37 +1210,48 @@
                 },
 
                 openCardGen() {
-                    if (this.messages.length === 0) {
-                        alert("Start a conversation first to extract character details!");
-                        return;
-                    }
                     this.showCardGen = true;
                 },
 
                 openWorldGen() {
-                    if (this.messages.length === 0) {
-                        alert("Start a conversation first to extract world lore!");
-                        return;
-                    }
                     this.showWorldGen = true;
                 },
 
                 async generateField(fieldType) {
+                    // Force Reactivity
+                    if (!this.cardGen.loading) this.cardGen.loading = {};
+                    
                     if (!this.cardGen.char_name) {
                         alert("Please enter a character name first.");
                         return;
                     }
                     
+                    if (this.cardGen.source_mode === 'manual' && !this.cardGen.manual_text.trim()) {
+                        alert("Please enter some manual text to analyze.");
+                        return;
+                    }
+
+                    if (this.cardGen.source_mode === 'chat' && this.messages.length === 0) {
+                        alert("Start a conversation first to extract details, or switch to Manual mode!");
+                        return;
+                    }
+                    
                     this.cardGen.loading[fieldType] = true;
                     
-                    // Simple context extraction: last 20 messages
-                    const contextText = this.messages.slice(-20).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
+                    let contextText = "";
+                    if (this.cardGen.source_mode === 'manual') {
+                        contextText = this.cardGen.manual_text;
+                    } else {
+                        // Simple context extraction: last 20 messages
+                        contextText = this.messages.slice(-20).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
+                    }
                     
                     try {
                         const res = await axios.post('/api/card-gen/generate-field', {
                             char_name: this.cardGen.char_name,
                             field_type: fieldType,
-                            context: contextText
+                            context: contextText,
+                            source_mode: this.cardGen.source_mode
                         });
                         
                         if (res.data.success) {
@@ -1078,8 +1273,18 @@
                 },
 
                 async generateAllFields() {
-                    this.isGenLoading = true;
                     const fields = ['personality', 'body', 'genre', 'tags', 'scenario', 'first_message', 'dialogue_likes', 'dialogue_story'];
+                    
+                    if (this.cardGen.source_mode === 'manual' && !this.cardGen.manual_text.trim()) {
+                        alert("Please enter some manual text to analyze.");
+                        return;
+                    }
+                    if (this.cardGen.source_mode === 'chat' && this.messages.length === 0) {
+                        alert("Start a conversation first to extract details, or switch to Manual mode!");
+                        return;
+                    }
+
+                    this.isGenLoading = true;
                     this.cardGen.fields.dialogue = ''; // Clear dialogue before fresh gen
                     
                     for (const f of fields) {
@@ -1145,16 +1350,35 @@
                 },
 
                 async generateWorldSection(section) {
+                    if (!this.worldGen.loading) this.worldGen.loading = {};
                     if (!this.worldGen.world_name) return;
-                    // World info needs more context, take up to 50 messages
-                    const contextText = this.messages.slice(-50).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
                     
+                    if (this.worldGen.source_mode === 'manual' && !this.worldGen.manual_text.trim()) {
+                        alert("Please enter some manual text to analyze.");
+                        return;
+                    }
+
+                    if (this.worldGen.source_mode === 'chat' && this.messages.length === 0) {
+                        alert("Start a conversation first to extract details, or switch to Manual mode!");
+                        return;
+                    }
+
+                    let contextText = "";
+                    if (this.worldGen.source_mode === 'manual') {
+                        contextText = this.worldGen.manual_text;
+                    } else {
+                        // World info needs more context, take up to 50 messages
+                        contextText = this.messages.slice(-50).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
+                    }
+                    
+                    this.worldGen.loading[section] = true;
                     try {
                         const res = await axios.post('/api/world-gen/generate', {
                             world_name: this.worldGen.world_name,
                             section: section,
                             tone: this.worldGen.tone,
-                            context: contextText
+                            context: contextText,
+                            source_mode: this.worldGen.source_mode
                         });
                         
                         if (res.data.success) {
@@ -1162,6 +1386,8 @@
                         }
                     } catch (e) {
                         console.error(`Failed to gen world lore: ${section}`, e);
+                    } finally {
+                        this.worldGen.loading[section] = false;
                     }
                 },
 
@@ -1241,6 +1467,165 @@
                         const container = document.getElementById('chat-container');
                         if (container) container.scrollTop = container.scrollHeight;
                     }, 50);
+                },
+
+                // Forking functionality
+                showForkDialog: false,
+                forkBranchName: '',
+                isForking: false,
+                showBranchDialog: false,
+                currentChatBranches: [],
+                showRenameDialog: false,
+                renameBranchName: '',
+                isRenaming: false,
+                currentChatName: '',
+
+                async createForkFromMessage(msgId) {
+                    if (this.isForking) return;
+                    
+                    this.isForking = true;
+                    
+                    try {
+                        // Generate branch name from message content
+                        const msg = this.messages.find(m => m.id === msgId);
+                        let branchName = 'Fork';
+                        if (msg && msg.content) {
+                            const preview = msg.content.length > 30 ? msg.content.substring(0, 27) + '...' : msg.content;
+                            const timestamp = new Date().toLocaleString();
+                            branchName = `Fork from ${timestamp} - "${preview}"`;
+                        }
+                        
+                        const res = await axios.post('/api/chats/fork', {
+                            origin_chat_name: this.currentChatName || 'current',
+                            fork_from_message_id: msgId,
+                            branch_name: branchName
+                        });
+                        
+                        if (res.data.success) {
+                            alert(`Branch "${branchName}" created successfully!`);
+                            // Load the new branch immediately
+                            this.loadChat(res.data.name);
+                        } else {
+                            alert(`Failed to create branch: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error('Fork creation failed', e);
+                        alert('Failed to create branch. Is the backend running?');
+                    } finally {
+                        this.isForking = false;
+                    }
+                },
+
+                async openForkDialog(msgId) {
+                    this.forkBranchName = '';
+                    this.isForking = false;
+                    this.showForkDialog = true;
+                    this.forkMessageId = msgId;
+                    
+                    // Generate default branch name based on message content
+                    const msg = this.messages.find(m => m.id === msgId);
+                    if (msg && msg.content) {
+                        const preview = msg.content.length > 30 ? msg.content.substring(0, 27) + '...' : msg.content;
+                        const timestamp = new Date().toLocaleString();
+                        this.forkBranchName = `Fork from ${timestamp} - "${preview}"`;
+                    }
+                },
+
+                async createFork() {
+                    if (!this.forkBranchName || this.isForking) return;
+                    
+                    this.isForking = true;
+                    
+                    try {
+                        const res = await axios.post('/api/chats/fork', {
+                            origin_chat_name: this.currentChatName || 'current',
+                            fork_from_message_id: this.forkMessageId,
+                            branch_name: this.forkBranchName
+                        });
+                        
+                        if (res.data.success) {
+                            alert(`Branch "${this.forkBranchName}" created successfully!`);
+                            this.showForkDialog = false;
+                            // Refresh chat list to show new branch
+                            await this.fetchChats();
+                            // Load the new branch
+                            this.loadChat(res.data.name);
+                        } else {
+                            alert(`Failed to create branch: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error('Fork creation failed', e);
+                        alert('Failed to create branch. Is the backend running?');
+                    } finally {
+                        this.isForking = false;
+                    }
+                },
+
+                async showBranchDialog(chatName) {
+                    this.currentChatName = chatName;
+                    try {
+                        const res = await axios.get(`/api/chats/${chatName}/branches`);
+                        this.currentChatBranches = res.data || [];
+                        this.showBranchDialog = true;
+                    } catch (e) {
+                        console.error('Failed to load branches', e);
+                        alert('Failed to load branches.');
+                    }
+                },
+
+                async renameBranchDialog(branch) {
+                    this.renameBranchName = branch.branch_name || branch.name;
+                    this.currentBranchToRename = branch;
+                    this.showRenameDialog = true;
+                },
+
+                async renameBranch() {
+                    if (!this.renameBranchName || this.isRenaming) return;
+                    
+                    this.isRenaming = true;
+                    
+                    try {
+                        const res = await axios.put(`/api/chats/${this.currentBranchToRename.name}/rename-branch`, {
+                            branch_name: this.renameBranchName
+                        });
+                        
+                        if (res.data.success) {
+                            alert('Branch renamed successfully!');
+                            this.showRenameDialog = false;
+                            // Refresh the branches list
+                            await this.showBranchDialog(this.currentChatName);
+                        } else {
+                            alert(`Failed to rename branch: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error('Branch rename failed', e);
+                        alert('Failed to rename branch.');
+                    } finally {
+                        this.isRenaming = false;
+                    }
+                },
+
+                // Helper functions for branch display
+                isBranch(chatName) {
+                    // Check if this chat is a branch by looking for metadata
+                    return chatName.includes('_fork_');
+                },
+
+                getDisplayName(chatName) {
+                    // Try to get the display name from metadata if available
+                    return chatName;
+                },
+
+                getBranchOrigin(chatName) {
+                    // Extract origin chat name from fork filename
+                    const match = chatName.match(/^(.+)_fork_\d+$/);
+                    return match ? match[1] : 'Unknown';
+                },
+
+                formatTime(timestamp) {
+                    if (!timestamp) return 'Unknown time';
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleString();
                 }
             }
         }
