@@ -822,6 +822,15 @@ Automatically optimizes for users with:
 
 ## Version History
 
+
+### v1.2 (Current)
+- Dynamic Resource Management: Smart GPU queuing system with async locking for LLM + SD coordination.
+- Context-Aware SD Presets: Automatic quality adjustment (Normal/Light/Emergency) based on story length.
+- Rolling Median Performance Tracking: Outlier-resistant timing statistics with contention detection.
+- Smart Hint Engine: Context-aware optimization suggestions with dismissible UI notifications.
+- Master Performance Toggle: One-click enable/disable for entire performance system.
+- Real-time Status Indicators: Idle/running/queued badges for text and image operations.
+
 ### v1.1 (Current)
 - Branching system: Fork from any message, independent chat files, origin metadata, branch management UI.
 - Dual-source card/world generation: From chat or manual text input, with live editing before save.
