@@ -340,6 +340,33 @@ class WorldSaveRequest(BaseModel):
     world_name: str
     plist_text: str
 
+# Editing Models
+class CharacterEditRequest(BaseModel):
+    filename: str
+    field: str  # personality, body, dialogue, genre, tags, scenario, first_message
+    new_value: str
+    context: Optional[str] = ""  # Optional context for AI-assisted editing
+
+class CharacterEditFieldRequest(BaseModel):
+    filename: str
+    field: str
+    context: Optional[str] = ""  # Context for AI generation
+    source_mode: Optional[str] = "manual"  # "chat" or "manual"
+
+class WorldEditRequest(BaseModel):
+    world_name: str
+    entry_uid: str
+    field: str  # content, key, is_canon_law, probability
+    new_value: Any
+
+class WorldEditEntryRequest(BaseModel):
+    world_name: str
+    entry_uid: str
+    section: str  # history, locations, creatures, factions
+    tone: str  # sfw, spicy, veryspicy
+    context: Optional[str] = ""
+    source_mode: Optional[str] = "manual"
+
 # Token counting helper
 async def get_token_count(text: str):
     async with httpx.AsyncClient() as client:
@@ -354,8 +381,368 @@ async def get_token_count(text: str):
             # Fallback to rough estimate if API fails
             return len(text) // 4
 
-# World info optimization: Simple caching to avoid reprocessing
-WORLD_INFO_CACHE = {}
+# World info optimization: LRU caching to avoid reprocessing
+from collections import OrderedDict
+
+# Semantic Search Engine
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import hashlib
+import threading
+import asyncio
+import gc
+import torch
+
+class LRUCache:
+    def __init__(self, max_size=1000):
+        self.max_size = max_size
+        self.cache = OrderedDict()
+        self.lock = threading.RLock()  # Use RLock for reentrant operations
+    
+    def get(self, key):
+        with self.lock:
+            if key in self.cache:
+                # Move to end (most recently used)
+                value = self.cache.pop(key)
+                self.cache[key] = value
+                return value
+            return None
+    
+    def put(self, key, value):
+        with self.lock:
+            if key in self.cache:
+                # Remove existing to update position
+                self.cache.pop(key)
+            elif len(self.cache) >= self.max_size:
+                # Remove least recently used (first item)
+                self.cache.popitem(last=False)
+            self.cache[key] = value
+    
+    def clear(self):
+        with self.lock:
+            self.cache.clear()
+    
+    def size(self):
+        with self.lock:
+            return len(self.cache)
+    
+    def get_stats(self):
+        with self.lock:
+            return {
+                "size": len(self.cache),
+                "max_size": self.max_size,
+                "usage_percent": (len(self.cache) / self.max_size) * 100 if self.max_size > 0 else 0
+            }
+    
+    def __contains__(self, key):
+        """Enable 'in' operator for LRUCache"""
+        with self.lock:
+            return key in self.cache
+    
+    def __setitem__(self, key, value):
+        """Enable item assignment for LRUCache"""
+        self.put(key, value)
+    
+    def __getitem__(self, key):
+        """Enable item access for LRUCache"""
+        return self.get(key)
+
+WORLD_INFO_CACHE = LRUCache(max_size=1000)
+
+# Semantic Search Engine
+class SemanticSearchEngine:
+    def __init__(self):
+        self.model = None
+        self.embeddings_cache = {}
+        self.world_info_cache = {}
+        self.lock = threading.RLock()  # Use RLock for reentrant operations
+        self.is_loading = False
+        self.model_name = "all-mpnet-base-v2"
+        self.device = None
+        self.gpu_memory_limit = None
+        self._initialized = False
+        self._last_cleanup_time = 0
+        self._cleanup_interval = 300  # Clean up every 5 minutes
+    
+    def __del__(self):
+        """Cleanup resources when object is destroyed"""
+        self.unload_model()
+    
+    def __enter__(self):
+        """Context manager entry - ensure model is loaded"""
+        if not self.load_model():
+            raise RuntimeError("Failed to load semantic search model")
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - optional cleanup"""
+        pass
+    
+    def cleanup_resources(self):
+        """Periodic cleanup of resources to prevent memory leaks"""
+        current_time = time.time()
+        if current_time - self._last_cleanup_time < self._cleanup_interval:
+            return
+        
+        with self.lock:
+            # Clean up embeddings cache if it's getting too large
+            if len(self.embeddings_cache) > 5:  # Keep only 5 most recent
+                # Sort by insertion order and keep only the 5 most recent
+                items = list(self.embeddings_cache.items())
+                self.embeddings_cache = dict(items[-5:])
+            
+            # Force garbage collection
+            gc.collect()
+            
+            # Clean up GPU memory if available
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            self._last_cleanup_time = current_time
+    
+    def _detect_device(self):
+        """Detect and configure optimal device for model"""
+        if self.device is not None:
+            return self.device
+        
+        # Check for CUDA availability
+        if torch.cuda.is_available():
+            # Get GPU memory info
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory
+            reserved_memory = torch.cuda.memory_reserved(0)
+            free_memory = gpu_memory - reserved_memory
+            
+            # Reserve some memory for other operations (20%)
+            available_memory = free_memory * 0.8
+            
+            # Model typically needs ~400MB for all-mpnet-base-v2
+            if available_memory > 500 * 1024 * 1024:  # 500MB threshold
+                self.device = "cuda"
+                self.gpu_memory_limit = available_memory
+                print(f"Using GPU with {available_memory / 1024 / 1024:.1f}MB available memory")
+            else:
+                self.device = "cpu"
+                print(f"GPU memory insufficient ({available_memory / 1024 / 1024:.1f}MB), using CPU")
+        else:
+            self.device = "cpu"
+            print("CUDA not available, using CPU")
+        
+        return self.device
+    
+    def unload_model(self):
+        """Explicitly unload model and free memory"""
+        with self.lock:
+            if self.model is not None:
+                print("Unloading semantic search model...")
+                del self.model
+                self.model = None
+                # Force garbage collection
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                print("Model unloaded and memory freed")
+    
+    def load_model(self):
+        """Load the sentence transformer model with proper race condition handling and device detection"""
+        with self.lock:
+            if self.model is not None:
+                return True
+            
+            # Use atomic operation to prevent race conditions
+            if self.is_loading:
+                return False
+            
+            self.is_loading = True
+        
+        try:
+            print("Loading semantic search model...")
+            
+            # Detect optimal device
+            device = self._detect_device()
+            
+            # Load model with explicit device assignment
+            self.model = SentenceTransformer(self.model_name, device=device)
+            
+            # Verify model is on correct device
+            if hasattr(self.model, 'device'):
+                print(f"Model loaded on {self.model.device}")
+            
+            print("Semantic search model loaded successfully!")
+            return True
+            
+        except Exception as e:
+            print(f"Failed to load semantic search model: {e}")
+            with self.lock:
+                self.is_loading = False
+            return False
+        finally:
+            with self.lock:
+                self.is_loading = False
+    
+    def get_world_info_hash(self, world_info):
+        """Generate a hash for the world info to detect changes"""
+        if not world_info or "entries" not in world_info:
+            return "empty"
+        
+        # Create a hash of all content to detect changes
+        content = ""
+        for entry in world_info.get("entries", {}).values():
+            content += entry.get("content", "") + "|"
+        
+        return hashlib.md5(content.encode('utf-8')).hexdigest()
+    
+    def get_entry_embeddings(self, world_info):
+        """Get or compute embeddings for all world info entries"""
+        if not world_info or "entries" not in world_info:
+            return {}
+        
+        world_hash = self.get_world_info_hash(world_info)
+        
+        # Check if we already have embeddings for this world info
+        if world_hash in self.embeddings_cache:
+            return self.embeddings_cache[world_hash]
+        
+        # Load model if not loaded
+        if not self.load_model():
+            return {}
+        
+        print(f"Computing embeddings for {len(world_info['entries'])} world info entries...")
+        
+        # Extract content for embedding
+        contents = []
+        uids = []
+        
+        for uid, entry in world_info["entries"].items():
+            content = entry.get("content", "")
+            if content.strip():
+                contents.append(content)
+                uids.append(uid)
+        
+        if not contents:
+            return {}
+        
+        # Compute embeddings
+        try:
+            embeddings = self.model.encode(contents, convert_to_numpy=True, show_progress_bar=False)
+            
+            # Store embeddings with UIDs
+            result = {uids[i]: embeddings[i] for i in range(len(uids))}
+            
+            # Cache the embeddings
+            self.embeddings_cache[world_hash] = result
+            
+            # Limit cache size to prevent memory issues
+            # Remove multiple entries to maintain size constraint
+            while len(self.embeddings_cache) >= 10:
+                oldest_key = next(iter(self.embeddings_cache))
+                del self.embeddings_cache[oldest_key]
+            
+            print(f"Computed embeddings for {len(result)} entries")
+            return result
+            
+        except Exception as e:
+            print(f"Failed to compute embeddings: {e}")
+            return {}
+    
+    def search_semantic(self, world_info, query_text, max_entries=10, similarity_threshold=0.3):
+        """Perform semantic search on world info entries"""
+        if not world_info or "entries" not in world_info:
+            return [], []
+        
+        # Get embeddings
+        embeddings = self.get_entry_embeddings(world_info)
+        if not embeddings:
+            return [], []
+        
+        # Load model if not loaded
+        if not self.load_model():
+            return [], []
+        
+        # Compute query embedding
+        try:
+            query_embedding = self.model.encode([query_text], convert_to_numpy=True)[0]
+            
+            # Calculate similarities
+            similarities = []
+            for uid, entry_embedding in embeddings.items():
+                similarity = cosine_similarity([query_embedding], [entry_embedding])[0][0]
+                similarities.append((uid, similarity))
+            
+            # Sort by similarity (descending)
+            similarities.sort(key=lambda x: x[1], reverse=True)
+            
+            # Filter by threshold and limit results
+            triggered_lore = []
+            canon_entries = []
+            
+            for uid, similarity in similarities:
+                if similarity < similarity_threshold:
+                    continue
+                
+                entry = world_info["entries"][uid]
+                
+                # Always include canon law entries
+                if entry.get("is_canon_law"):
+                    canon_entries.append(entry.get("content", ""))
+                    continue
+                
+                # Apply probability weighting if enabled
+                use_probability = entry.get("useProbability", False)
+                if use_probability:
+                    probability = entry.get("probability", 100)
+                    if random.random() * 100 > probability:
+                        continue
+                
+                # Add to results
+                triggered_lore.append(entry.get("content", ""))
+                
+                # Stop if we've reached max_entries
+                if max_entries > 0 and len(triggered_lore) >= max_entries:
+                    break
+            
+            return triggered_lore, canon_entries
+            
+        except Exception as e:
+            print(f"Semantic search failed: {e}")
+            return [], []
+
+# Global semantic search engine instance
+semantic_search_engine = SemanticSearchEngine()
+
+# Global variable to store the cleanup task
+cleanup_task = None
+
+# Periodic cleanup task for semantic search engine
+async def periodic_cleanup():
+    """Periodically clean up semantic search engine resources"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # Run every 5 minutes
+            semantic_search_engine.cleanup_resources()
+        except Exception as e:
+            print(f"Periodic cleanup failed: {e}")
+
+# FastAPI startup and shutdown handlers
+@app.on_event("startup")
+async def startup_event():
+    """Initialize resources when the FastAPI app starts"""
+    global cleanup_task
+    # Start the periodic cleanup task when the app starts
+    cleanup_task = asyncio.create_task(periodic_cleanup())
+    print("Periodic cleanup task started")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources when the FastAPI app shuts down"""
+    global cleanup_task
+    if cleanup_task:
+        # Cancel the cleanup task
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            print("Periodic cleanup task cancelled")
 
 def preprocess_world_info(world_info):
     """Pre-process world info for case-insensitive matching"""
@@ -367,45 +754,60 @@ def preprocess_world_info(world_info):
             entry["key"] = [k.lower() for k in entry["key"]]
     return world_info
 
-def get_cached_world_entries(world_info, recent_text, max_entries=10):
-    """Get triggered world info entries with caching and optimizations"""
+def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_threshold=0.25):
+    """Get triggered world info entries using semantic search with fallback and caching"""
     if not world_info or "entries" not in world_info:
         return [], []
     
-    # Preprocess world info for case-insensitive matching (only once per world)
-    world_info = preprocess_world_info(world_info)
+    # Create cache key using hash-based approach for efficiency
+    # Hash the world info content to avoid expensive string conversion
+    world_content = ""
+    for entry in world_info.get("entries", {}).values():
+        world_content += entry.get("content", "") + "|"
     
-    # Create cache key based on world info, recent text, and max_entries
-    cache_key = f"{str(world_info.get('entries', {}))}_{recent_text.lower()}_{max_entries}"
+    # Create a composite hash key
+    content_hash = hashlib.md5(world_content.encode('utf-8')).hexdigest()
+    text_hash = hashlib.md5(recent_text.lower().encode('utf-8')).hexdigest()
+    config_hash = hashlib.md5(f"{max_entries}_{semantic_threshold}".encode('utf-8')).hexdigest()
+    
+    cache_key = f"{content_hash}_{text_hash}_{config_hash}"
     
     if cache_key in WORLD_INFO_CACHE:
         return WORLD_INFO_CACHE[cache_key]
     
-    entries = world_info.get("entries", {})
-    triggered_lore = []
-    canon_entries = []
+    # Perform semantic search
+    triggered_lore, canon_entries = semantic_search_engine.search_semantic(
+        world_info, 
+        recent_text, 
+        max_entries=max_entries, 
+        similarity_threshold=semantic_threshold
+    )
     
-    # Process entries with optimizations
-    for uid, entry in entries.items():
-        # Always include canon law entries
-        if entry.get("is_canon_law"):
-            canon_entries.append(entry.get("content", ""))
-            continue
+    # Fallback to simple keyword matching if semantic search returns nothing (safety net)
+    if not triggered_lore:
+        entries = world_info.get("entries", {})
+        processed_text = recent_text.lower()
         
-        # Skip if we already have enough regular entries (only if max_entries > 0)
-        if max_entries > 0 and len(triggered_lore) >= max_entries:
-            break
-            
-        keys = entry.get("key", [])
-        if any(k in recent_text for k in keys):  # Already lowercase from preprocessing
-            # Apply probability weighting if enabled
-            use_probability = entry.get("useProbability", False)
-            if use_probability:
-                probability = entry.get("probability", 100)
-                if random.random() * 100 <= probability:
+        for uid, entry in entries.items():
+            if entry.get("is_canon_law"):
+                # Already handled by semantic search engine usually, but just in case
+                content = entry.get("content", "")
+                if content not in canon_entries:
+                    canon_entries.append(content)
+                continue
+                
+            if max_entries > 0 and len(triggered_lore) >= max_entries:
+                break
+                
+            keys = [k.lower() for k in entry.get("key", [])]
+            if any(k in processed_text for k in keys):
+                use_probability = entry.get("useProbability", False)
+                if use_probability:
+                    probability = entry.get("probability", 100)
+                    if random.random() * 100 <= probability:
+                        triggered_lore.append(entry.get("content", ""))
+                else:
                     triggered_lore.append(entry.get("content", ""))
-            else:
-                triggered_lore.append(entry.get("content", ""))
     
     result = (triggered_lore, canon_entries)
     WORLD_INFO_CACHE[cache_key] = result
@@ -472,7 +874,14 @@ def construct_prompt(request: PromptRequest):
     if request.world_info:
         recent_text = " ".join([m.content for m in request.messages[-5:]]).lower()
         max_world_entries = settings.get("max_world_info_entries", 10)
-        triggered_lore, canon_law_entries = get_cached_world_entries(request.world_info, recent_text, max_world_entries)
+        
+        # Use optimized semantic search (threshold 0.25 for high accuracy)
+        triggered_lore, canon_law_entries = get_cached_world_entries(
+            request.world_info, 
+            recent_text, 
+            max_entries=max_world_entries,
+            semantic_threshold=0.25
+        )
         
         if triggered_lore:
             full_prompt += "### World Knowledge:\n" + "\n".join(triggered_lore) + "\n"
@@ -785,6 +1194,142 @@ async def generate_capsule(req: CapsuleGenRequest):
     try:
         capsule = await generate_capsule_for_character(req.char_name, req.description, req.depth_prompt)
         return {"success": True, "text": capsule}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+# Character Editing Endpoints
+@app.post("/api/characters/edit-field")
+async def edit_character_field(req: CharacterEditRequest):
+    """Edit a specific field in a character card."""
+    try:
+        file_path = os.path.join(DATA_DIR, "characters", req.filename)
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "Character file not found"}
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            char_data = json.load(f)
+        
+        # Validate field exists
+        if req.field not in ["personality", "body", "dialogue", "genre", "tags", "scenario", "first_message"]:
+            return {"success": False, "error": "Invalid field"}
+        
+        # Update the field
+        char_data["data"][req.field] = req.new_value
+        
+        # Save the updated character
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(char_data, f, indent=2, ensure_ascii=False)
+        
+        return {"success": True, "message": f"Field '{req.field}' updated successfully"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/characters/edit-field-ai")
+async def edit_character_field_ai(req: CharacterEditFieldRequest):
+    """Use AI to generate or improve a specific field in a character card."""
+    try:
+        file_path = os.path.join(DATA_DIR, "characters", req.filename)
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "Character file not found"}
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            char_data = json.load(f)
+        
+        char_name = char_data["data"]["name"]
+        
+        # Use existing generation logic with context
+        card_req = CardGenRequest(
+            char_name=char_name,
+            field_type=req.field,
+            context=req.context,
+            source_mode=req.source_mode
+        )
+        
+        # Call the existing generation endpoint logic
+        result = await generate_card_field(card_req)
+        
+        if result["success"]:
+            # Update the character with the generated content
+            char_data["data"][req.field] = result["text"]
+            
+            # Save the updated character
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(char_data, f, indent=2, ensure_ascii=False)
+            
+            return {"success": True, "text": result["text"]}
+        else:
+            return {"success": False, "error": result["error"]}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/characters/edit-capsule")
+async def edit_character_capsule(req: CharacterEditRequest):
+    """Edit the multi-character capsule for a character."""
+    try:
+        file_path = os.path.join(DATA_DIR, "characters", req.filename)
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "Character file not found"}
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            char_data = json.load(f)
+        
+        # Ensure extensions object exists
+        if "extensions" not in char_data["data"]:
+            char_data["data"]["extensions"] = {}
+        
+        # Update the capsule
+        char_data["data"]["extensions"]["multi_char_summary"] = req.new_value
+        
+        # Save the updated character
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(char_data, f, indent=2, ensure_ascii=False)
+        
+        return {"success": True, "message": "Capsule updated successfully"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/characters/edit-capsule-ai")
+async def edit_character_capsule_ai(req: CharacterEditFieldRequest):
+    """Use AI to generate or improve the multi-character capsule."""
+    try:
+        file_path = os.path.join(DATA_DIR, "characters", req.filename)
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "Character file not found"}
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            char_data = json.load(f)
+        
+        char_name = char_data["data"]["name"]
+        description = char_data["data"]["description"]
+        depth_prompt = char_data["data"]["extensions"].get("depth_prompt", {}).get("prompt", "")
+        
+        # Use existing capsule generation logic
+        capsule_req = CapsuleGenRequest(
+            char_name=char_name,
+            description=description,
+            depth_prompt=depth_prompt
+        )
+        
+        result = await generate_capsule(capsule_req)
+        
+        if result["success"]:
+            # Update the character with the generated capsule
+            if "extensions" not in char_data["data"]:
+                char_data["data"]["extensions"] = {}
+            
+            char_data["data"]["extensions"]["multi_char_summary"] = result["text"]
+            
+            # Save the updated character
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(char_data, f, indent=2, ensure_ascii=False)
+            
+            return {"success": True, "text": result["text"]}
+        else:
+            return {"success": False, "error": result["error"]}
+        
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1594,6 +2139,245 @@ async def rename_branch(name: str, request: dict):
     
     return {"success": True, "branch_name": branch_name}
 
+# World Info Cache Management Endpoints
+@app.get("/api/world-info/cache/stats")
+async def get_cache_stats():
+    """Get current cache statistics."""
+    return {
+        "success": True,
+        "stats": WORLD_INFO_CACHE.get_stats()
+    }
+
+@app.post("/api/world-info/cache/clear")
+async def clear_cache():
+    """Clear the world info cache."""
+    WORLD_INFO_CACHE.clear()
+    return {"success": True, "message": "World info cache cleared"}
+
+@app.post("/api/world-info/cache/configure")
+async def configure_cache(request: dict):
+    """Configure cache settings."""
+    max_size = request.get("max_size")
+    if max_size is not None and max_size > 0:
+        WORLD_INFO_CACHE.max_size = max_size
+        return {"success": True, "max_size": max_size}
+    return {"success": False, "error": "Invalid max_size value"}
+
+@app.get("/api/world-info/cache/status")
+async def get_cache_status():
+    """Get detailed cache status for debugging."""
+    stats = WORLD_INFO_CACHE.get_stats()
+    return {
+        "success": True,
+        "cache_status": {
+            "enabled": True,
+            "implementation": "LRU",
+            "current_size": stats["size"],
+            "max_size": stats["max_size"],
+            "usage_percent": stats["usage_percent"],
+            "description": "World info entries are cached to avoid reprocessing during long sessions. Cache is automatically managed with LRU eviction."
+        }
+    }
+
+# World Info Editing Endpoints
+@app.post("/api/world-info/edit-entry")
+async def edit_world_entry(req: WorldEditRequest):
+    """Edit a specific field in a world info entry."""
+    try:
+        file_path = os.path.join(DATA_DIR, "worldinfo", f"{req.world_name}.json")
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "World info file not found"}
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            world_data = json.load(f)
+        
+        # Validate entry exists
+        if req.entry_uid not in world_data.get("entries", {}):
+            return {"success": False, "error": "Entry not found"}
+        
+        entry = world_data["entries"][req.entry_uid]
+        
+        # Validate field exists
+        valid_fields = ["content", "key", "is_canon_law", "probability", "useProbability"]
+        if req.field not in valid_fields:
+            return {"success": False, "error": "Invalid field"}
+        
+        # Update the field
+        if req.field == "key":
+            # Ensure key is a list of strings
+            if isinstance(req.new_value, str):
+                entry["key"] = [k.strip() for k in req.new_value.split(",")]
+            elif isinstance(req.new_value, list):
+                entry["key"] = req.new_value
+            else:
+                return {"success": False, "error": "Key must be a string or list of strings"}
+        elif req.field == "is_canon_law":
+            entry["is_canon_law"] = bool(req.new_value)
+        elif req.field == "probability":
+            entry["probability"] = int(req.new_value)
+        elif req.field == "useProbability":
+            entry["useProbability"] = bool(req.new_value)
+        else:
+            entry[req.field] = req.new_value
+        
+        # Save the updated world info
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(world_data, f, indent=2, ensure_ascii=False)
+        
+        return {"success": True, "message": f"Entry '{req.entry_uid}' field '{req.field}' updated successfully"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/world-info/edit-entry-ai")
+async def edit_world_entry_ai(req: WorldEditEntryRequest):
+    """Use AI to generate or improve a world info entry."""
+    try:
+        file_path = os.path.join(DATA_DIR, "worldinfo", f"{req.world_name}.json")
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "World info file not found"}
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            world_data = json.load(f)
+        
+        # Validate entry exists
+        if req.entry_uid not in world_data.get("entries", {}):
+            return {"success": False, "error": "Entry not found"}
+        
+        # Use existing generation logic with context
+        world_req = WorldGenRequest(
+            world_name=req.world_name,
+            section=req.section,
+            tone=req.tone,
+            context=req.context,
+            source_mode=req.source_mode
+        )
+        
+        # Call the existing generation endpoint logic
+        result = await generate_world_entries(world_req)
+        
+        if result["success"]:
+            # Parse the generated entries and update the specific entry
+            lines = result["text"].split('\n')
+            for line in lines:
+                parsed = parse_plist_line(line)
+                if parsed:
+                    # Update the specific entry with the new content
+                    if req.entry_uid in world_data["entries"]:
+                        world_data["entries"][req.entry_uid]["content"] = parsed["content"]
+                        world_data["entries"][req.entry_uid]["key"] = parsed["keys"]
+                    
+                    # If this is a new entry, add it
+                    if parsed["name"] not in [e.get("key", [""])[0] for e in world_data["entries"].values()]:
+                        uid_counter = max([int(k) for k in world_data["entries"].keys()] + [0]) + 1
+                        world_data["entries"][str(uid_counter)] = {
+                            "uid": uid_counter,
+                            "key": parsed["keys"],
+                            "keysecondary": [],
+                            "comment": parsed["alias"] or "",
+                            "content": parsed["content"],
+                            "constant": False,
+                            "selective": True,
+                            "selectiveLogic": 0,
+                            "addMemo": True,
+                            "order": 100,
+                            "position": 4,
+                            "disable": False,
+                            "excludeRecursion": False,
+                            "probability": 100,
+                            "useProbability": True,
+                            "displayIndex": uid_counter,
+                            "depth": 5
+                        }
+            
+            # Save the updated world info
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(world_data, f, indent=2, ensure_ascii=False)
+            
+            return {"success": True, "text": result["text"]}
+        else:
+            return {"success": False, "error": result["error"]}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/world-info/delete-entry")
+async def delete_world_entry(world_name: str, entry_uid: str):
+    """Delete a specific world info entry."""
+    try:
+        file_path = os.path.join(DATA_DIR, "worldinfo", f"{world_name}.json")
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "World info file not found"}
+        
+        with open(file_path, "r", encoding="utf-8") as f:
+            world_data = json.load(f)
+        
+        # Validate entry exists
+        if entry_uid not in world_data.get("entries", {}):
+            return {"success": False, "error": "Entry not found"}
+        
+        # Remove the entry
+        del world_data["entries"][entry_uid]
+        
+        # Save the updated world info
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(world_data, f, indent=2, ensure_ascii=False)
+        
+        return {"success": True, "message": f"Entry '{entry_uid}' deleted successfully"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/world-info/add-entry")
+async def add_world_entry(world_name: str, entry_data: dict):
+    """Add a new world info entry."""
+    try:
+        file_path = os.path.join(DATA_DIR, "worldinfo", f"{world_name}.json")
+        
+        # Load existing world info or create new
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8") as f:
+                world_data = json.load(f)
+        else:
+            world_data = {"entries": {}}
+        
+        # Generate new UID
+        uid_counter = max([int(k) for k in world_data["entries"].keys()] + [0]) + 1
+        
+        # Create new entry
+        new_entry = {
+            "uid": uid_counter,
+            "key": entry_data.get("key", []),
+            "keysecondary": [],
+            "comment": entry_data.get("comment", ""),
+            "content": entry_data.get("content", ""),
+            "constant": entry_data.get("constant", False),
+            "selective": entry_data.get("selective", True),
+            "selectiveLogic": entry_data.get("selectiveLogic", 0),
+            "addMemo": entry_data.get("addMemo", True),
+            "order": entry_data.get("order", 100),
+            "position": entry_data.get("position", 4),
+            "disable": entry_data.get("disable", False),
+            "excludeRecursion": entry_data.get("excludeRecursion", False),
+            "probability": entry_data.get("probability", 100),
+            "useProbability": entry_data.get("useProbability", True),
+            "displayIndex": uid_counter,
+            "depth": entry_data.get("depth", 5)
+        }
+        
+        # Add the entry
+        world_data["entries"][str(uid_counter)] = new_entry
+        
+        # Save the updated world info
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(world_data, f, indent=2, ensure_ascii=False)
+        
+        return {"success": True, "entry_uid": str(uid_counter), "message": "New entry added successfully"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

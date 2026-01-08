@@ -16,6 +16,70 @@
         ::-webkit-scrollbar-thumb { background: #475569; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #64748b; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
+
+        /* Mobile/ToucH Optimizations */
+        @media (max-width: 768px) {
+            /* Increase touch target sizes */
+            .group-hover\\:flex {
+                display: none;
+            }
+            
+            /* Make buttons more touch-friendly */
+            button {
+                min-height: 44px; /* Apple's recommended minimum touch target */
+                min-width: 44px;
+                padding: 12px 16px;
+            }
+            
+            /* Sidebar adjustments for mobile */
+            .w-80 {
+                width: 100%;
+                max-width: 320px;
+            }
+            
+            /* Input area adjustments */
+            .rounded-\[24px\] {
+                border-radius: 16px;
+            }
+            
+            /* Character edit interface adjustments */
+            .sticky\.bottom-0 {
+                position: relative;
+                bottom: auto;
+            }
+            
+            /* World info entry buttons */
+            .flex\.gap-1\.mt-2 {
+                margin-top: 8px;
+                gap: 8px;
+            }
+            
+            /* Chat message spacing */
+            .space-y-8 > * {
+                margin-bottom: 16px;
+            }
+            
+            /* Header adjustments */
+            .h-14 {
+                height: 56px;
+            }
+            
+            /* Sidebar header */
+            .p-4 {
+                padding: 16px;
+            }
+        }
+        
+        /* Tablet optimizations */
+        @media (min-width: 769px) and (max-width: 1024px) {
+            .grid-cols-1\.md\:grid-cols-2 {
+                grid-template-columns: 1fr;
+            }
+            
+            .grid-cols-1\.md\:grid-cols-2\.lg\:grid-cols-3 {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
     </style>
 </head>
 <body class="bg-slate-900 text-slate-100 h-screen overflow-hidden font-sans" x-data="chatUI()">
@@ -79,52 +143,140 @@
                 <template x-if="showSidebar === 'characters'">
                     <div class="space-y-4">
                         <div class="flex gap-2">
-                            <button @click="startNewCharacter()" class="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded-lg text-xs font-bold shadow-lg shadow-blue-900/20 transition-all uppercase tracking-widest">New Character</button>
+                            <button @click="startNewCharacter()" class="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all">New Character</button>
                             <button @click="fetchCharacters()" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-slate-300" title="Refresh List"><i class="fa-solid fa-rotate"></i></button>
                         </div>
                         
-                        <div x-show="editingChar" class="bg-slate-900 p-3 rounded-xl border border-slate-700 space-y-3 shadow-xl">
-                            <input x-model="editingChar.data.name" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-blue-500" placeholder="Name">
-                            <label class="text-[9px] text-slate-500 font-black uppercase">Label Description (Personal Notes)</label>
-                            <textarea x-model="editingChar.data.extensions.label_description" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] h-14 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Plaintext description for labeling only..."></textarea>
-                            <label class="text-[9px] text-slate-500 font-black uppercase">Danbooru Tag</label>
-                            <input x-model="editingChar.data.extensions.danbooru_tag" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] outline-none focus:ring-1 focus:ring-blue-500" placeholder="e.g. 1girl, blond hair, blue eyes...">
-                            <label class="text-[9px] text-slate-500 font-black uppercase">LLM Description/Dialogue</label>
-                            <textarea x-model="editingChar.data.description" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Description/Example Dialogue"></textarea>
-                            <label class="text-[9px] text-slate-500 font-black uppercase">Reinforcement Prompt</label>
-                            <textarea x-model="editingChar.data.extensions.depth_prompt.prompt" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Personality/Scenario..."></textarea>
-                            
-                            <!-- Multi-Character Capsule -->
-                            <div class="border-t border-slate-700 pt-3 mt-2">
-                                <div class="flex justify-between items-center mb-1">
-                                    <label class="text-[9px] text-purple-400 font-black uppercase">Multi-Char Capsule (Auto-generated)</label>
-                                    <button @click="generateCapsule()" class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase" :disabled="isGeneratingCapsule">
-                                        <i class="fa-solid mr-1" :class="isGeneratingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Generate
-                                    </button>
+                        <!-- Character Editing Interface -->
+                        <template x-if="editingChar">
+                            <div class="bg-slate-900 p-3 rounded-xl border border-slate-700 space-y-3 shadow-xl">
+                                <!-- Character Header -->
+                                <div class="flex justify-between items-center">
+                                    <div class="flex items-center gap-3">
+                                        <input x-model="editingChar.data.name" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-blue-500" placeholder="Name">
+                                        <span class="text-[10px] text-slate-500">Editing: <span x-text="editingChar._filename || 'New Character'"></span></span>
+                                    </div>
                                 </div>
-                                <textarea x-model="editingChar.data.extensions.multi_char_summary" class="w-full bg-slate-950 border border-purple-900/50 rounded-lg px-2 py-1.5 text-[10px] h-16 outline-none focus:ring-1 focus:ring-purple-500" placeholder="Compact capsule for group chats (auto-generated on first group chat)..."></textarea>
-                                <p class="text-[8px] text-slate-600 mt-1">Used instead of full description when 2+ characters are active. Leave blank to auto-generate.</p>
-                            </div>
-                            
-                            <div class="flex gap-2">
-                                <button @click="saveCharacter()" class="flex-1 bg-green-600 hover:bg-green-500 py-1.5 rounded-lg text-xs font-bold uppercase text-white shadow-lg shadow-green-900/20">Save Card</button>
-                                <button @click="editingChar = null" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-xs font-bold uppercase">Cancel</button>
-                            </div>
-                        </div>
 
+                                <!-- Basic Fields -->
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <div>
+                                        <label class="text-[9px] text-slate-500 font-black uppercase">Label Description</label>
+                                        <textarea x-model="editingChar.data.extensions.label_description" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] h-12 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Personal notes..."></textarea>
+                                    </div>
+                                    <div>
+                                        <label class="text-[9px] text-slate-500 font-black uppercase">Danbooru Tag</label>
+                                        <input x-model="editingChar.data.extensions.danbooru_tag" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] outline-none focus:ring-1 focus:ring-blue-500" placeholder="e.g. 1girl, blond hair...">
+                                    </div>
+                                </div>
+
+                                <!-- AI-Assisted Editing Section -->
+                                <div class="border-t border-slate-700 pt-3">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <label class="text-[9px] text-blue-400 font-black uppercase">AI-Assisted Editing</label>
+                                        <div class="flex gap-2">
+                                            <select x-model="editContextMode" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-[10px] text-slate-300">
+                                                <option value="chat">Use Current Chat</option>
+                                                <option value="manual">Manual Input</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    
+                                    <template x-if="editContextMode === 'manual'">
+                                        <div class="space-y-2 mb-3">
+                                            <label class="text-[9px] text-slate-500 font-black uppercase">Context for AI</label>
+                                            <textarea x-model="editContextText" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] h-16 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Provide context for AI generation..."></textarea>
+                                        </div>
+                                    </template>
+
+                                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                        <button @click="editFieldAI('personality')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingField">
+                                            <i class="fa-solid mr-1" :class="isEditingField ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Personality
+                                        </button>
+                                        <button @click="editFieldAI('body')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingField">
+                                            <i class="fa-solid mr-1" :class="isEditingField ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Body
+                                        </button>
+                                        <button @click="editFieldAI('scenario')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingField">
+                                            <i class="fa-solid mr-1" :class="isEditingField ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Scenario
+                                        </button>
+                                        <button @click="editFieldAI('genre')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingField">
+                                            <i class="fa-solid mr-1" :class="isEditingField ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Genre
+                                        </button>
+                                        <button @click="editFieldAI('tags')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingField">
+                                            <i class="fa-solid mr-1" :class="isEditingField ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Tags
+                                        </button>
+                                        <button @click="editFieldAI('first_message')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingField">
+                                            <i class="fa-solid mr-1" :class="isEditingField ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>First Message
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Manual Editing Section -->
+                                <div class="border-t border-slate-700 pt-3">
+                                    <label class="text-[9px] text-slate-500 font-black uppercase mb-2 block">Manual Editing</label>
+                                    
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <div>
+                                            <label class="text-[9px] text-slate-500 font-black uppercase">Description/Dialogue</label>
+                                            <textarea x-model="editingChar.data.description" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Description/Example Dialogue"></textarea>
+                                        </div>
+                                        <div>
+                                            <label class="text-[9px] text-slate-500 font-black uppercase">Reinforcement Prompt</label>
+                                            <textarea x-model="editingChar.data.extensions.depth_prompt.prompt" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Personality/Scenario..."></textarea>
+                                        </div>
+                                    </div>
+
+                                    <!-- Multi-Character Capsule -->
+                                    <div class="border-t border-slate-700 pt-3 mt-2">
+                                        <div class="flex justify-between items-center mb-1">
+                                            <label class="text-[9px] text-purple-400 font-black uppercase">Multi-Char Capsule</label>
+                                            <div class="flex gap-2">
+                                                <button @click="editCapsuleAI()" class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase" :disabled="isEditingCapsule">
+                                                    <i class="fa-solid mr-1" :class="isEditingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>AI Generate
+                                                </button>
+                                                <button @click="generateCapsule()" class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase" :disabled="isGeneratingCapsule">
+                                                    <i class="fa-solid mr-1" :class="isGeneratingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Auto Generate
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <textarea x-model="editingChar.data.extensions.multi_char_summary" class="w-full bg-slate-950 border border-purple-900/50 rounded-lg px-2 py-1.5 text-[10px] h-16 outline-none focus:ring-1 focus:ring-purple-500" placeholder="Compact capsule for group chats..."></textarea>
+                                        <p class="text-[8px] text-slate-600 mt-1">Used instead of full description when 2+ characters are active.</p>
+                                    </div>
+                                </div>
+
+                                <!-- Fixed Save/Cancel Buttons for Small Screens -->
+                                <div class="sticky bottom-0 bg-slate-900 border-t border-slate-700 p-3 -mx-3 -mb-3 rounded-b-xl">
+                                    <div class="flex gap-2 justify-end">
+                                        <button @click="saveCharacter()" class="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-xs font-black uppercase shadow-lg shadow-green-900/20 transition-all">
+                                            Save
+                                        </button>
+                                        <button @click="editingChar = null" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-xs font-black uppercase transition-all">
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- Character List -->
                         <div class="space-y-2">
                             <template x-for="char in characters">
-                                <div @click="toggleCharacter(char)" class="p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent hover:border-slate-600 group flex justify-between items-center transition-all" :class="isCharacterActive(char) ? 'border-blue-500/50 bg-blue-500/10' : ''">
+                                <div class="p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent hover:border-slate-600 group flex justify-between items-center transition-all" :class="isCharacterActive(char) ? 'border-blue-500/50 bg-blue-500/10' : ''" @click="toggleCharacter(char)">
                                     <div class="flex flex-col flex-1 min-w-0">
                                         <div class="flex items-center gap-2">
                                             <div x-show="isCharacterActive(char)" class="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_5px_rgba(59,130,246,0.8)]"></div>
                                             <span class="font-bold text-sm" x-text="char.data?.name"></span>
+                                            <span class="text-[10px] text-slate-500" x-text="char._filename"></span>
                                         </div>
                                         <span class="text-[10px] text-slate-500 truncate" x-text="char.data?.extensions?.label_description || char.data?.description"></span>
                                     </div>
                                     <div class="hidden group-hover:flex gap-1">
-                                        <button @click.stop="startEditCharacter(char)" class="flex items-center justify-center w-6 h-6 rounded-lg bg-slate-800 hover:bg-blue-600 text-white transition-all"><i class="fa-solid fa-pen text-[10px]"></i></button>
-                                        <button @click.stop="deleteCharacter(char)" class="flex items-center justify-center w-6 h-6 rounded-lg bg-slate-800 hover:bg-red-600 text-white transition-all"><i class="fa-solid fa-trash text-[10px]"></i></button>
+                                        <button @click.stop="startEditCharacter(char)" class="flex items-center justify-center w-6 h-6 rounded-lg bg-slate-800 hover:bg-blue-600 text-white transition-all" title="Edit Character">
+                                            <i class="fa-solid fa-pen text-[10px]"></i>
+                                        </button>
+                                        <button @click.stop="deleteCharacter(char)" class="flex items-center justify-center w-6 h-6 rounded-lg bg-slate-800 hover:bg-red-600 text-white transition-all" title="Delete Character">
+                                            <i class="fa-solid fa-trash text-[10px]"></i>
+                                        </button>
                                     </div>
                                 </div>
                             </template>
@@ -139,6 +291,108 @@
                             <div class="flex-1"></div>
                             <button @click="fetchWorldInfo()" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-300" title="Refresh World Info"><i class="fa-solid fa-rotate"></i></button>
                         </div>
+                        
+                        <!-- World Info Editing Interface -->
+                        <template x-if="editingWorldEntry">
+                            <div class="bg-slate-900 p-3 rounded-xl border border-slate-700 space-y-3 shadow-xl">
+                                <!-- World Info Header -->
+                                <div class="flex justify-between items-center">
+                                    <div class="flex items-center gap-3">
+                                        <span class="font-bold text-sm" x-text="editingWorldEntry.world_name"></span>
+                                        <span class="text-[10px] text-slate-500">Entry: <span x-text="editingWorldEntry.entry_uid || 'New Entry'"></span></span>
+                                    </div>
+                                </div>
+
+                                <!-- Basic Fields -->
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <div>
+                                        <label class="text-[9px] text-slate-500 font-black uppercase">Keys (comma-separated)</label>
+                                        <input x-model="editingWorldEntry.entry.key" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] outline-none focus:ring-1 focus:ring-blue-500" placeholder="e.g. magic, spells, arcane">
+                                    </div>
+                                    <div>
+                                        <label class="text-[9px] text-slate-500 font-black uppercase">Comment</label>
+                                        <input x-model="editingWorldEntry.entry.comment" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] outline-none focus:ring-1 focus:ring-blue-500" placeholder="Optional comment">
+                                    </div>
+                                </div>
+
+                                <!-- Content -->
+                                <div>
+                                    <label class="text-[9px] text-slate-500 font-black uppercase">Content</label>
+                                    <textarea x-model="editingWorldEntry.entry.content" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500" placeholder="World lore entry content..."></textarea>
+                                </div>
+
+                                <!-- Flags -->
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    <div class="flex items-center gap-2">
+                                        <input type="checkbox" x-model="editingWorldEntry.entry.is_canon_law" class="w-4 h-4 text-red-600 bg-slate-900 border-slate-700 rounded focus:ring-red-500">
+                                        <label class="text-[9px] text-slate-500 font-black uppercase">Canon Law</label>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <input type="checkbox" x-model="editingWorldEntry.entry.useProbability" class="w-4 h-4 text-blue-600 bg-slate-900 border-slate-700 rounded focus:ring-blue-500">
+                                        <label class="text-[9px] text-slate-500 font-black uppercase">Use Probability</label>
+                                    </div>
+                                    <div>
+                                        <label class="text-[9px] text-slate-500 font-black uppercase">Probability</label>
+                                        <input type="number" x-model.number="editingWorldEntry.entry.probability" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] outline-none focus:ring-1 focus:ring-blue-500" placeholder="0-100">
+                                    </div>
+                                </div>
+
+                                <!-- AI-Assisted Editing Section -->
+                                <div class="border-t border-slate-700 pt-3">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <label class="text-[9px] text-blue-400 font-black uppercase">AI-Assisted Editing</label>
+                                        <div class="flex gap-2">
+                                            <select x-model="worldEditContextMode" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-[10px] text-slate-300">
+                                                <option value="chat">Use Current Chat</option>
+                                                <option value="manual">Manual Input</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    
+                                    <template x-if="worldEditContextMode === 'manual'">
+                                        <div class="space-y-2 mb-3">
+                                            <label class="text-[9px] text-slate-500 font-black uppercase">Context for AI</label>
+                                            <textarea x-model="worldEditContextText" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] h-16 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Provide context for AI generation..."></textarea>
+                                        </div>
+                                    </template>
+
+                                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                        <button @click="editWorldEntryAI('history')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingWorldEntry">
+                                            <i class="fa-solid mr-1" :class="isEditingWorldEntry ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>History
+                                        </button>
+                                        <button @click="editWorldEntryAI('locations')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingWorldEntry">
+                                            <i class="fa-solid mr-1" :class="isEditingWorldEntry ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Locations
+                                        </button>
+                                        <button @click="editWorldEntryAI('creatures')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingWorldEntry">
+                                            <i class="fa-solid mr-1" :class="isEditingWorldEntry ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Creatures
+                                        </button>
+                                        <button @click="editWorldEntryAI('factions')" class="bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-blue-900/20" :disabled="isEditingWorldEntry">
+                                            <i class="fa-solid mr-1" :class="isEditingWorldEntry ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Factions
+                                        </button>
+                                        <button @click="addWorldEntry()" class="bg-green-600 hover:bg-green-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-green-900/20" :disabled="isAddingWorldEntry">
+                                            <i class="fa-solid mr-1" :class="isAddingWorldEntry ? 'fa-circle-notch fa-spin' : 'fa-plus'"></i>Add Entry
+                                        </button>
+                                        <button @click="deleteWorldEntry(editingWorldEntry.world_name, editingWorldEntry.entry_uid)" class="bg-red-600 hover:bg-red-500 text-white text-[10px] font-black uppercase px-2 py-1 rounded-lg shadow-lg shadow-red-900/20" :disabled="!editingWorldEntry.entry_uid">
+                                            <i class="fa-solid mr-1" :class="isDeletingWorldEntry ? 'fa-circle-notch fa-spin' : 'fa-trash'"></i>Delete
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Fixed Save/Cancel Buttons for World Info -->
+                                <div class="sticky bottom-0 bg-slate-900 border-t border-slate-700 p-3 -mx-3 -mb-3 rounded-b-xl">
+                                    <div class="flex gap-2 justify-end">
+                                        <button @click="saveWorldEntry()" class="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-xs font-black uppercase shadow-lg shadow-green-900/20 transition-all">
+                                            Save
+                                        </button>
+                                        <button @click="editingWorldEntry = null" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-xs font-black uppercase transition-all">
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- World Info List -->
                         <div class="space-y-2">
                             <template x-for="wi in worldInfos">
                                 <div class="bg-slate-900/50 rounded-xl overflow-hidden border border-slate-700/50">
@@ -159,6 +413,14 @@
                                                     <div class="flex gap-1 items-center">
                                                         <div x-show="entry.is_canon_law" class="text-[7px] bg-red-500/20 text-red-500 px-1 rounded uppercase font-black">Canon Law</div>
                                                         <div x-show="entry.constant" class="text-[8px] bg-green-500/20 text-green-400 px-1 rounded uppercase font-black">Constant</div>
+                                                        <div class="flex gap-1 mt-2">
+                                                            <button @click="startEditWorldEntry(wi, uid)" class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase px-2 py-1 rounded-lg border border-blue-500/30 hover:border-blue-400/50 transition-all" title="Edit Entry">
+                                                                <i class="fa-solid fa-pen mr-1"></i>Edit
+                                                            </button>
+                                                            <button @click="deleteWorldEntry(wi.name, uid)" class="text-[8px] text-red-400 hover:text-red-300 font-bold uppercase px-2 py-1 rounded-lg border border-red-500/30 hover:border-red-400/50 transition-all" title="Delete Entry">
+                                                                <i class="fa-solid fa-trash mr-1"></i>Delete
+                                                            </button>
+                                                        </div>
                                                     </div>
                                                 </div>
                                                 <div class="text-[10px] text-slate-400 leading-tight line-clamp-3 font-medium" x-text="entry.content"></div>
@@ -273,6 +535,47 @@
                                         <input type="checkbox" x-model="settings.performance_mode_enabled" @change="togglePerformanceMode()" class="w-4 h-4 text-green-600 bg-slate-900 border-slate-700 rounded focus:ring-green-500">
                                     </div>
                                     <p class="text-[8px] text-slate-500 leading-tight">Intelligently queues LLM/SD operations and optimizes image generation based on context size</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- World Info Cache Management -->
+                        <div class="space-y-4 pt-4 border-t border-slate-700">
+                            <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">World Info Cache</h3>
+                            <div class="space-y-3">
+                                <div class="bg-slate-900/50 rounded-xl p-3 border border-slate-700/50">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <div class="text-[9px] font-black uppercase text-slate-400">Cache Status</div>
+                                        <div class="flex gap-2">
+                                            <button @click="fetchCacheStats()" class="text-[8px] text-slate-500 hover:text-slate-300 font-bold uppercase" :disabled="isFetchingCache">
+                                                <i class="fa-solid mr-1" :class="isFetchingCache ? 'fa-circle-notch fa-spin' : 'fa-refresh'"></i>Refresh
+                                            </button>
+                                            <button @click="clearCache()" class="text-[8px] text-red-400 hover:text-red-300 font-bold uppercase" :disabled="isClearingCache">
+                                                <i class="fa-solid mr-1" :class="isClearingCache ? 'fa-circle-notch fa-spin' : 'fa-trash'"></i>Clear
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2 text-[8px] text-slate-500">
+                                        <div>Entries: <span x-text="cacheStats.size || '0'"></span></div>
+                                        <div>Max: <span x-text="cacheStats.max_size || '1000'"></span></div>
+                                        <div>Usage: <span x-text="(cacheStats.usage_percent || 0).toFixed(1) + '%'"></span></div>
+                                        <div>Memory: <span x-text="((cacheStats.size || 0) * 2).toFixed(1) + ' KB (est.)'"></span></div>
+                                    </div>
+                                    <div class="mt-2 w-full bg-slate-800 rounded-full h-1.5">
+                                        <div class="bg-green-500 h-1.5 rounded-full" :style="'width: ' + (cacheStats.usage_percent || 0) + '%'"></div>
+                                    </div>
+                                </div>
+                                
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Cache Size Limit</label>
+                                    <div class="flex gap-2">
+                                        <input type="number" x-model.number="cacheConfig.max_size" class="w-24 bg-slate-900 border border-slate-700 rounded-lg p-1 text-xs outline-none focus:ring-1 focus:ring-blue-500" placeholder="1000">
+                                        <button @click="updateCacheConfig()" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-lg shadow-blue-900/20 transition-all" :disabled="isUpdatingCache">
+                                            <span x-show="!isUpdatingCache">Update</span>
+                                            <i x-show="isUpdatingCache" class="fa-solid fa-circle-notch fa-spin"></i>
+                                        </button>
+                                    </div>
+                                    <p class="text-[8px] text-slate-500 leading-tight">Maximum number of cached world info entries (0 = unlimited)</p>
                                 </div>
                             </div>
                         </div>
@@ -1064,6 +1367,13 @@
                         if (c.data?.extensions?.depth_prompt?.prompt) p += `### Context for ${c.data.name}: ${c.data.extensions.depth_prompt.prompt}\n`;
                     });
 
+                    // World Info section - simulate what the backend would do
+                    if (this.settings.world_info_enabled && this.activeWI) {
+                        // For local preview, we'll just include a placeholder
+                        // The actual world info retrieval happens on the backend
+                        p += "### World Knowledge:\n[World info entries would be inserted here based on recent chat context]\n";
+                    }
+
                     p += "\n### Chat History:\n";
                     this.messages.forEach(m => {
                         if (m.speaker === 'Visual System') return;
@@ -1659,6 +1969,303 @@
                     }
                 },
 
+                // Character Editing Functions
+                editContextMode: 'chat', // 'chat' or 'manual'
+                editContextText: '',
+                isEditingField: false,
+                isEditingCapsule: false,
+
+                async editFieldAI(field) {
+                    if (!this.editingChar || !this.editingChar.data.name) {
+                        alert("Please save the character first.");
+                        return;
+                    }
+                    
+                    this.isEditingField = true;
+                    
+                    let contextText = "";
+                    if (this.editContextMode === 'manual') {
+                        if (!this.editContextText.trim()) {
+                            alert("Please provide context for AI generation.");
+                            this.isEditingField = false;
+                            return;
+                        }
+                        contextText = this.editContextText;
+                    } else {
+                        // Use current chat context
+                        if (this.messages.length === 0) {
+                            alert("Start a conversation first to extract details.");
+                            this.isEditingField = false;
+                            return;
+                        }
+                        // Use last 20 messages for context
+                        contextText = this.messages.slice(-20).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
+                    }
+                    
+                    try {
+                        const res = await axios.post('/api/characters/edit-field-ai', {
+                            filename: this.editingChar._filename || `${this.editingChar.data.name}.json`,
+                            field: field,
+                            context: contextText,
+                            source_mode: this.editContextMode
+                        });
+                        
+                        if (res.data.success) {
+                            // Update the character data
+                            this.editingChar.data[field] = res.data.text;
+                            alert(`${field} updated successfully!`);
+                        } else {
+                            alert(`Error updating ${field}: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error(`Failed to edit ${field}`, e);
+                        alert(`Connection error updating ${field}. Is the backend running?`);
+                    } finally {
+                        this.isEditingField = false;
+                    }
+                },
+
+                async editCapsuleAI() {
+                    if (!this.editingChar || !this.editingChar.data.name) {
+                        alert("Please save the character first.");
+                        return;
+                    }
+                    
+                    this.isEditingCapsule = true;
+                    
+                    let contextText = "";
+                    if (this.editContextMode === 'manual') {
+                        if (!this.editContextText.trim()) {
+                            alert("Please provide context for AI generation.");
+                            this.isEditingCapsule = false;
+                            return;
+                        }
+                        contextText = this.editContextText;
+                    } else {
+                        // Use current chat context
+                        if (this.messages.length === 0) {
+                            alert("Start a conversation first to extract details.");
+                            this.isEditingCapsule = false;
+                            return;
+                        }
+                        // Use last 20 messages for context
+                        contextText = this.messages.slice(-20).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
+                    }
+                    
+                    try {
+                        const res = await axios.post('/api/characters/edit-capsule-ai', {
+                            filename: this.editingChar._filename || `${this.editingChar.data.name}.json`,
+                            context: contextText,
+                            source_mode: this.editContextMode
+                        });
+                        
+                        if (res.data.success) {
+                            // Ensure extensions object exists
+                            if (!this.editingChar.data.extensions) {
+                                this.editingChar.data.extensions = {};
+                            }
+                            this.editingChar.data.extensions.multi_char_summary = res.data.text;
+                            alert("Capsule updated successfully!");
+                        } else {
+                            alert(`Error updating capsule: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error("Capsule AI update failed", e);
+                        alert("Failed to update capsule. Is the backend running?");
+                    } finally {
+                        this.isEditingCapsule = false;
+                    }
+                },
+
+                async saveCharacter() {
+                    try {
+                        await axios.post('/api/characters', this.editingChar);
+                        this.editingChar = null;
+                        await this.fetchCharacters();
+                        alert("Character saved successfully!");
+                    } catch (e) {
+                        console.error(e);
+                        alert("Failed to save character. Is the backend running?");
+                    }
+                },
+
+                // World Info Editing Functions
+                editingWorldEntry: null,
+                worldEditContextMode: 'chat', // 'chat' or 'manual'
+                worldEditContextText: '',
+                isEditingWorldEntry: false,
+                isAddingWorldEntry: false,
+                isDeletingWorldEntry: false,
+
+                startEditWorldEntry(worldInfo, entryUid) {
+                    const entry = worldInfo.entries[entryUid];
+                    this.editingWorldEntry = {
+                        world_name: worldInfo.name,
+                        entry_uid: entryUid,
+                        entry: {
+                            key: Array.isArray(entry.key) ? entry.key.join(', ') : entry.key || '',
+                            comment: entry.comment || '',
+                            content: entry.content || '',
+                            is_canon_law: entry.is_canon_law || false,
+                            useProbability: entry.useProbability || false,
+                            probability: entry.probability || 100
+                        }
+                    };
+                },
+
+                async saveWorldEntry() {
+                    if (!this.editingWorldEntry) return;
+                    
+                    try {
+                        const res = await axios.post('/api/world-info/edit-entry', {
+                            world_name: this.editingWorldEntry.world_name,
+                            entry_uid: this.editingWorldEntry.entry_uid,
+                            field: 'content',
+                            new_value: this.editingWorldEntry.entry.content
+                        });
+                        
+                        if (res.data.success) {
+                            // Update the world info in memory
+                            const worldIndex = this.worldInfos.findIndex(w => w.name === this.editingWorldEntry.world_name);
+                            if (worldIndex !== -1) {
+                                this.worldInfos[worldIndex].entries[this.editingWorldEntry.entry_uid] = {
+                                    ...this.worldInfos[worldIndex].entries[this.editingWorldEntry.entry_uid],
+                                    content: this.editingWorldEntry.entry.content,
+                                    key: this.editingWorldEntry.entry.key.split(',').map(k => k.trim()),
+                                    comment: this.editingWorldEntry.entry.comment,
+                                    is_canon_law: this.editingWorldEntry.entry.is_canon_law,
+                                    useProbability: this.editingWorldEntry.entry.useProbability,
+                                    probability: this.editingWorldEntry.entry.probability
+                                };
+                            }
+                            alert("World info entry saved successfully!");
+                            this.editingWorldEntry = null;
+                        } else {
+                            alert(`Error saving entry: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error("Failed to save world entry", e);
+                        alert("Failed to save world info entry. Is the backend running?");
+                    }
+                },
+
+                async addWorldEntry() {
+                    if (!this.editingWorldEntry || !this.editingWorldEntry.world_name) return;
+                    
+                    this.isAddingWorldEntry = true;
+                    
+                    try {
+                        const res = await axios.post('/api/world-info/add-entry', {
+                            world_name: this.editingWorldEntry.world_name,
+                            entry_data: {
+                                key: this.editingWorldEntry.entry.key.split(',').map(k => k.trim()),
+                                comment: this.editingWorldEntry.entry.comment,
+                                content: this.editingWorldEntry.entry.content,
+                                is_canon_law: this.editingWorldEntry.entry.is_canon_law,
+                                useProbability: this.editingWorldEntry.entry.useProbability,
+                                probability: this.editingWorldEntry.entry.probability
+                            }
+                        });
+                        
+                        if (res.data.success) {
+                            // Refresh the world info
+                            await this.fetchWorldInfo();
+                            alert("New world info entry added successfully!");
+                            this.editingWorldEntry = null;
+                        } else {
+                            alert(`Error adding entry: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error("Failed to add world entry", e);
+                        alert("Failed to add world info entry. Is the backend running?");
+                    } finally {
+                        this.isAddingWorldEntry = false;
+                    }
+                },
+
+                async deleteWorldEntry(worldName, entryUid) {
+                    if (!worldName || !entryUid) return;
+                    
+                    if (!confirm('Delete this world info entry?')) return;
+                    
+                    this.isDeletingWorldEntry = true;
+                    
+                    try {
+                        const res = await axios.post('/api/world-info/delete-entry', {
+                            world_name: worldName,
+                            entry_uid: entryUid
+                        });
+                        
+                        if (res.data.success) {
+                            // Remove from memory
+                            const worldIndex = this.worldInfos.findIndex(w => w.name === worldName);
+                            if (worldIndex !== -1) {
+                                delete this.worldInfos[worldIndex].entries[entryUid];
+                            }
+                            alert("World info entry deleted successfully!");
+                        } else {
+                            alert(`Error deleting entry: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error("Failed to delete world entry", e);
+                        alert("Failed to delete world info entry. Is the backend running?");
+                    } finally {
+                        this.isDeletingWorldEntry = false;
+                    }
+                },
+
+                async editWorldEntryAI(section) {
+                    if (!this.editingWorldEntry || !this.editingWorldEntry.world_name) {
+                        alert("Please select a world info entry first.");
+                        return;
+                    }
+                    
+                    this.isEditingWorldEntry = true;
+                    
+                    let contextText = "";
+                    if (this.worldEditContextMode === 'manual') {
+                        if (!this.worldEditContextText.trim()) {
+                            alert("Please provide context for AI generation.");
+                            this.isEditingWorldEntry = false;
+                            return;
+                        }
+                        contextText = this.worldEditContextText;
+                    } else {
+                        // Use current chat context
+                        if (this.messages.length === 0) {
+                            alert("Start a conversation first to extract details.");
+                            this.isEditingWorldEntry = false;
+                            return;
+                        }
+                        // Use last 50 messages for context
+                        contextText = this.messages.slice(-50).map(m => `${m.speaker || (m.role === 'user' ? 'User' : 'Narrator')}: ${m.content}`).join('\n');
+                    }
+                    
+                    try {
+                        const res = await axios.post('/api/world-info/edit-entry-ai', {
+                            world_name: this.editingWorldEntry.world_name,
+                            entry_uid: this.editingWorldEntry.entry_uid,
+                            section: section,
+                            tone: this.worldGen.tone || 'sfw',
+                            context: contextText,
+                            source_mode: this.worldEditContextMode
+                        });
+                        
+                        if (res.data.success) {
+                            // Update the entry content
+                            this.editingWorldEntry.entry.content = res.data.text;
+                            alert(`${section} content updated successfully!`);
+                        } else {
+                            alert(`Error updating ${section}: ${res.data.error}`);
+                        }
+                    } catch (e) {
+                        console.error(`Failed to edit ${section}`, e);
+                        alert(`Connection error updating ${section}. Is the backend running?`);
+                    } finally {
+                        this.isEditingWorldEntry = false;
+                    }
+                },
+
                 scrollToBottom() {
                     setTimeout(() => {
                         const container = document.getElementById('chat-container');
@@ -1944,6 +2551,78 @@
                     
                     // Test connections with new URLs
                     await this.checkAllServices();
+                },
+
+                // World Info Cache Management
+                cacheStats: { size: 0, max_size: 1000, usage_percent: 0 },
+                cacheConfig: { max_size: 1000 },
+                isFetchingCache: false,
+                isClearingCache: false,
+                isUpdatingCache: false,
+
+                async fetchCacheStats() {
+                    this.isFetchingCache = true;
+                    try {
+                        const res = await axios.get('/api/world-info/cache/stats');
+                        if (res.data.success) {
+                            this.cacheStats = res.data.stats;
+                        }
+                    } catch (e) {
+                        console.error('Failed to fetch cache stats', e);
+                        alert('Failed to fetch cache statistics. Is the backend running?');
+                    } finally {
+                        this.isFetchingCache = false;
+                    }
+                },
+
+                async clearCache() {
+                    if (!confirm('Clear the world info cache? This will remove all cached entries and may slow down world info processing temporarily.')) {
+                        return;
+                    }
+                    
+                    this.isClearingCache = true;
+                    try {
+                        const res = await axios.post('/api/world-info/cache/clear');
+                        if (res.data.success) {
+                            alert('World info cache cleared successfully!');
+                            // Refresh stats after clearing
+                            await this.fetchCacheStats();
+                        } else {
+                            alert('Failed to clear cache: ' + res.data.error);
+                        }
+                    } catch (e) {
+                        console.error('Failed to clear cache', e);
+                        alert('Failed to clear cache. Is the backend running?');
+                    } finally {
+                        this.isClearingCache = false;
+                    }
+                },
+
+                async updateCacheConfig() {
+                    if (!this.cacheConfig.max_size || this.cacheConfig.max_size < 0) {
+                        alert('Please enter a valid cache size (0 for unlimited, or a positive number)');
+                        return;
+                    }
+                    
+                    this.isUpdatingCache = true;
+                    try {
+                        const res = await axios.post('/api/world-info/cache/configure', {
+                            max_size: this.cacheConfig.max_size
+                        });
+                        
+                        if (res.data.success) {
+                            alert(`Cache size limit updated to ${res.data.max_size} entries`);
+                            // Refresh stats after updating
+                            await this.fetchCacheStats();
+                        } else {
+                            alert('Failed to update cache config: ' + res.data.error);
+                        }
+                    } catch (e) {
+                        console.error('Failed to update cache config', e);
+                        alert('Failed to update cache configuration. Is the backend running?');
+                    } finally {
+                        this.isUpdatingCache = false;
+                    }
                 },
 
                 // Helper functions for branch display
