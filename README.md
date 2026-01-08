@@ -668,71 +668,45 @@ Threshold behavior:
 
 **Smart Hint Engine**
 Context-aware suggestions triggered by performance metrics:
-
-Contention hints: When SD timing exceeds 3× median with large context
-
-Quality hints: When emergency preset is active
-
-Optimization tips: Actionable suggestions (reduce context reinforcement, generate images outside chat)
-
-Non-intrusive: Dismissible notifications, no repetition
+- **Contention hints**: When SD timing exceeds 3× median with large context
+- **Quality hints**: When emergency preset is active
+- **Optimization tips**: Actionable suggestions (reduce context reinforcement, generate images outside chat)
+- **Non-intrusive**: Dismissible notifications, no repetition
 
 **API Endpoints**
 RESTful interface for status monitoring and control:
-
-GET /api/performance/status – Returns current operation states and queue depth
-
-POST /api/performance/toggle – Enable/disable performance mode
-
-GET /api/performance/hints – Fetch current contextual hints
-
-Proper error handling: Graceful degradation when performance mode is disabled
+- **GET /api/performance/status**: Returns current operation states and queue depth
+- **POST /api/performance/toggle**: Enable/disable performance mode
+- **GET /api/performance/hints**: Fetch current contextual hints
+- **Error handling**: Graceful degradation when performance mode is disabled
 
 **Frontend Components**
 Real-time status display with automatic updates:
-
-Settings toggle: "Automatic performance mode (recommended when running LLM + SD on same GPU)"
-
-Persisted via localStorage
-
-Immediate backend synchronization via togglePerformanceMode()
-
-Status polling: updatePerformanceStatus() checks backend state every 2 seconds
-
-Status indicators: Simple idle/running/queued badges for Text and Images
-
-Hint display: Contextual tips with dismiss functionality
-
-Conditional UI: Status and hints only visible when performance mode is enabled
+- **Settings toggle**: "Automatic performance mode (recommended when running LLM + SD on same GPU)"
+- **Persistence**: Settings persisted via localStorage
+- **Backend sync**: Immediate synchronization via togglePerformanceMode()
+- **Status polling**: updatePerformanceStatus() checks backend state every 2 seconds
+- **Status indicators**: Simple idle/running/queued badges for Text and Images
+- **Hint display**: Contextual tips with dismiss functionality
+- **Conditional UI**: Status and hints only visible when performance mode is enabled
 
 **Thread Safety and Async Design**
-
-Async locking: asyncio.Lock() prevents race conditions between concurrent operations
-
-Proper lock patterns: Acquire → execute → release with exception handling
-
-Deadlock prevention: Light operations never acquire heavy locks; heavy operations use timeout patterns
+- **Async locking**: asyncio.Lock() prevents race conditions between concurrent operations
+- **Lock patterns**: Acquire → execute → release with exception handling
+- **Deadlock prevention**: Light operations never acquire heavy locks; heavy operations use timeout patterns
 
 **Production Readiness**
 Automatically optimizes for users with:
-
-Large story contexts (12K+ tokens)
-
-Single-GPU setups running both LLM and SD
-
-Heavy image generation workloads
-
-Multiple concurrent operations
+- **Large story contexts**: 12K+ tokens
+- **Single-GPU setups**: Running both LLM and SD
+- **Heavy workloads**: Image generation workloads
+- **Multiple operations**: Concurrent operations
 
 **Performance Characteristics**
-
-Memory overhead: Fixed at ~160 bytes per operation type (10-element deque)
-
-CPU overhead: Median calculation is O(n log n) but only runs on 10 elements
-
-Latency impact: Lock contention adds <1ms for light operations
-
-Cache behavior: No persistent cache; all tracking is session-based
+- **Memory overhead**: Fixed at ~160 bytes per operation type (10-element deque)
+- **CPU overhead**: Median calculation is O(n log n) but only runs on 10 elements
+- **Latency impact**: Lock contention adds <1ms for light operations
+- **Cache behavior**: No persistent cache; all tracking is session-based
 
 ---
 
@@ -861,3 +835,5 @@ Cache behavior: No persistent cache; all tracking is session-based
 - Automatic summarization at 85% context.
 - Canon Law system for immutable world facts.
 - Danbooru character tagging for consistent image generation.
+- Automatic summarization at 85% context.
+- In-memory cache growth: Cache grows unbounded until server restart.
