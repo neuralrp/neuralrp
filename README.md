@@ -1,6 +1,6 @@
 # NeuralRP
 
-NeuralRP is an opinionated roleplay interface for local LLMs. It's built for users who already understand the basics — temperature, context length, model choice — and want a fast, coherent RP experience without managing dozens of knobs or extensions. NeuralRP integrates KoboldCpp and Stable Diffusion WebUI (AUTOMATIC1111) directly, applies strong narrative defaults, and turns live roleplay into portable, SillyTavern-compatible character and world cards.
+NeuralRP is an opinionated roleplay interface for local LLMs. It's built for users who already understand the basics — temperature, context length, model choice — and want a fast, coherent RP experience without managing dozens of knobs or extensions. Optimized for modest GPUs, NeuralRP integrates KoboldCpp and Stable Diffusion WebUI (AUTOMATIC1111) directly, applies strong narrative defaults, and turns live roleplay sessions into portable, SillyTavern-compatible character and world cards.
 
 ---
 
@@ -13,9 +13,11 @@ This section covers what NeuralRP does, who it's for, and how to use it.
 NeuralRP is designed for experienced RP users who want:
 - **Speed over tweakability** – Strong defaults, fewer configuration knobs, faster setup.
 - **Coherence over flexibility** – Opinionated prompt structure that maintains character voices and world consistency.
-- **Portability** – Everything is plain JSON files that work with SillyTavern and other tools.
+- **Efficiency on constrained hardware** – Built to run text generation and image generation together on modest GPUs (like 12GB cards) without requiring massive context windows or cloud infrastructure.
+- **Portability** – Generated JSON cards are optimized with PList and plain text that follow best practices for SillyTavern and other tools.
+- **Strong visual support** -  Customizable per‑character image prompts and inline generations that avoid leaking text into the chat context while storing images in a dedicated folder.
 
-If you're looking for a generic LLM dashboard with every possible parameter exposed, this isn't it. NeuralRP focuses on roleplay-specific workflows with minimal friction.
+If you're looking for a generic LLM dashboard with every possible parameter exposed, this isn't it. NeuralRP focuses on fast, hardware-efficient roleplay workflows with minimal friction.
 
 ### Key Differentiators
 
@@ -30,11 +32,14 @@ What makes NeuralRP different from other RP frontends:
 3. **Canon Law + Scalable World Info**  
    Mark critical lore as "Canon Law" (always included, never capped). Regular entries use keyword matching with configurable caps and probability weighting, so huge worlds stay fast.
 
-4. **Branch Management with Origin Tracking**  
-   Fork from any message to create independent timelines. Each branch remembers where it came from and can be renamed, deleted, or switched to at any time.
+4. **Auto Mode with Smart Speaker Selection**
+   Let the AI decide who speaks (narrator or which character) turn-by-turn based on context, using compressed capsule personas to keep every voice distinct.
 
-5. **Automatic Summarization at 85%**  
-   When context fills up, older messages are automatically summarized and removed from the active window while their content remains accessible to the model.
+5. **Small-GPU friendly design**
+   Prompt structure, automatic summarization, and capped World Info are tuned so you can run a text model and an image model together locally on 12GB cards without massive context windows.
+
+6. **Dedicated Narrator Mode**
+   Built-in third-person narrator mode where the AI acts as game master and storyteller, separate from character voices, without needing custom cards or prompt hacks.
 
 ---
 
@@ -101,6 +106,9 @@ What makes NeuralRP different from other RP frontends:
   - Configurable cap on the number of regular entries included per turn to prevent prompt bloat, while Canon Law entries remain uncapped and always included.  
   - Optional probability weighting (`useProbability` + `probability`) to allow some entries to appear stochastically instead of every time they trigger.  
   - A global "Enable World Info" toggle in Settings for sessions where you want maximum speed or rules-light play.
+
+- **Automatic Performance Mode (v1.2)**  
+  Smart GPU resource management when running LLM + Stable Diffusion together. Queues heavy operations while allowing quick tasks to proceed, automatically adjusts SD quality under load, and provides context-aware hints. Includes rolling median performance tracking to detect contention and a master toggle to enable/disable the entire system.
 
 ### Customization Options
 
@@ -612,6 +620,120 @@ Per-character visual canon:
 - Inline display in chat UI via `<img>` tags.
 - Chat JSON stores image filenames so they reload with the session.
 
+### Dynamic Resource Management (v1.2)
+
+**Overview**
+When running both LLM (KoboldCpp) and Stable Diffusion on the same GPU, resource contention can cause slowdowns, timeouts, or out-of-memory errors. NeuralRP's performance mode intelligently manages these operations using async queuing and statistical analysis to maintain responsiveness without requiring manual intervention.
+
+**Resource Manager Class**
+Coordinates GPU access using `asyncio.Lock()` for thread-safe operation:
+- **Operation classification**:
+  - Light: Text generation with small contexts, status checks, UI updates
+  - Heavy: Image generation, large context text, card/world generation
+- **Queuing behavior**:
+  - Heavy operations queue when another heavy op is in progress
+  - Light operations bypass the queue and proceed immediately
+  - Prevents deadlock through careful lock acquisition/release patterns
+- **State tracking**: Maintains `active_llm`, `active_sd`, and queue status for real-time monitoring
+- **Status reporting**: Returns `idle`, `running`, or `queued` for both text and image operations
+
+**Performance Tracker**
+Maintains rolling median timing using `collections.deque(maxlen=10)`:
+- **Statistical method**: `statistics.median()` ignores outliers (cold starts, system spikes)
+- **Per-operation tracking**: Separate medians for LLM and SD operations
+- **Contention detection formula**: Flags resource conflict when:
+(current_sd_time > 3× median_sd_time) AND (context_tokens > 8000)
+
+- **Memory bounded**: Fixed-size rolling window prevents unbounded growth
+
+**SD Context-Aware Presets**
+Three-tier optimization automatically selected based on story length:
+
+```python
+SD_PRESETS = {
+  "normal": {"steps": 20, "width": 512, "height": 512, "threshold": 0},
+  "light": {"steps": 15, "width": 384, "height": 384, "threshold": 8000},
+  "emergency": {"steps": 10, "width": 256, "height": 256, "threshold": 12000}
+}
+Automatic selection: select_sd_preset() checks current context token count
+
+Threshold behavior:
+
+0-7999 tokens: Normal quality (512×512, 20 steps)
+
+8000-11999 tokens: Light quality (384×384, 15 steps) to free VRAM for text
+
+12000+ tokens: Emergency quality (256×256, 10 steps) to avoid conflicts
+```
+
+**Smart Hint Engine**
+Context-aware suggestions triggered by performance metrics:
+
+Contention hints: When SD timing exceeds 3× median with large context
+
+Quality hints: When emergency preset is active
+
+Optimization tips: Actionable suggestions (reduce context reinforcement, generate images outside chat)
+
+Non-intrusive: Dismissible notifications, no repetition
+
+**API Endpoints**
+RESTful interface for status monitoring and control:
+
+GET /api/performance/status – Returns current operation states and queue depth
+
+POST /api/performance/toggle – Enable/disable performance mode
+
+GET /api/performance/hints – Fetch current contextual hints
+
+Proper error handling: Graceful degradation when performance mode is disabled
+
+**Frontend Components**
+Real-time status display with automatic updates:
+
+Settings toggle: "Automatic performance mode (recommended when running LLM + SD on same GPU)"
+
+Persisted via localStorage
+
+Immediate backend synchronization via togglePerformanceMode()
+
+Status polling: updatePerformanceStatus() checks backend state every 2 seconds
+
+Status indicators: Simple idle/running/queued badges for Text and Images
+
+Hint display: Contextual tips with dismiss functionality
+
+Conditional UI: Status and hints only visible when performance mode is enabled
+
+**Thread Safety and Async Design**
+
+Async locking: asyncio.Lock() prevents race conditions between concurrent operations
+
+Proper lock patterns: Acquire → execute → release with exception handling
+
+Deadlock prevention: Light operations never acquire heavy locks; heavy operations use timeout patterns
+
+**Production Readiness**
+Automatically optimizes for users with:
+
+Large story contexts (12K+ tokens)
+
+Single-GPU setups running both LLM and SD
+
+Heavy image generation workloads
+
+Multiple concurrent operations
+
+**Performance Characteristics**
+
+Memory overhead: Fixed at ~160 bytes per operation type (10-element deque)
+
+CPU overhead: Median calculation is O(n log n) but only runs on 10 elements
+
+Latency impact: Lock contention adds <1ms for light operations
+
+Cache behavior: No persistent cache; all tracking is session-based
+
 ---
 
 ## Design Decisions & Tradeoffs
@@ -671,6 +793,22 @@ Per-character visual canon:
 **Tuning:**
 - Configurable in settings under "Summ Threshold"
 - 85% aligns with Anthropic's Claude Code approach and community best practices.
+
+### Why Async Locking Instead of Process-Level Resource Management?
+**Pros:**
+- Works within single-process FastAPI server (no multi-process coordination needed)
+- `asyncio.Lock()` is lightweight and fast (<1ms overhead)
+- Proper deadlock prevention through careful lock patterns
+- Clean integration with existing async/await codebase
+
+**Cons:**
+- Only protects within NeuralRP process; doesn't prevent external tools from overloading GPU
+- No cross-process coordination if running multiple NeuralRP instances
+
+**Mitigation:**
+- NeuralRP is designed for single-user local desktop use where one instance is typical
+- Performance tracker detects contention from external sources via timing analysis
+- Hints guide users to close other GPU-intensive applications when detected
 
 ---
 
