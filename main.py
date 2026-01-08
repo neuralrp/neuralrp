@@ -11,6 +11,10 @@ import re
 import random
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+import asyncio
+from collections import deque
+from bisect import insort
+from statistics import median
 
 app = FastAPI()
 
@@ -21,11 +25,202 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# SD Presets for context-aware optimization
+SD_PRESETS = {
+    "normal": {
+        "steps": 20,
+        "width": 512,
+        "height": 512,
+        "threshold": 0
+    },
+    "light": {
+        "steps": 15,
+        "width": 384,
+        "height": 384,
+        "threshold": 8000
+    },
+    "emergency": {
+        "steps": 10,
+        "width": 256,
+        "height": 256,
+        "threshold": 12000
+    }
+}
+
+# Resource Manager for operation queuing
+class ResourceManager:
+    def __init__(self):
+        self.active_llm = False
+        self.active_sd = False
+        self.llm_queue = deque()
+        self.sd_queue = deque()
+        self.lock = asyncio.Lock()
+        self.performance_mode_enabled = True
+    
+    async def execute_llm(self, operation, op_type="heavy"):
+        """Execute LLM operation with queuing based on operation type"""
+        if not self.performance_mode_enabled:
+            return await operation()
+        
+        async with self.lock:
+            # Light operations can interleave with heavy SD
+            if op_type == "light" or not self.active_sd:
+                self.active_llm = True
+            else:
+                # Queue heavy LLM if SD is running
+                future = asyncio.Future()
+                self.llm_queue.append(future)
+                self.lock.release()
+                await future
+                self.lock.acquire_immediately()
+                self.active_llm = True
+        
+        try:
+            result = await operation()
+            return result
+        finally:
+            async with self.lock:
+                self.active_llm = False
+                # Start next LLM if any queued
+                if self.llm_queue and not self.active_sd:
+                    next_future = self.llm_queue.popleft()
+                    next_future.set_result(None)
+    
+    async def execute_sd(self, operation):
+        """Execute SD operation with queuing"""
+        if not self.performance_mode_enabled:
+            return await operation()
+        
+        async with self.lock:
+            # Wait if LLM is running (SD is always heavy)
+            if self.active_llm:
+                future = asyncio.Future()
+                self.sd_queue.append(future)
+                self.lock.release()
+                await future
+                self.lock.acquire_immediately()
+            self.active_sd = True
+        
+        try:
+            result = await operation()
+            return result
+        finally:
+            async with self.lock:
+                self.active_sd = False
+                # Start next SD if any queued
+                if self.sd_queue:
+                    next_future = self.sd_queue.popleft()
+                    next_future.set_result(None)
+                # Resume LLM queue if paused
+                if self.llm_queue:
+                    next_future = self.llm_queue.popleft()
+                    next_future.set_result(None)
+    
+    def get_status(self):
+        """Get current resource status"""
+        return {
+            "llm": "running" if self.active_llm else ("queued" if self.llm_queue else "idle"),
+            "sd": "running" if self.active_sd else ("queued" if self.sd_queue else "idle"),
+            "llm_queue_length": len(self.llm_queue),
+            "sd_queue_length": len(self.sd_queue)
+        }
+
+# Performance Tracker with rolling medians
+class PerformanceTracker:
+    def __init__(self, max_samples=10):
+        self.llm_times = deque(maxlen=max_samples)
+        self.sd_times = deque(maxlen=max_samples)
+        self.max_samples = max_samples
+    
+    def record_llm(self, duration):
+        """Record LLM operation duration"""
+        self.llm_times.append(duration)
+    
+    def record_sd(self, duration):
+        """Record SD operation duration"""
+        self.sd_times.append(duration)
+    
+    def get_median_llm(self):
+        """Get median LLM time"""
+        if not self.llm_times:
+            return None
+        return median(list(self.llm_times))
+    
+    def get_median_sd(self):
+        """Get median SD time"""
+        if not self.sd_times:
+            return None
+        return median(list(self.sd_times))
+    
+    def detect_contention(self, sd_duration, context_tokens):
+        """Detect if SD is experiencing contention"""
+        median_sd = self.get_median_sd()
+        if median_sd is None:
+            return False
+        # If SD took > 3x median time and context is large
+        return sd_duration > median_sd * 3 and context_tokens > 8000
+
+# Smart Hint Engine
+class SmartHintEngine:
+    def __init__(self):
+        self.shown_hints = set()
+    
+    def generate_hint(self, performance_tracker, context_tokens, sd_duration=None):
+        """Generate contextual performance hints"""
+        hints = []
+        
+        # Check for SD slow-down due to large context
+        if sd_duration and performance_tracker.detect_contention(sd_duration, context_tokens):
+            hint_key = "sd_slow_context"
+            if hint_key not in self.shown_hints:
+                hints.append({
+                    "id": hint_key,
+                    "message": "Images are slow because the story is very long—consider a smaller model or shorter context for smoother images.",
+                    "severity": "warning"
+                })
+                self.shown_hints.add(hint_key)
+        
+        # Check for very large context in general
+        if context_tokens > 12000:
+            hint_key = "large_context"
+            if hint_key not in self.shown_hints:
+                hints.append({
+                    "id": hint_key,
+                    "message": "Story context is very long. Consider summarizing or creating a branch to maintain performance.",
+                    "severity": "info"
+                })
+                self.shown_hints.add(hint_key)
+        
+        # Check for SD degradation
+        if sd_duration and performance_tracker.get_median_sd():
+            median_sd = performance_tracker.get_median_sd()
+            if sd_duration > median_sd * 2:
+                hint_key = "sd_degradation"
+                if hint_key not in self.shown_hints:
+                    hints.append({
+                        "id": hint_key,
+                        "message": "Image generation is slower than usual. The system may be under heavy load.",
+                        "severity": "info"
+                    })
+                    self.shown_hints.add(hint_key)
+        
+        return hints
+    
+    def dismiss_hint(self, hint_id):
+        """Allow user to dismiss a hint"""
+        self.shown_hints.discard(hint_id)
+
+# Global instances
+resource_manager = ResourceManager()
+performance_tracker = PerformanceTracker()
+hint_engine = SmartHintEngine()
+
 # Configuration
 CONFIG = {
     "kobold_url": "http://127.0.0.1:5001",
     "sd_url": "http://127.0.0.1:7861",
-    "system_prompt": "Write a highly detailed, creative, and immersive response. Stay in character at all times."
+    "system_prompt": "Write a highly detailed, creative, and immersive response. Stay in character at all times.",
+    "performance_mode_enabled": True
 }
 
 # Multi-Character Mode Instruction Templates
@@ -109,6 +304,7 @@ class SDParams(BaseModel):
     height: int = 512
     sampler_name: str = "Euler a"
     scheduler: str = "Automatic"
+    context_tokens: Optional[int] = 0  # Context length for SD optimization
 
 class CardGenRequest(BaseModel):
     char_name: str
@@ -694,6 +890,34 @@ async def read_index():
             return f.read()
     return "Index.html not found"
 
+# Performance mode management endpoints
+@app.get("/api/performance/status")
+async def get_performance_status():
+    """Get current resource status and performance mode state"""
+    return {
+        "performance_mode_enabled": resource_manager.performance_mode_enabled,
+        "status": resource_manager.get_status(),
+        "median_llm_time": performance_tracker.get_median_llm(),
+        "median_sd_time": performance_tracker.get_median_sd()
+    }
+
+@app.post("/api/performance/toggle")
+async def toggle_performance_mode(request: dict):
+    """Enable or disable performance mode"""
+    enabled = request.get("enabled", True)
+    resource_manager.performance_mode_enabled = enabled
+    CONFIG["performance_mode_enabled"] = enabled
+    return {"success": True, "enabled": enabled}
+
+@app.post("/api/performance/dismiss-hint")
+async def dismiss_hint(request: dict):
+    """Dismiss a performance hint"""
+    hint_id = request.get("hint_id")
+    if hint_id:
+        hint_engine.dismiss_hint(hint_id)
+        return {"success": True}
+    return {"success": False, "error": "No hint_id provided"}
+
 @app.post("/api/chat")
 async def chat(request: PromptRequest):
     # Auto-generate capsules for group chats (2+ characters)
@@ -830,8 +1054,9 @@ async def chat(request: PromptRequest):
         if not request.characters: 
             stops.append("Narrator:")
 
-    async with httpx.AsyncClient() as client:
-        try:
+    # Define the LLM operation to be managed
+    async def llm_operation():
+        async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{CONFIG['kobold_url']}/api/v1/generate",
                 json={
@@ -849,6 +1074,29 @@ async def chat(request: PromptRequest):
                 "summary": current_request.summary
             }
             return data
+    
+    # Route through resource manager with performance tracking
+    if resource_manager.performance_mode_enabled:
+        start_time = time.time()
+        try:
+            data = await resource_manager.execute_llm(llm_operation, op_type="heavy")
+            duration = time.time() - start_time
+            performance_tracker.record_llm(duration)
+            
+            # Generate hints based on performance
+            hints = hint_engine.generate_hint(performance_tracker, tokens)
+            if hints:
+                data["_performance_hints"] = hints
+            
+            return data
+        except Exception as e:
+            duration = time.time() - start_time
+            performance_tracker.record_llm(duration)
+            return {"error": str(e)}
+    else:
+        # Direct call when performance mode is disabled
+        try:
+            return await llm_operation()
         except Exception as e:
             return {"error": str(e)}
 
@@ -857,9 +1105,19 @@ async def proxy_tokencount(request: dict):
     count = await get_token_count(request.get("prompt", ""))
     return {"count": count}
 
+def select_sd_preset(context_tokens: int) -> dict:
+    """Select appropriate SD preset based on context size"""
+    if context_tokens >= SD_PRESETS["emergency"]["threshold"]:
+        return SD_PRESETS["emergency"]
+    elif context_tokens >= SD_PRESETS["light"]["threshold"]:
+        return SD_PRESETS["light"]
+    else:
+        return SD_PRESETS["normal"]
+
 @app.post("/api/generate-image")
 async def generate_image(params: SDParams):
     processed_prompt = params.prompt
+    context_tokens = params.context_tokens or 0
     
     # Identify bracketed character names [Name]
     bracketed_names = re.findall(r"\[(.*?)\]", params.prompt)
@@ -884,11 +1142,32 @@ async def generate_image(params: SDParams):
                     # Replace [Name] with the tag
                     processed_prompt = processed_prompt.replace(f"[{name}]", danbooru_tag)
 
-    async with httpx.AsyncClient() as client:
-        try:
-            payload = params.dict()
-            payload["prompt"] = processed_prompt
-            print(f"SD Prompt Construction: {processed_prompt}")
+    # Define the SD operation to be managed
+    async def sd_operation():
+        # Apply context-aware preset if performance mode is enabled
+        if resource_manager.performance_mode_enabled:
+            preset = select_sd_preset(context_tokens)
+            # Use preset values if they differ from user input
+            final_steps = preset["steps"] if preset["steps"] != 20 else params.steps
+            final_width = preset["width"] if preset["width"] != 512 else params.width
+            final_height = preset["height"] if preset["height"] != 512 else params.height
+        else:
+            final_steps = params.steps
+            final_width = params.width
+            final_height = params.height
+        
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "prompt": processed_prompt,
+                "negative_prompt": params.negative_prompt,
+                "steps": final_steps,
+                "cfg_scale": params.cfg_scale,
+                "width": final_width,
+                "height": final_height,
+                "sampler_name": params.sampler_name,
+                "scheduler": params.scheduler
+            }
+            print(f"SD Prompt Construction (preset applied: {preset if resource_manager.performance_mode_enabled else 'user'}): {processed_prompt}")
             
             response = await client.post(
                 f"{CONFIG['sd_url']}/sdapi/v1/txt2img",
@@ -903,11 +1182,34 @@ async def generate_image(params: SDParams):
             
             with open(file_path, "wb") as f:
                 f.write(base64.b64decode(image_base64))
-                
+            
             return {
                 "url": f"/images/{filename}",
                 "filename": filename
             }
+    
+    # Route through resource manager with performance tracking
+    if resource_manager.performance_mode_enabled:
+        start_time = time.time()
+        try:
+            result = await resource_manager.execute_sd(sd_operation)
+            duration = time.time() - start_time
+            performance_tracker.record_sd(duration)
+            
+            # Generate hints based on SD performance
+            hints = hint_engine.generate_hint(performance_tracker, context_tokens, duration)
+            if hints:
+                result["_performance_hints"] = hints
+            
+            return result
+        except Exception as e:
+            duration = time.time() - start_time
+            performance_tracker.record_sd(duration)
+            return {"error": str(e)}
+    else:
+        # Direct call when performance mode is disabled
+        try:
+            return await sd_operation()
         except Exception as e:
             return {"error": str(e)}
 
