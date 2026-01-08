@@ -111,7 +111,7 @@ What makes NeuralRP different from other RP frontends:
   - A global "Enable World Info" toggle in Settings for sessions where you want maximum speed or rules-light play.
 
 - **Semantic World Info Retrieval (v1.3)**  
-  Optional semantic search engine using `all-mpnet-base-v2` sentence transformers for intelligent lore retrieval. Computes embeddings for world info entries and uses cosine similarity to find contextually relevant entries based on recent chat content. Falls back to keyword matching if semantic search returns no results. Includes LRU caching for embeddings to avoid reprocessing, automatic GPU detection, and configurable similarity thresholds (default: 0.25).
+  Semantic search engine using `all-mpnet-base-v2` sentence transformers for intelligent lore retrieval. Computes embeddings for world info entries and uses cosine similarity to find contextually relevant entries based on recent chat content. Falls back to keyword matching if semantic search returns no results. Includes LRU caching for embeddings to avoid reprocessing, automatic GPU detection, and configurable similarity thresholds (default: 0.25).
 
 - **LRU Cache for World Info (v1.3)**  
   Proper memory management for world info caching using custom LRU (Least Recently Used) eviction policy. Default 1000-entry cache prevents memory leaks while maintaining performance. Includes user-configurable cache size, real-time statistics (entries, usage percentage, estimated memory), manual cache clearing, and API endpoints for monitoring and management.
@@ -1070,32 +1070,31 @@ NeuralRP is designed for local hardware with varying resource constraints. An un
 - Memory savings: Prevents unbounded growth that reached 500MB+ in v1.1 during 8-hour sessions
 - Performance maintenance: Retains 60-80% CPU reduction from caching despite eviction overhead
 
-### Why Semantic Search as Optional Feature?
+### Why Semantic Search is Invisible by Default?
 
-**Hybrid Approach: Semantic + Keyword Fallback**
+**Opinionated Upgrade, Not a New Knob**
+
+Semantic search replaces pure keyword matching as the default world info retrieval strategy because it consistently produces more coherent, context-aware lore injection with minimal overhead on typical NeuralRP hardware. It runs automatically in the background and requires no configuration or extra UX.
 
 **Pros:**
-- Provides conceptual understanding for complex worlds
-- Eliminates false positives from short keywords
-- Better at finding relevant lore when context is indirect
-- Optional - users can disable if hardware-constrained
+- Provides conceptual understanding for complex worlds, not just exact keyword hits.  
+- Greatly reduces false positives from short or ambiguous keywords.  
+- Finds relevant lore even when the chat references concepts indirectly.  
+- Runs transparently with a small startup cost and modest memory footprint on 12GB-class GPUs.
 
 **Cons:**
-- Requires additional dependencies (sentence-transformers, torch)
-- Cold start latency (~2-3 seconds for initial embeddings)
-- Higher memory overhead (~3KB per world info entry)
-- GPU required for acceptable performance on large worlds
+- Requires additional dependencies (`sentence-transformers`, `torch`).  
+- Adds a small cold start delay (~2–3 seconds for initial embeddings).  
+- Increases memory usage slightly (~3KB per world info entry).
 
 **Why This Matters:**
-NeuralRP targets users running on modest GPUs (12GB cards). Forcing semantic search would exclude users without spare VRAM or those running very large world databases. Making it optional allows power users to benefit while maintaining compatibility with the original keyword-only approach.
+NeuralRP is built for fast, coherent RP on modest local hardware. Semantic search is treated as a backend optimization, not a power-user feature: it improves world consistency and reduces lore noise without adding sliders, toggles, or setup friction. For edge cases or very constrained environments, the system still falls back to keyword matching when semantic results are insufficient or unavailable.
 
 **Design Decision:**
-- Semantic search enabled by default for worlds with >50 entries
-- Automatic fallback to keyword matching if semantic returns no results
-- Canon Law system works identically in both modes
-- User can disable semantic search entirely via Settings toggle
-
----
+- Semantic search is always enabled as the primary retrieval method.  
+- Automatic fallback to keyword matching if semantic search returns no results or cannot run.  
+- Canon Law behavior is unchanged and remains deterministic and always-included.  
+- No UI toggle is exposed; this is an opinionated default in service of coherence and minimal configuration.
 
 ## Future Considerations
 
@@ -1135,10 +1134,9 @@ NeuralRP targets users running on modest GPUs (12GB cards). Forcing semantic sea
 
 ### v1.3 (Current)
 - **In-Card Editing**: Full character and world info editing interface with AI-assisted content generation and manual field editing
-- **Semantic World Info**: Optional semantic search using sentence transformers for intelligent, context-aware lore retrieval with cosine similarity matching
+- **Semantic World Info**: Semantic search using sentence transformers for intelligent, context-aware lore retrieval with cosine similarity matching
 - **LRU Cache System**: Memory-safe world info caching with configurable limits, automatic eviction, and real-time monitoring UI
 - **Cache Management API**: RESTful endpoints for cache statistics, manual clearing, and size configuration
-- **Mobile-Optimized UX**: Save/cancel buttons repositioned to bottom of edit dialogs for better touch device support
 - **Enhanced Edit Functionality**: Reliable character toggle (add/remove from chat), improved responsive design across devices
 
 ### v1.2
@@ -1166,5 +1164,4 @@ NeuralRP targets users running on modest GPUs (12GB cards). Forcing semantic sea
 - Automatic summarization at 85% context.
 - Canon Law system for immutable world facts.
 - Danbooru character tagging for consistent image generation.
-- Event-Driven Updates: Immediate health checks after manual user actions
-- Branching system: Fork from any message, independent chat files, origin metadata, branch management UI.
+
