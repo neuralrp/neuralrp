@@ -176,6 +176,38 @@
                     <div class="space-y-6">
                         <div class="space-y-4 pt-2">
                             <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">Neural Connection</h3>
+                            
+                            <!-- Connection Status Indicators -->
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div class="bg-slate-900/50 rounded-xl p-3 border border-slate-700/50">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <div class="flex items-center gap-2">
+                                            <div class="w-2 h-2 rounded-full" :class="getServiceStatusClass('kobold')"></div>
+                                            <span class="text-[9px] font-black uppercase text-slate-400">KoboldCpp</span>
+                                        </div>
+                                        <button @click="testConnection('kobold')" class="text-[8px] text-slate-500 hover:text-slate-300 font-bold uppercase" :disabled="isCheckingConnections">
+                                            <i class="fa-solid mr-1" :class="isCheckingConnections ? 'fa-circle-notch fa-spin' : 'fa-refresh'"></i>Test
+                                        </button>
+                                    </div>
+                                    <div class="text-[8px] text-slate-500 leading-tight" x-text="getServiceStatusText('kobold')"></div>
+                                    <div class="mt-1 text-[7px] text-slate-600" x-text="config.kobold_url"></div>
+                                </div>
+                                
+                                <div class="bg-slate-900/50 rounded-xl p-3 border border-slate-700/50">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <div class="flex items-center gap-2">
+                                            <div class="w-2 h-2 rounded-full" :class="getServiceStatusClass('sd')"></div>
+                                            <span class="text-[9px] font-black uppercase text-slate-400">Stable Diffusion</span>
+                                        </div>
+                                        <button @click="testConnection('sd')" class="text-[8px] text-slate-500 hover:text-slate-300 font-bold uppercase" :disabled="isCheckingConnections">
+                                            <i class="fa-solid mr-1" :class="isCheckingConnections ? 'fa-circle-notch fa-spin' : 'fa-refresh'"></i>Test
+                                        </button>
+                                    </div>
+                                    <div class="text-[8px] text-slate-500 leading-tight" x-text="getServiceStatusText('sd')"></div>
+                                    <div class="mt-1 text-[7px] text-slate-600" x-text="config.sd_url"></div>
+                                </div>
+                            </div>
+
                             <div class="space-y-3">
                                 <div class="space-y-1">
                                     <label class="text-[10px] text-slate-450 uppercase font-bold">System Prompt</label>
@@ -250,11 +282,23 @@
                             <div class="space-y-3">
                                 <div class="space-y-1">
                                     <label class="text-[10px] text-slate-450 uppercase font-bold">Kobold URL</label>
-                                    <input x-model="config.kobold_url" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                    <div class="flex gap-2">
+                                        <input x-model="config.kobold_url" class="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                        <button @click="updateAPIURLs()" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-lg shadow-blue-900/20 transition-all" :disabled="isCheckingConnections">
+                                            <span x-show="!isCheckingConnections">Update & Test</span>
+                                            <i x-show="isCheckingConnections" class="fa-solid fa-circle-notch fa-spin"></i>
+                                        </button>
+                                    </div>
                                 </div>
                                 <div class="space-y-1">
                                     <label class="text-[10px] text-slate-450 uppercase font-bold">SD API URL</label>
-                                    <input x-model="config.sd_url" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-purple-500">
+                                    <div class="flex gap-2">
+                                        <input x-model="config.sd_url" class="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-purple-500">
+                                        <button @click="updateAPIURLs()" class="bg-purple-600 hover:bg-purple-500 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-lg shadow-purple-900/20 transition-all" :disabled="isCheckingConnections">
+                                            <span x-show="!isCheckingConnections">Update & Test</span>
+                                            <i x-show="isCheckingConnections" class="fa-solid fa-circle-notch fa-spin"></i>
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -432,15 +476,20 @@
                 </div>
                 
                 <div class="flex gap-4 items-end">
-                    <button @click="showImagePanel = !showImagePanel" class="p-4 rounded-2xl transition-all relative group shadow-lg shadow-black/20" :class="showImagePanel ? 'bg-purple-600 text-white shadow-purple-900/40' : 'bg-slate-700/50 text-slate-400 hover:bg-slate-700 hover:text-slate-200'">
-                        <i class="fa-solid fa-wand-magic-sparkles text-lg group-hover:scale-110 transition-transform"></i>
+                    <button @click="showImagePanel = !showImagePanel" 
+                            class="p-4 rounded-2xl transition-all relative group shadow-lg shadow-black/20" 
+                            :class="showImagePanel ? 'bg-purple-600 text-white shadow-purple-900/40' : 'bg-slate-700/50 text-slate-400 hover:bg-slate-700 hover:text-slate-200'"
+                            :disabled="!canGenerateImages() || isLoading">
+                        <i class="fa-solid fa-wand-magic-sparkles text-lg group-hover:scale-110 transition-transform" :class="!canGenerateImages() ? 'opacity-50' : ''"></i>
+                        <div x-show="!canGenerateImages()" class="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full shadow-lg shadow-red-900/40"></div>
                     </button>
                     
                     <!-- Mode Selector Dropdown -->
                     <div class="relative">
                         <select x-model="selectedMode" 
                                 class="appearance-none bg-slate-700/50 border border-slate-600 text-slate-300 rounded-2xl px-4 py-3 pr-10 text-[10px] font-bold uppercase tracking-widest outline-none focus:ring-2 focus:ring-blue-500/30 cursor-pointer shadow-lg shadow-black/20 hover:bg-slate-700 transition-all"
-                                :class="isClassifyingMode ? 'opacity-50' : ''">
+                                :class="isClassifyingMode ? 'opacity-50' : ''"
+                                :disabled="!canGenerateText()">
                             <option value="auto">🤖 Auto</option>
                             <option value="narrator">🎭 Narrator</option>
                             <template x-for="char in activeCharacters" :key="char.data.name">
@@ -451,13 +500,22 @@
                             <i class="fa-solid fa-chevron-down text-[8px]" x-show="!isClassifyingMode"></i>
                             <i class="fa-solid fa-circle-notch fa-spin text-[10px] text-blue-400" x-show="isClassifyingMode"></i>
                         </div>
+                        <div x-show="!canGenerateText()" class="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full shadow-lg shadow-red-900/40"></div>
                     </div>
                     
                     <div class="flex-1 relative group">
-                        <textarea x-model="input" @keydown.enter.prevent="if(!$event.shiftKey) sendMessage()" class="w-full bg-slate-950/50 border border-slate-700 rounded-[24px] p-4 pr-14 max-h-44 resize-none focus:ring-2 focus:ring-blue-500/20 border-slate-700/50 outline-none text-[13px] font-medium leading-relaxed transition-all shadow-inner" :placeholder="activeCharacters.length > 0 ? 'Chatting with party...' : 'Input neural prompt...'" rows="1"></textarea>
-                        <button @click="sendMessage()" class="absolute right-2.5 bottom-2.5 p-3 bg-blue-600 hover:bg-blue-500 rounded-2xl text-white shadow-xl shadow-blue-900/40 disabled:opacity-20 transition-all active:scale-90" :disabled="!input.trim() || isLoading">
+                        <textarea x-model="input" 
+                                  @keydown.enter.prevent="if(!$event.shiftKey) sendMessage()" 
+                                  class="w-full bg-slate-950/50 border border-slate-700 rounded-[24px] p-4 pr-14 max-h-44 resize-none focus:ring-2 focus:ring-blue-500/20 border-slate-700/50 outline-none text-[13px] font-medium leading-relaxed transition-all shadow-inner" 
+                                  :placeholder="activeCharacters.length > 0 ? 'Chatting with party...' : 'Input neural prompt...'" 
+                                  :disabled="!canGenerateText() || isLoading"
+                                  rows="1"></textarea>
+                        <button @click="sendMessage()" 
+                                class="absolute right-2.5 bottom-2.5 p-3 bg-blue-600 hover:bg-blue-500 rounded-2xl text-white shadow-xl shadow-blue-900/40 disabled:opacity-20 transition-all active:scale-90" 
+                                :disabled="!input.trim() || isLoading || !canGenerateText()">
                             <i class="fa-solid fa-paper-plane"></i>
                         </button>
+                        <div x-show="!canGenerateText()" class="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full shadow-lg shadow-red-900/40"></div>
                     </div>
                 </div>
             </div>
@@ -831,6 +889,9 @@
                     await this.fetchWorldInfo();
                     await this.fetchChats();
                     
+                    // Initialize connection status
+                    await this.checkAllServices();
+                    
                     // Watch for settings changes to persist
                     this.$watch('settings', () => this.saveSettings());
                     this.$watch('sdParams', () => this.saveSettings());
@@ -839,6 +900,122 @@
                     setInterval(() => {
                         if (this.messages.length > 0 && !this.isLoading) this.updateTokenCount();
                     }, 30000);
+                    
+                    // Initialize adaptive connection monitoring
+                    this.initConnectionMonitoring();
+                    
+                    // Page visibility API for background optimization
+                    document.addEventListener('visibilitychange', () => {
+                        if (document.hidden) {
+                            this.pauseConnectionMonitoring();
+                        } else {
+                            this.resumeConnectionMonitoring();
+                        }
+                    });
+                },
+
+                // Adaptive connection monitoring system
+                connectionMonitoring: {
+                    interval: null,
+                    baseInterval: 30000, // 30 seconds base interval
+                    currentInterval: 30000,
+                    consecutiveFailures: 0,
+                    lastSuccessTime: 0,
+                    isMonitoring: false,
+                    isPaused: false
+                },
+
+                initConnectionMonitoring() {
+                    this.connectionMonitoring.isMonitoring = true;
+                    this.connectionMonitoring.lastSuccessTime = Date.now();
+                    this.startConnectionMonitoring();
+                },
+
+                startConnectionMonitoring() {
+                    if (this.connectionMonitoring.interval) return;
+                    
+                    this.connectionMonitoring.interval = setInterval(() => {
+                        if (!this.connectionMonitoring.isPaused && this.connectionMonitoring.isMonitoring) {
+                            this.adaptiveCheckAllServices();
+                        }
+                    }, this.connectionMonitoring.currentInterval);
+                },
+
+                pauseConnectionMonitoring() {
+                    this.connectionMonitoring.isPaused = true;
+                    if (this.connectionMonitoring.interval) {
+                        clearInterval(this.connectionMonitoring.interval);
+                        this.connectionMonitoring.interval = null;
+                    }
+                },
+
+                resumeConnectionMonitoring() {
+                    this.connectionMonitoring.isPaused = false;
+                    this.startConnectionMonitoring();
+                    // Check immediately when resuming
+                    this.checkAllServices();
+                },
+
+                adaptiveCheckAllServices() {
+                    this.checkAllServices().then(() => {
+                        this.handleConnectionSuccess();
+                    }).catch(() => {
+                        this.handleConnectionFailure();
+                    });
+                },
+
+                handleConnectionSuccess() {
+                    const now = Date.now();
+                    const timeSinceLastSuccess = now - this.connectionMonitoring.lastSuccessTime;
+                    
+                    // Reset failure count
+                    this.connectionMonitoring.consecutiveFailures = 0;
+                    this.connectionMonitoring.lastSuccessTime = now;
+                    
+                    // Adaptive interval adjustment for stable connections
+                    if (timeSinceLastSuccess > 300000) { // 5 minutes of stability
+                        // Increase interval up to 60 seconds for very stable connections
+                        this.connectionMonitoring.currentInterval = Math.min(60000, this.connectionMonitoring.currentInterval + 5000);
+                    } else if (this.connectionMonitoring.currentInterval > this.connectionMonitoring.baseInterval) {
+                        // Gradually return to base interval
+                        this.connectionMonitoring.currentInterval = Math.max(
+                            this.connectionMonitoring.baseInterval, 
+                            this.connectionMonitoring.currentInterval - 1000
+                        );
+                    }
+                    
+                    // Update interval if changed
+                    if (this.connectionMonitoring.interval) {
+                        clearInterval(this.connectionMonitoring.interval);
+                        this.connectionMonitoring.interval = setInterval(() => {
+                            if (!this.connectionMonitoring.isPaused && this.connectionMonitoring.isMonitoring) {
+                                this.adaptiveCheckAllServices();
+                            }
+                        }, this.connectionMonitoring.currentInterval);
+                    }
+                },
+
+                handleConnectionFailure() {
+                    this.connectionMonitoring.consecutiveFailures++;
+                    
+                    // Aggressive monitoring during disconnection
+                    if (this.connectionMonitoring.consecutiveFailures <= 3) {
+                        // Short interval for initial failures (10 seconds)
+                        this.connectionMonitoring.currentInterval = 10000;
+                    } else {
+                        // Even shorter interval for persistent failures (5 seconds)
+                        this.connectionMonitoring.currentInterval = 5000;
+                    }
+                    
+                    // Update interval immediately
+                    if (this.connectionMonitoring.interval) {
+                        clearInterval(this.connectionMonitoring.interval);
+                        this.connectionMonitoring.interval = setInterval(() => {
+                            if (!this.connectionMonitoring.isPaused && this.connectionMonitoring.isMonitoring) {
+                                this.adaptiveCheckAllServices();
+                            }
+                        }, this.connectionMonitoring.currentInterval);
+                    }
                 },
 
                 loadSettings() {
@@ -1105,6 +1282,12 @@
 
                 // Resolve the mode to use - handles "auto" by calling the classifier API
                 async resolveMode(userMessage) {
+                    // If KoboldCpp is disconnected, always use narrator mode
+                    if (!this.canGenerateText()) {
+                        console.warn('KoboldCpp disconnected, forcing narrator mode');
+                        return 'narrator';
+                    }
+                    
                     // For single character, default to that character's focus mode (unless user chose narrator)
                     if (this.activeCharacters.length === 1) {
                         if (this.selectedMode === 'narrator') return 'narrator';
@@ -1627,6 +1810,13 @@
                     median_sd_time: null
                 },
                 performanceHints: [],
+                
+                // Service connection status
+                serviceStatus: {
+                    kobold: { status: 'disconnected', details: 'Not checked', latency_ms: 0 },
+                    sd: { status: 'disconnected', details: 'Not checked', latency_ms: 0 }
+                },
+                isCheckingConnections: false,
 
                 async togglePerformanceMode() {
                     try {
@@ -1653,6 +1843,107 @@
                     } catch (e) {
                         console.error('Failed to dismiss hint', e);
                     }
+                },
+
+                // Connection Management Functions
+                async checkKoboldConnection() {
+                    this.isCheckingConnections = true;
+                    try {
+                        const res = await axios.get('/api/health/kobold');
+                        this.serviceStatus.kobold = res.data;
+                    } catch (e) {
+                        this.serviceStatus.kobold = {
+                            status: 'disconnected',
+                            details: 'Connection failed',
+                            latency_ms: 0
+                        };
+                    } finally {
+                        this.isCheckingConnections = false;
+                    }
+                },
+
+                async checkSDConnection() {
+                    this.isCheckingConnections = true;
+                    try {
+                        const res = await axios.get('/api/health/sd');
+                        this.serviceStatus.sd = res.data;
+                    } catch (e) {
+                        this.serviceStatus.sd = {
+                            status: 'disconnected',
+                            details: 'Connection failed',
+                            latency_ms: 0
+                        };
+                    } finally {
+                        this.isCheckingConnections = false;
+                    }
+                },
+
+                async checkAllServices() {
+                    await Promise.all([
+                        this.checkKoboldConnection(),
+                        this.checkSDConnection()
+                    ]);
+                },
+
+                async testConnection(service) {
+                    if (service === 'kobold') {
+                        await this.checkKoboldConnection();
+                    } else if (service === 'sd') {
+                        await this.checkSDConnection();
+                    }
+                },
+
+                isServiceConnected(service) {
+                    return this.serviceStatus[service]?.status === 'connected';
+                },
+
+                getServiceStatusText(service) {
+                    const status = this.serviceStatus[service];
+                    if (!status) return 'Unknown';
+                    
+                    switch (status.status) {
+                        case 'connected':
+                            return `Connected (${status.latency_ms}ms)`;
+                        case 'disconnected':
+                            return 'Disconnected';
+                        case 'testing':
+                            return 'Testing...';
+                        default:
+                            return status.details || 'Unknown';
+                    }
+                },
+
+                getServiceStatusClass(service) {
+                    const status = this.serviceStatus[service]?.status;
+                    switch (status) {
+                        case 'connected':
+                            return 'bg-green-500/20 text-green-400 border-green-500/30';
+                        case 'disconnected':
+                            return 'bg-red-500/20 text-red-400 border-red-500/30';
+                        case 'testing':
+                            return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
+                        default:
+                            return 'bg-slate-500/20 text-slate-400 border-slate-500/30';
+                    }
+                },
+
+                // Graceful feature degradation
+                canGenerateText() {
+                    return this.isServiceConnected('kobold');
+                },
+
+                canGenerateImages() {
+                    return this.isServiceConnected('sd');
+                },
+
+                // Update API URLs and test connections
+                async updateAPIURLs() {
+                    // Update config URLs
+                    CONFIG.kobold_url = this.config.kobold_url;
+                    CONFIG.sd_url = this.config.sd_url;
+                    
+                    // Test connections with new URLs
+                    await this.checkAllServices();
                 },
 
                 // Helper functions for branch display

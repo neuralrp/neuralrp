@@ -10,7 +10,7 @@ import httpx
 import re
 import random
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 import asyncio
 from collections import deque
 from bisect import insort
@@ -278,6 +278,18 @@ os.makedirs(IMAGE_DIR, exist_ok=True)
 
 # Mount static files and images
 app.mount("/images", StaticFiles(directory=IMAGE_DIR), name="images")
+
+# Service Status Tracking
+class ServiceStatus(BaseModel):
+    status: Literal["connected", "disconnected", "testing"]
+    details: str = ""
+    latency_ms: int = 0
+
+# Global service status tracking
+service_status = {
+    "kobold": ServiceStatus(status="disconnected"),
+    "sd": ServiceStatus(status="disconnected")
+}
 
 # Models
 class ChatMessage(BaseModel):
@@ -889,6 +901,87 @@ async def read_index():
         with open(index_path, "r", encoding="utf-8") as f:
             return f.read()
     return "Index.html not found"
+
+# Health Check Endpoints
+@app.get("/api/health/kobold", response_model=ServiceStatus)
+async def check_kobold_health():
+    """Check KoboldCpp connection status"""
+    start_time = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{CONFIG['kobold_url']}/api/v1/info")
+            latency = int((time.time() - start_time) * 1000)
+            service_status["kobold"] = ServiceStatus(
+                status="connected",
+                details="KoboldCpp API responding",
+                latency_ms=latency
+            )
+            return service_status["kobold"]
+    except httpx.TimeoutException:
+        service_status["kobold"] = ServiceStatus(
+            status="disconnected",
+            details="Connection timeout (2s)",
+            latency_ms=0
+        )
+        return service_status["kobold"]
+    except Exception as e:
+        service_status["kobold"] = ServiceStatus(
+            status="disconnected",
+            details=str(e),
+            latency_ms=0
+        )
+        return service_status["kobold"]
+
+@app.get("/api/health/sd", response_model=ServiceStatus)
+async def check_sd_health():
+    """Check Stable Diffusion WebUI connection status"""
+    start_time = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{CONFIG['sd_url']}/sdapi/v1/sd-models")
+            latency = int((time.time() - start_time) * 1000)
+            service_status["sd"] = ServiceStatus(
+                status="connected",
+                details="SD WebUI API responding",
+                latency_ms=latency
+            )
+            return service_status["sd"]
+    except httpx.TimeoutException:
+        service_status["sd"] = ServiceStatus(
+            status="disconnected",
+            details="Connection timeout (2s)",
+            latency_ms=0
+        )
+        return service_status["sd"]
+    except Exception as e:
+        service_status["sd"] = ServiceStatus(
+            status="disconnected",
+            details=str(e),
+            latency_ms=0
+        )
+        return service_status["sd"]
+
+@app.get("/api/health/status")
+async def get_service_status():
+    """Get current status of all services"""
+    return {
+        "kobold": service_status["kobold"],
+        "sd": service_status["sd"]
+    }
+
+@app.post("/api/health/test-all")
+async def test_all_services():
+    """Test all service connections"""
+    # Run health checks in parallel
+    await asyncio.gather(
+        check_kobold_health(),
+        check_sd_health()
+    )
+    return {
+        "success": True,
+        "kobold": service_status["kobold"],
+        "sd": service_status["sd"]
+    }
 
 # Performance mode management endpoints
 @app.get("/api/performance/status")
