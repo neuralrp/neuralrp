@@ -480,8 +480,13 @@
                                     <textarea x-model="settings.user_persona" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500" placeholder="Describe your character..."></textarea>
                                 </div>
                                 <div class="space-y-1">
-                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Reinforce Every X Turns</label>
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Reinforce Character Info Every X Turns</label>
                                     <input type="number" x-model.number="settings.reinforce_freq" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
+                                </div>
+                                <div class="space-y-1">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Reinforce World Canon Every X Turns</label>
+                                    <input type="number" x-model.number="settings.world_info_reinforce_freq" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500" placeholder="3">
+                                    <p class="text-[8px] text-slate-500 leading-tight">Frequency for reinforcing world canon law entries (1-100, 0 to disable)</p>
                                 </div>
                                 <div class="space-y-1">
                                     <label class="text-[10px] text-slate-450 uppercase font-bold">Enable World Info</label>
@@ -668,7 +673,7 @@
                 <div class="space-y-8">
                     <template x-for="(msg, index) in messages" :key="msg.id">
                         <div class="flex group" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
-                            <div class="max-w-[85%] space-y-1.5 relative">
+                            <div class="max-w-[85%] space-y-1.5 relative" :style="editingMessageId === msg.id && editingWidth ? 'min-width: ' + editingWidth : ''">
                                 <div x-show="msg.role !== 'user' && msg.speaker !== 'Visual System'" class="text-[9px] font-black text-blue-500 uppercase tracking-[0.2em] ml-4 mb-1" x-text="msg.speaker || 'Narrator'"></div>
                                 
                                 <div class="relative px-5 py-3.5 shadow-xl transition-all border border-transparent" :class="msg.role === 'user' ? 'bg-blue-600 text-white rounded-3xl rounded-tr-[4px] shadow-blue-900/20' : 'bg-slate-800 border border-slate-700/50 text-slate-200 rounded-3xl rounded-tl-[4px] shadow-black/20 hover:border-slate-600'" :style="msg.speaker === 'Visual System' ? 'padding: 0; background: transparent; border: none; box-shadow: none;' : ''">
@@ -679,8 +684,14 @@
                                             <button @click="regenerate(index)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-green-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50" title="Regenerate from here"><i class="fa-solid fa-rotate text-[8px]"></i></button>
                                         </template>
                                         <button @click="openForkDialog(msg.id)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50" title="Fork from here"><i class="fa-solid fa-code-branch text-[8px]"></i></button>
-                                        <button @click="editingMessageId = msg.id; editBuffer = msg.content" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50"><i class="fa-solid fa-pen text-[8px]"></i></button>
+                                        <button @click="editingMessageId = msg.id; editBuffer = msg.content; editingWidth = $el.closest('.max-w-\\[85\\%\\]').offsetWidth + 'px'" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50"><i class="fa-solid fa-pen text-[8px]"></i></button>
                                         <button @click="deleteMessage(index)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-red-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50"><i class="fa-solid fa-trash text-[8px]"></i></button>
+                                        <template x-if="msg.image">
+                                            <button @click="copyImageSettings(msg.image)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-purple-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50" title="Copy Image Settings"><i class="fa-solid fa-copy text-[8px]"></i></button>
+                                        </template>
+                                        <template x-if="msg.image">
+                                            <button @click="openInpaintDialog(msg, index)" class="w-6 h-6 rounded-full bg-slate-700 hover:bg-orange-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50" title="Inpaint Image"><i class="fa-solid fa-paintbrush text-[8px]"></i></button>
+                                        </template>
                                     </div>
 
                                     <template x-if="editingMessageId !== msg.id">
@@ -699,10 +710,16 @@
                                     <!-- Edit Interface -->
                                     <template x-if="editingMessageId === msg.id">
                                         <div class="space-y-3">
-                                            <textarea x-model="editBuffer" class="w-full bg-slate-900/50 text-slate-100 p-3 rounded-xl border border-slate-600 outline-none text-[13px] font-medium leading-relaxed resize-none h-32"></textarea>
+                                            <textarea 
+                                                x-model="editBuffer" 
+                                                x-ref="editTextarea"
+                                                @input="$el.style.height = 'auto'; $el.style.height = $el.scrollHeight + 'px'"
+                                                x-init="$nextTick(() => { $el.style.height = 'auto'; $el.style.height = $el.scrollHeight + 'px'; })"
+                                                class="w-full bg-slate-900/50 text-slate-100 outline-none text-[13px] font-medium leading-relaxed resize-none min-h-[100px] max-h-[600px] overflow-y-auto border border-slate-600/30 rounded-lg p-3 focus:border-blue-500/50 transition-colors"
+                                                placeholder="Edit your message..."></textarea>
                                             <div class="flex gap-2 justify-end">
-                                                <button @click="updateMessage(index)" class="px-3 py-1 bg-blue-500 hover:bg-blue-400 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Update</button>
-                                                <button @click="editingMessageId = null" class="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Cancel</button>
+                                                <button @click="updateMessage(index)" class="px-3 py-1 bg-blue-500 hover:bg-blue-400 text-white text-[10px] font-black uppercase tracking-widest rounded-lg transition-all">Update</button>
+                                                <button @click="editingMessageId = null; editingWidth = null" class="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase tracking-widest rounded-lg transition-all">Cancel</button>
                                             </div>
                                         </div>
                                     </template>
@@ -886,6 +903,139 @@
             <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
                 <button @click="showBranchDialog = false" class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Close</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Inpaint Dialog Modal -->
+    <div x-show="showInpaintDialog" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak x-transition>
+        <div class="bg-slate-900 border border-slate-700 w-full max-w-6xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
+                <h2 class="text-xs font-black uppercase tracking-widest text-orange-400">Inpaint Image</h2>
+                <button @click="closeInpaintDialog()" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                <!-- Inpaint Prompt -->
+                <div class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Inpaint Prompt</label>
+                    <textarea x-model="inpaintPrompt" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-4 text-xs h-24 outline-none focus:ring-2 focus:ring-orange-500/30 font-medium leading-relaxed" placeholder="Describe what you want to paint in the masked area..."></textarea>
+                </div>
+
+                <!-- Denoising Strength Slider -->
+                <div class="space-y-2 bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Denoising Strength</label>
+                        <span class="text-sm font-bold text-orange-400" x-text="inpaintDenoisingStrength.toFixed(2)"></span>
+                    </div>
+                    <input type="range" x-model.number="inpaintDenoisingStrength" min="0" max="1" step="0.05" class="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-orange-500">
+                    <div class="flex justify-between text-[8px] text-slate-500 uppercase font-bold">
+                        <span>0 = Keep Original</span>
+                        <span>0.5 = Balanced</span>
+                        <span>1 = Full Inpaint</span>
+                    </div>
+                    <p class="text-[8px] text-slate-400 leading-relaxed mt-1">
+                        <i class="fa-solid fa-info-circle mr-1 text-orange-400/70"></i>
+                        Lower values preserve more of the original image. Higher values give the AI more creative freedom in the masked area.
+                    </p>
+                </div>
+
+                <!-- Canvas Container -->
+                <div class="space-y-2">
+                    <div class="flex justify-between items-center">
+                        <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Draw Mask (Brush over areas to inpaint)</label>
+                        <div class="flex items-center gap-3">
+                            <span class="text-[9px] text-slate-500 uppercase font-bold">Brush Size:</span>
+                            <input type="range" x-model.number="brushSize" min="5" max="100" step="5" class="w-32">
+                            <span class="text-[9px] text-slate-400 font-mono" x-text="brushSize + 'px'"></span>
+                        </div>
+                    </div>
+                    
+                    <div class="relative bg-slate-950 rounded-xl border border-slate-700 overflow-auto" style="max-height: 60vh;">
+                        <div class="relative inline-block">
+                            <!-- Original Image -->
+                            <img :src="inpaintImageUrl" 
+                                 id="inpaint-image"
+                                 class="block"
+                                 @load="initializeInpaintCanvas()"
+                                 style="max-width: none;">
+                            
+                            <!-- Canvas Overlay for drawing -->
+                            <canvas id="inpaint-canvas"
+                                    class="absolute top-0 left-0 cursor-crosshair"
+                                    @mousedown="startDrawing($event)"
+                                    @mousemove="draw($event)"
+                                    @mouseup="stopDrawing()"
+                                    @mouseleave="stopDrawing()"
+                                    style="touch-action: none;"></canvas>
+                        </div>
+                    </div>
+                    
+                    <div class="flex justify-between items-center px-2">
+                        <div class="text-[8px] text-slate-500">
+                            <span class="font-bold">Tip:</span> Press Ctrl+Z to undo brush strokes
+                        </div>
+                        <button @click="clearMask()" class="text-[9px] text-slate-400 hover:text-slate-200 uppercase font-bold tracking-widest">
+                            <i class="fa-solid fa-eraser mr-1"></i>Clear Mask
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Preview Mode: Clickable Images -->
+            <template x-if="isPreviewMode">
+                <div class="p-4 border-t border-slate-700 bg-slate-800/30">
+                    <!-- Preview Image Display - Clickable Selection -->
+                    <div class="space-y-3">
+                        <div class="text-[10px] text-green-400 font-black uppercase tracking-widest text-center">✓ Preview Ready - Click an image to choose</div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <!-- Original Image - Click to Try Again -->
+                            <div class="space-y-1 group">
+                                <div class="text-[8px] text-slate-500 font-bold uppercase text-center group-hover:text-orange-400 transition-colors">Original</div>
+                                <div class="relative cursor-pointer" @click="discardInpaint()">
+                                    <img :src="originalImageBackup" class="rounded-xl border-2 border-slate-700 w-full shadow-lg transition-all duration-200 group-hover:border-orange-500 group-hover:shadow-orange-900/40 group-hover:brightness-90">
+                                    <!-- Hover Overlay -->
+                                    <div class="absolute inset-0 rounded-xl bg-orange-500/0 group-hover:bg-orange-500/20 transition-all duration-200 flex items-center justify-center">
+                                        <div class="opacity-0 group-hover:opacity-100 transition-opacity duration-200 bg-orange-600 text-white px-4 py-2 rounded-xl text-[11px] font-black uppercase tracking-widest shadow-lg">
+                                            <i class="fa-solid fa-rotate mr-2"></i>Try Again
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Inpainted Image - Click to Accept -->
+                            <div class="space-y-1 group">
+                                <div class="text-[8px] text-green-400 font-bold uppercase text-center group-hover:text-green-300 transition-colors">Preview</div>
+                                <div class="relative cursor-pointer" @click="acceptInpaint()">
+                                    <img :src="inpaintPreviewUrl" class="rounded-xl border-2 border-green-500/50 w-full shadow-lg shadow-green-900/20 transition-all duration-200 group-hover:border-green-400 group-hover:shadow-green-500/40 group-hover:brightness-110">
+                                    <!-- Hover Overlay -->
+                                    <div class="absolute inset-0 rounded-xl bg-green-500/0 group-hover:bg-green-500/20 transition-all duration-200 flex items-center justify-center">
+                                        <div class="opacity-0 group-hover:opacity-100 transition-opacity duration-200 bg-green-600 text-white px-4 py-2 rounded-xl text-[11px] font-black uppercase tracking-widest shadow-lg">
+                                            <i class="fa-solid fa-check mr-2"></i>Accept
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Cancel button - smaller, secondary -->
+                        <div class="flex justify-center pt-2">
+                            <button @click="closeInpaintDialog()" class="px-4 py-2 bg-slate-700/50 hover:bg-slate-600 text-slate-400 hover:text-white rounded-xl text-[9px] font-bold uppercase tracking-widest transition-all border border-slate-600/50">
+                                <i class="fa-solid fa-xmark mr-1"></i>Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </template>
+
+            <!-- Editing Mode: Show Generate Preview button -->
+            <template x-if="!isPreviewMode">
+                <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
+                    <button @click="generateInpaintPreview()" class="flex-1 bg-orange-600 hover:bg-orange-500 text-white py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg shadow-orange-900/20 transition-all" :disabled="isInpainting">
+                        <i class="fa-solid mr-2" :class="isInpainting ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>
+                        <span x-show="!isInpainting">Generate Preview</span>
+                        <span x-show="isInpainting">Generating...</span>
+                    </button>
+                    <button @click="closeInpaintDialog()" class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Cancel</button>
+                </div>
+            </template>
         </div>
     </div>
 
@@ -1125,10 +1275,12 @@
                 newWIEntry: { keys: '', content: '' },
                 editingMessageId: null,
                 editBuffer: '',
+                editingWidth: null,
                 settings: {
                     system_prompt: 'Write a highly detailed, creative, and immersive response. Stay in character at all times.',
                     user_persona: '',
                     reinforce_freq: 5,
+                    world_info_reinforce_freq: 5,
                     temperature: 0.7,
                     max_length: 250,
                     max_context: 4096,
@@ -1185,6 +1337,23 @@
                 // Mode selector state
                 selectedMode: 'auto', // 'auto', 'narrator', or 'focus:CharacterName'
                 isClassifyingMode: false,
+
+                // Inpaint state
+                showInpaintDialog: false,
+                inpaintImageUrl: '',
+                inpaintPrompt: '',
+                inpaintMessageIndex: null,
+                brushSize: 30,
+                isDrawing: false,
+                isInpainting: false,
+                maskCanvas: null,
+                maskCtx: null,
+                overlayCtx: null,
+                brushHistory: [],
+                inpaintPreviewUrl: null,       // Preview result URL
+                isPreviewMode: false,          // Whether showing preview
+                originalImageBackup: null,     // Backup of original image
+                inpaintDenoisingStrength: 0.75, // 0 = keep original, 1 = full inpaint
 
                 async init() {
                     this.loadSettings();
@@ -1357,30 +1526,80 @@
                 },
 
                 constructPromptLocally() {
-                    // Mimic main.py logic for local preview/counting
+                    // Optimized to match main.py logic accurately
                     let p = `### System: ${this.settings.system_prompt}\n`;
+                    
+                    // Multi-character mode instructions (simulated)
+                    const isGroupChat = this.activeCharacters.length >= 2;
+                    if (isGroupChat) p += "\n[MODE: NARRATOR]\n(Narrator Instructions here)\n";
+                    
                     if (this.summary) p += `### Long-Term Context (Summary of earlier turns):\n${this.summary}\n`;
                     if (this.settings.user_persona) p += `### Your Character Description:\n${this.settings.user_persona}\n`;
                     
+                    let reinforcementChunks = [];
                     this.activeCharacters.forEach(c => {
-                        p += `### Character Profile: ${c.data.name}\n${c.data.description}\n`;
-                        if (c.data?.extensions?.depth_prompt?.prompt) p += `### Context for ${c.data.name}: ${c.data.extensions.depth_prompt.prompt}\n`;
+                        const name = c.data.name;
+                        const multi_char_summary = c.data.extensions?.multi_char_summary;
+                        
+                        if (isGroupChat && multi_char_summary) {
+                            p += `### [${name}]: ${multi_char_summary}\n`;
+                            reinforcementChunks.push(`[${name}]: ${multi_char_summary}`);
+                        } else {
+                            p += `### Character Profile: ${name}\n${c.data.description}\n`;
+                            if (c.data?.extensions?.depth_prompt?.prompt) {
+                                p += `### Context for ${name}: ${c.data.extensions.depth_prompt.prompt}\n`;
+                                reinforcementChunks.push(c.data.extensions.depth_prompt.prompt);
+                            }
+                        }
                     });
 
-                    // World Info section - simulate what the backend would do
+                    let canon_entries = [];
                     if (this.settings.world_info_enabled && this.activeWI) {
-                        // For local preview, we'll just include a placeholder
-                        // The actual world info retrieval happens on the backend
-                        p += "### World Knowledge:\n[World info entries would be inserted here based on recent chat context]\n";
+                        // Estimate triggered lore overhead (approx 150 tokens)
+                        p += "### World Knowledge:\n[Triggered Lore Placeholder]\n";
+                        
+                        // Extract canon law for reinforcement simulation
+                        canon_entries = Object.values(this.activeWI.entries || {})
+                            .filter(e => e.is_canon_law)
+                            .map(e => e.content);
                     }
 
                     p += "\n### Chat History:\n";
-                    this.messages.forEach(m => {
+                    const worldFreq = this.settings.world_info_reinforce_freq || 5;
+                    const charFreq = this.settings.reinforce_freq || 0;
+                    let lastWorldReinforce = -1;
+
+                    this.messages.forEach((m, i) => {
                         if (m.speaker === 'Visual System') return;
+
+                        // Simulate character reinforcement
+                        if (charFreq > 0 && i > 0 && i % charFreq === 0) {
+                            if (reinforcementChunks.length > 0) {
+                                p += "[REINFORCEMENT: " + reinforcementChunks.join(" | ") + "]\n";
+                            }
+                        }
+                        
+                        // Simulate world reinforcement
+                        if (worldFreq > 0 && i > 0 && i % worldFreq === 0) {
+                            if (canon_entries.length > 0) {
+                                p += "[WORLD REINFORCEMENT: " + canon_entries.join(" | ") + "]\n";
+                                lastWorldReinforce = i;
+                            }
+                        }
+
                         const speaker = m.speaker || (m.role === 'user' ? 'User' : 'Narrator');
                         p += `${speaker}: ${m.content}\n`;
                     });
                     
+                    // Final Canon Law Pin (Recency Bias) - with redundancy check matching backend
+                    const turnsSinceReinforce = this.messages.length - 1 - lastWorldReinforce;
+                    if (canon_entries.length > 0) {
+                        if (worldFreq === 1 || turnsSinceReinforce > 3) {
+                            p += "\n### Canon Law (World Rules):\n" + canon_entries.join("\n") + "\n";
+                        }
+                    }
+
+                    p += "Narrator:";
                     return p;
                 },
 
@@ -1524,15 +1743,47 @@
                             this.summary = res.data._updated_state.summary;
                         }
 
+                        // Check if response has the expected structure
+                        if (!res.data) {
+                            throw new Error('Invalid response structure from server');
+                        }
+
+                        // Handle different response formats
+                        let aiContent = '';
+                        
+                        // Check for the new format: message.content
+                        if (res.data.message && res.data.message.content) {
+                            aiContent = res.data.message.content;
+                        }
+                        // Check for the old format: results[0].text
+                        else if (res.data.results && Array.isArray(res.data.results) && res.data.results.length > 0 && res.data.results[0].text) {
+                            aiContent = res.data.results[0].text;
+                        }
+                        // Check for direct text field
+                        else if (res.data.text) {
+                            aiContent = res.data.text;
+                        }
+                        else {
+                            throw new Error('No valid content found in response');
+                        }
+
                         const aiMsg = { 
                             role: 'assistant', 
                             speaker: this.getSpeakerFromMode(mode),
-                            content: res.data.results[0].text.trim(), 
+                            content: aiContent.trim(), 
                             id: Date.now() + 1 
                         };
                         this.messages.push(aiMsg);
                     } catch (e) {
-                        console.error(e);
+                        console.error('Regenerate failed:', e);
+                        // Show user-friendly error message
+                        const errorMsg = e.response?.data?.error || e.message || 'Failed to regenerate message';
+                        this.messages.push({
+                            role: 'assistant',
+                            speaker: 'System',
+                            content: `Error: ${errorMsg}`,
+                            id: Date.now() + 1
+                        });
                     } finally {
                         this.isLoading = false;
                         this.scrollToBottom();
@@ -1596,6 +1847,11 @@
                     if (!this.canGenerateText()) {
                         console.warn('KoboldCpp disconnected, forcing narrator mode');
                         return 'narrator';
+                    }
+                    
+                    // Initialize activeCharacters if undefined
+                    if (!this.activeCharacters) {
+                        this.activeCharacters = [];
                     }
                     
                     // For single character, default to that character's focus mode (unless user chose narrator)
@@ -1678,15 +1934,47 @@
                             this.summary = res.data._updated_state.summary;
                         }
 
+                        // Check if response has the expected structure
+                        if (!res.data) {
+                            throw new Error('Invalid response structure from server');
+                        }
+
+                        // Handle different response formats
+                        let aiContent = '';
+                        
+                        // Check for the new format: message.content
+                        if (res.data.message && res.data.message.content) {
+                            aiContent = res.data.message.content;
+                        }
+                        // Check for the old format: results[0].text
+                        else if (res.data.results && Array.isArray(res.data.results) && res.data.results.length > 0 && res.data.results[0].text) {
+                            aiContent = res.data.results[0].text;
+                        }
+                        // Check for direct text field
+                        else if (res.data.text) {
+                            aiContent = res.data.text;
+                        }
+                        else {
+                            throw new Error('No valid content found in response');
+                        }
+
                         const aiMsg = { 
                             role: 'assistant', 
                             speaker: this.getSpeakerFromMode(mode),
-                            content: res.data.results[0].text.trim(), 
+                            content: aiContent.trim(), 
                             id: Date.now() + 1 
                         };
                         this.messages.push(aiMsg);
                     } catch (e) {
-                        console.error(e);
+                        console.error('Send message failed:', e);
+                        // Show user-friendly error message
+                        const errorMsg = e.response?.data?.error || e.message || 'Failed to send message';
+                        this.messages.push({
+                            role: 'assistant',
+                            speaker: 'System',
+                            content: `Error: ${errorMsg}`,
+                            id: Date.now() + 1
+                        });
                     } finally {
                         this.isLoading = false;
                         this.scrollToBottom();
@@ -2646,6 +2934,280 @@
                     if (!timestamp) return 'Unknown time';
                     const date = new Date(timestamp * 1000);
                     return date.toLocaleString();
+                },
+
+                async copyImageSettings(imageUrl) {
+                    try {
+                        // Extract filename from URL like "/images/sd_123456789.png"
+                        const filename = imageUrl.split('/').pop();
+
+                        // Fetch image metadata from backend
+                        const res = await axios.get(`/api/image-metadata/${filename}`);
+
+                        if (res.data.success && res.data.metadata) {
+                            const metadata = res.data.metadata;
+
+                            // Update the SD parameters with the retrieved settings
+                            this.sdParams.prompt = metadata.prompt;
+                            this.sdParams.negative_prompt = metadata.negative_prompt;
+                            this.sdParams.steps = metadata.steps;
+                            this.sdParams.cfg_scale = metadata.cfg_scale;
+                            this.sdParams.width = metadata.width;
+                            this.sdParams.height = metadata.height;
+                            this.sdParams.sampler_name = metadata.sampler_name;
+                            this.sdParams.scheduler = metadata.scheduler;
+
+                            // Show the image generator panel
+                            this.showImagePanel = true;
+
+                            // Scroll to the image generator panel
+                            setTimeout(() => {
+                                const container = document.getElementById('chat-container');
+                                if (container) container.scrollTop = container.scrollHeight;
+                            }, 100);
+
+                            alert('Image settings copied to the generator panel!');
+                        } else {
+                            alert('No metadata found for this image. It may have been generated before metadata tracking was implemented.');
+                        }
+                    } catch (e) {
+                        console.error('Failed to copy image settings:', e);
+                        alert('Failed to copy image settings. The image may not have metadata stored.');
+                    }
+                },
+
+                // Inpaint Functions
+                openInpaintDialog(message, index) {
+                    this.inpaintImageUrl = message.image;
+                    this.inpaintMessageIndex = index;
+                    this.inpaintPrompt = '';
+                    this.brushHistory = [];
+                    this.showInpaintDialog = true;
+                    
+                    // Setup keyboard listener for Ctrl+Z
+                    document.addEventListener('keydown', this.handleInpaintKeyboard);
+                },
+
+                closeInpaintDialog() {
+                    this.showInpaintDialog = false;
+                    this.inpaintImageUrl = '';
+                    this.inpaintPrompt = '';
+                    this.inpaintMessageIndex = null;
+                    this.brushHistory = [];
+                    
+                    // Remove keyboard listener
+                    document.removeEventListener('keydown', this.handleInpaintKeyboard);
+                },
+
+                handleInpaintKeyboard(e) {
+                    // Ctrl+Z for undo
+                    if (e.ctrlKey && e.key === 'z') {
+                        e.preventDefault();
+                        this.undoBrushStroke();
+                    }
+                },
+
+                initializeInpaintCanvas() {
+                    const img = document.getElementById('inpaint-image');
+                    const canvas = document.getElementById('inpaint-canvas');
+                    
+                    if (!img || !canvas) return;
+                    
+                    // Set canvas to match image dimensions exactly
+                    canvas.width = img.naturalWidth;
+                    canvas.height = img.naturalHeight;
+                    canvas.style.width = img.width + 'px';
+                    canvas.style.height = img.height + 'px';
+                    
+                    // Initialize contexts
+                    this.overlayCtx = canvas.getContext('2d');
+                    
+                    // Create offscreen mask canvas
+                    this.maskCanvas = document.createElement('canvas');
+                    this.maskCanvas.width = img.naturalWidth;
+                    this.maskCanvas.height = img.naturalHeight;
+                    this.maskCtx = this.maskCanvas.getContext('2d');
+                    
+                    // Clear any previous drawings
+                    this.clearMask();
+                },
+
+                startDrawing(e) {
+                    this.isDrawing = true;
+                    this.draw(e);
+                },
+
+                draw(e) {
+                    if (!this.isDrawing) return;
+                    
+                    const canvas = document.getElementById('inpaint-canvas');
+                    const rect = canvas.getBoundingClientRect();
+                    
+                    // Calculate position relative to canvas, accounting for scaling
+                    const scaleX = canvas.width / rect.width;
+                    const scaleY = canvas.height / rect.height;
+                    const x = (e.clientX - rect.left) * scaleX;
+                    const y = (e.clientY - rect.top) * scaleY;
+                    
+                    // Draw on mask canvas (white on black)
+                    this.maskCtx.fillStyle = 'white';
+                    this.maskCtx.beginPath();
+                    this.maskCtx.arc(x, y, this.brushSize / 2, 0, Math.PI * 2);
+                    this.maskCtx.fill();
+                    
+                    // Draw visual overlay (semi-transparent red at 30% opacity)
+                    this.overlayCtx.fillStyle = 'rgba(255, 100, 100, 0.3)';
+                    this.overlayCtx.beginPath();
+                    this.overlayCtx.arc(x, y, this.brushSize / 2, 0, Math.PI * 2);
+                    this.overlayCtx.fill();
+                },
+
+                stopDrawing() {
+                    if (this.isDrawing) {
+                        // Save current state to history for undo
+                        const imageData = this.maskCtx.getImageData(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+                        this.brushHistory.push(imageData);
+                        this.isDrawing = false;
+                    }
+                },
+
+                undoBrushStroke() {
+                    if (this.brushHistory.length === 0) return;
+                    
+                    // Remove last stroke from history
+                    this.brushHistory.pop();
+                    
+                    // Restore to previous state (or clear if no history)
+                    if (this.brushHistory.length > 0) {
+                        const previousState = this.brushHistory[this.brushHistory.length - 1];
+                        this.maskCtx.putImageData(previousState, 0, 0);
+                    } else {
+                        // Clear mask completely
+                        this.maskCtx.fillStyle = 'black';
+                        this.maskCtx.fillRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+                    }
+                    
+                    // Redraw overlay to match
+                    this.redrawOverlay();
+                },
+
+                redrawOverlay() {
+                    // Clear overlay
+                    this.overlayCtx.clearRect(0, 0, this.overlayCtx.canvas.width, this.overlayCtx.canvas.height);
+                    
+                    // Redraw from mask canvas
+                    const imageData = this.maskCtx.getImageData(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+                    const data = imageData.data;
+                    
+                    this.overlayCtx.fillStyle = 'rgba(255, 100, 100, 0.3)';
+                    for (let i = 0; i < data.length; i += 4) {
+                        if (data[i] > 128) { // If pixel is white-ish in mask
+                            const pixelIndex = i / 4;
+                            const x = pixelIndex % this.maskCanvas.width;
+                            const y = Math.floor(pixelIndex / this.maskCanvas.width);
+                            this.overlayCtx.fillRect(x, y, 1, 1);
+                        }
+                    }
+                },
+
+                clearMask() {
+                    if (!this.maskCtx || !this.overlayCtx) return;
+                    
+                    // Clear mask canvas (black background)
+                    this.maskCtx.fillStyle = 'black';
+                    this.maskCtx.fillRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+                    
+                    // Clear overlay canvas
+                    this.overlayCtx.clearRect(0, 0, this.overlayCtx.canvas.width, this.overlayCtx.canvas.height);
+                    
+                    // Clear history
+                    this.brushHistory = [];
+                },
+
+                async generateInpaintPreview() {
+                    if (!this.inpaintPrompt.trim()) {
+                        alert('Please enter an inpaint prompt.');
+                        return;
+                    }
+                    
+                    this.isInpainting = true;
+                    
+                    try {
+                        // Get original image as base64
+                        const img = document.getElementById('inpaint-image');
+                        const tempCanvas = document.createElement('canvas');
+                        tempCanvas.width = img.naturalWidth;
+                        tempCanvas.height = img.naturalHeight;
+                        const tempCtx = tempCanvas.getContext('2d');
+                        tempCtx.drawImage(img, 0, 0);
+                        const imageBase64 = tempCanvas.toDataURL('image/png').split(',')[1];
+                        
+                        // Get mask as base64
+                        const maskBase64 = this.maskCanvas.toDataURL('image/png').split(',')[1];
+                        
+                        // Send to backend
+                        const res = await axios.post('/api/inpaint', {
+                            image: imageBase64,
+                            mask: maskBase64,
+                            prompt: this.inpaintPrompt,
+                            width: img.naturalWidth,
+                            height: img.naturalHeight,
+                            denoising_strength: this.inpaintDenoisingStrength
+                        });
+                        
+                        if (res.data.url) {
+                            // Store the preview (not yet committed to chat)
+                            this.inpaintPreviewUrl = res.data.url;
+                            this.isPreviewMode = true;
+                            
+                            // Backup original image URL if not already backed up
+                            if (!this.originalImageBackup) {
+                                this.originalImageBackup = this.inpaintImageUrl;
+                            }
+                        } else {
+                            alert('Inpainting failed: ' + (res.data.error || 'Unknown error'));
+                        }
+                    } catch (e) {
+                        console.error('Inpaint failed:', e);
+                        alert('Inpainting failed. Is the SD backend running?');
+                    } finally {
+                        this.isInpainting = false;
+                    }
+                },
+
+                acceptInpaint() {
+                    if (!this.inpaintPreviewUrl) return;
+                    
+                    // Commit the preview to the actual message
+                    this.messages[this.inpaintMessageIndex].image = this.inpaintPreviewUrl;
+                    
+                    // Close the dialog
+                    this.closeInpaintDialog();
+                    
+                    alert('Inpaint accepted and published to chat!');
+                },
+
+                discardInpaint() {
+                    // Clear the preview and return to editing mode
+                    this.inpaintPreviewUrl = null;
+                    this.isPreviewMode = false;
+                    
+                    // Optionally clear the mask too for a fresh start
+                    this.clearMask();
+                },
+
+                closeInpaintDialog() {
+                    this.showInpaintDialog = false;
+                    this.inpaintImageUrl = '';
+                    this.inpaintPrompt = '';
+                    this.inpaintMessageIndex = null;
+                    this.brushHistory = [];
+                    this.inpaintPreviewUrl = null;
+                    this.isPreviewMode = false;
+                    this.originalImageBackup = null;
+                    
+                    // Remove keyboard listener
+                    document.removeEventListener('keydown', this.handleInpaintKeyboard);
                 }
             }
         }

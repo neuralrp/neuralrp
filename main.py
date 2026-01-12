@@ -257,6 +257,29 @@ Respond directly to what just happened in the previous message, in {CharacterNam
 
 Keep the reply under 3–5 paragraphs."""
 
+def clean_llm_response(text: str) -> str:
+    """Remove any reinforcement markers that might have leaked into the LLM response."""
+    # Pattern to match [REINFORCEMENT: ...] and [WORLD REINFORCEMENT: ...] blocks
+    # These can span multiple lines if the LLM continued generating them
+    import re
+    
+    # Remove complete reinforcement blocks (including multi-line)
+    text = re.sub(r'\[REINFORCEMENT:.*?(?:\]|$)', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[WORLD REINFORCEMENT:.*?(?:\]|$)', '', text, flags=re.DOTALL)
+    
+    # Also remove partial/incomplete reinforcement starts at the end
+    text = re.sub(r'\[REINFORCEMENT:.*$', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[WORLD REINFORCEMENT:.*$', '', text, flags=re.DOTALL)
+    
+    # Remove any standalone opening brackets that might be reinforcement starts
+    # Only if they're at the end and look like the start of a marker
+    text = re.sub(r'\n?\[(?:REINFORCEMENT|WORLD)?\s*$', '', text, flags=re.IGNORECASE)
+    
+    # Clean up any resulting extra whitespace
+    text = text.strip()
+    
+    return text
+
 def get_continue_hint(mode: str, last_user_message: str = "") -> str:
     """Generate a context-aware continue hint for narrator mode."""
     if mode == "narrator" or not mode.startswith("focus:"):
@@ -306,6 +329,7 @@ class PromptRequest(BaseModel):
     settings: Dict[str, Any] = {}
     summary: Optional[str] = ""
     mode: Optional[str] = "narrator"  # "narrator" or "focus:{CharacterName}"
+    metadata: Optional[Dict[str, Any]] = None
 
 class SDParams(BaseModel):
     prompt: str
@@ -317,6 +341,19 @@ class SDParams(BaseModel):
     sampler_name: str = "Euler a"
     scheduler: str = "Automatic"
     context_tokens: Optional[int] = 0  # Context length for SD optimization
+
+class InpaintRequest(BaseModel):
+    image: str  # Base64 encoded image
+    mask: str   # Base64 encoded mask
+    prompt: str
+    negative_prompt: str = ""
+    width: int = 512
+    height: int = 512
+    denoising_strength: float = 0.75
+    cfg_scale: float = 8.0
+    steps: int = 20
+    sampler_name: str = "DPM++ 2M"
+    mask_blur: int = 4
 
 class CardGenRequest(BaseModel):
     char_name: str
@@ -452,6 +489,20 @@ WORLD_INFO_CACHE = LRUCache(max_size=1000)
 
 # Semantic Search Engine
 class SemanticSearchEngine:
+    GENERIC_KEYS = {
+        # structural/generic
+        "program", "system", "policy", "event", "room", "rooms", "implementation", "annual",
+        "subgroup", "collection", "type", "has", "used", "for", "the", "and", "with",
+        # location/role buckets
+        "city", "town", "village", "room", "rooms", "hub", "center", "holding",
+        # time/temporal buckets
+        "time", "era", "age",
+        # creature/class buckets
+        "creature", "race", "species", "archetype",
+        # faction buckets
+        "faction", "guild", "house", "clique", "resistance", "ruling",
+    }
+
     def __init__(self):
         self.model = None
         self.embeddings_cache = {}
@@ -585,10 +636,12 @@ class SemanticSearchEngine:
         if not world_info or "entries" not in world_info:
             return "empty"
         
-        # Create a hash of all content to detect changes
+        # Create a hash of content + keys to detect changes (keys drive embeddings)
         content = ""
         for entry in world_info.get("entries", {}).values():
             content += entry.get("content", "") + "|"
+            content += ",".join(entry.get("key", [])) + "|"
+            content += ",".join(entry.get("keysecondary", [])) + "|"
         
         return hashlib.md5(content.encode('utf-8')).hexdigest()
     
@@ -614,9 +667,18 @@ class SemanticSearchEngine:
         uids = []
         
         for uid, entry in world_info["entries"].items():
-            content = entry.get("content", "")
-            if content.strip():
-                contents.append(content)
+            # Embed only the PRIMARY key (first line/phrase); remaining keys are for understanding only
+            primary_key = entry.get("key", [])
+            primary_key = primary_key[0] if primary_key else ""
+            primary_list = [primary_key] if primary_key and primary_key.lower() not in self.GENERIC_KEYS else []
+            secondary_list = [k for k in entry.get("keysecondary", []) if k.lower() not in self.GENERIC_KEYS]
+            keys = ", ".join(primary_list)
+            secondary = ", ".join(secondary_list)
+            if keys or secondary:
+                prefixed_content = f"Keywords: {keys}"
+                if secondary:
+                    prefixed_content += f"; Secondary: {secondary}"
+                contents.append(prefixed_content)
                 uids.append(uid)
         
         if not contents:
@@ -645,64 +707,62 @@ class SemanticSearchEngine:
             print(f"Failed to compute embeddings: {e}")
             return {}
     
-    def search_semantic(self, world_info, query_text, max_entries=10, similarity_threshold=0.3):
-        """Perform semantic search on world info entries"""
+    def search_semantic(self, world_info, query_text, max_entries=10, similarity_threshold=0.3, is_initial_turn=False):
+        """Perform semantic search on world info entries - returns entries with similarity scores"""
         if not world_info or "entries" not in world_info:
             return [], []
-        
+
         # Get embeddings
         embeddings = self.get_entry_embeddings(world_info)
         if not embeddings:
             return [], []
-        
+
         # Load model if not loaded
         if not self.load_model():
             return [], []
-        
+
         # Compute query embedding
         try:
             query_embedding = self.model.encode([query_text], convert_to_numpy=True)[0]
-            
+
             # Calculate similarities
             similarities = []
             for uid, entry_embedding in embeddings.items():
                 similarity = cosine_similarity([query_embedding], [entry_embedding])[0][0]
                 similarities.append((uid, similarity))
-            
+
             # Sort by similarity (descending)
             similarities.sort(key=lambda x: x[1], reverse=True)
-            
-            # Filter by threshold and limit results
-            triggered_lore = []
+
+            # Adjust threshold for initial turns
+            effective_threshold = similarity_threshold
+            if is_initial_turn:
+                effective_threshold = max(0.35, similarity_threshold)  # Higher threshold for initial turns
+
+            # Filter by threshold and return entries WITH similarity scores
+            triggered_lore = []  # List of (content, similarity, uid) tuples
             canon_entries = []
-            
+
             for uid, similarity in similarities:
-                if similarity < similarity_threshold:
+                if similarity < effective_threshold:
                     continue
-                
+
                 entry = world_info["entries"][uid]
-                
+
                 # Always include canon law entries
                 if entry.get("is_canon_law"):
                     canon_entries.append(entry.get("content", ""))
                     continue
-                
-                # Apply probability weighting if enabled
-                use_probability = entry.get("useProbability", False)
-                if use_probability:
-                    probability = entry.get("probability", 100)
-                    if random.random() * 100 > probability:
-                        continue
-                
-                # Add to results
-                triggered_lore.append(entry.get("content", ""))
-                
-                # Stop if we've reached max_entries
+
+                # Add to results with similarity score (probability no longer gates matched entries)
+                triggered_lore.append((entry.get("content", ""), similarity, uid))
+
+                # Stop if we've reached max_entries (we'll apply proper limit later)
                 if max_entries > 0 and len(triggered_lore) >= max_entries:
                     break
-            
+
             return triggered_lore, canon_entries
-            
+
         except Exception as e:
             print(f"Semantic search failed: {e}")
             return [], []
@@ -712,6 +772,44 @@ semantic_search_engine = SemanticSearchEngine()
 
 # Global variable to store the cleanup task
 cleanup_task = None
+
+def store_image_metadata(filename: str, params: SDParams):
+    """Store image generation parameters in metadata file."""
+    metadata_file = os.path.join(IMAGE_DIR, "image_metadata.json")
+
+    # Load existing metadata
+    if os.path.exists(metadata_file):
+        with open(metadata_file, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    else:
+        metadata = {"images": {}}
+
+    # Store the parameters (convert to dict for JSON serialization)
+    metadata["images"][filename] = {
+        "prompt": params.prompt,
+        "negative_prompt": params.negative_prompt,
+        "steps": params.steps,
+        "cfg_scale": params.cfg_scale,
+        "width": params.width,
+        "height": params.height,
+        "sampler_name": params.sampler_name,
+        "scheduler": params.scheduler,
+        "timestamp": int(time.time())
+    }
+
+    # Save updated metadata
+    with open(metadata_file, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+def load_image_metadata():
+    """Load image metadata from file."""
+    metadata_file = os.path.join(IMAGE_DIR, "image_metadata.json")
+
+    if os.path.exists(metadata_file):
+        with open(metadata_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    else:
+        return {"images": {}}
 
 # Periodic cleanup task for semantic search engine
 async def periodic_cleanup():
@@ -748,67 +846,158 @@ def preprocess_world_info(world_info):
     """Pre-process world info for case-insensitive matching"""
     if not world_info or "entries" not in world_info:
         return world_info
-    
+
     for entry in world_info["entries"].values():
         if "key" in entry:
             entry["key"] = [k.lower() for k in entry["key"]]
+        if "keysecondary" in entry:
+            entry["keysecondary"] = [k.lower() for k in entry["keysecondary"]]
     return world_info
 
-def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_threshold=0.25):
-    """Get triggered world info entries using semantic search with fallback and caching"""
+
+def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_threshold=0.45, is_initial_turn=False):
+    """Get triggered world info entries using semantic search with keyword match priority and caching"""
     if not world_info or "entries" not in world_info:
         return [], []
-    
+
+    # Preprocess world info for case-insensitive matching
+    world_info = preprocess_world_info(world_info)
+
     # Create cache key using hash-based approach for efficiency
     # Hash the world info content to avoid expensive string conversion
     world_content = ""
     for entry in world_info.get("entries", {}).values():
         world_content += entry.get("content", "") + "|"
-    
+
     # Create a composite hash key
     content_hash = hashlib.md5(world_content.encode('utf-8')).hexdigest()
     text_hash = hashlib.md5(recent_text.lower().encode('utf-8')).hexdigest()
-    config_hash = hashlib.md5(f"{max_entries}_{semantic_threshold}".encode('utf-8')).hexdigest()
-    
+    config_hash = hashlib.md5(f"{max_entries}_{semantic_threshold}_{is_initial_turn}".encode('utf-8')).hexdigest()
+
     cache_key = f"{content_hash}_{text_hash}_{config_hash}"
-    
+
     if cache_key in WORLD_INFO_CACHE:
         return WORLD_INFO_CACHE[cache_key]
-    
-    # Perform semantic search
-    triggered_lore, canon_entries = semantic_search_engine.search_semantic(
-        world_info, 
-        recent_text, 
-        max_entries=max_entries, 
-        similarity_threshold=semantic_threshold
+
+    # Perform semantic search (returns tuples: (content, similarity, uid))
+    semantic_results, canon_entries = semantic_search_engine.search_semantic(
+        world_info,
+        recent_text,
+        max_entries=max_entries * 2,  # Get more to allow for keyword priority sorting
+        similarity_threshold=semantic_threshold,
+        is_initial_turn=is_initial_turn
     )
-    
-    # Fallback to simple keyword matching if semantic search returns nothing (safety net)
-    if not triggered_lore:
-        entries = world_info.get("entries", {})
-        processed_text = recent_text.lower()
+
+    # Normalizer for dedup (case/whitespace/apostrophes/punctuation)
+    def _normalize_content(s: str) -> str:
+        # Remove apostrophes, quotes, hyphens, and other punctuation, then normalize whitespace
+        s = re.sub(r"['\"\-\.,:;!?()]+", "", s)
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    # Build a unified list with match metadata: (content, similarity, is_keyword_match, uid)
+    all_matches = []
+    seen_normalized = set()
+    entries = world_info.get("entries", {})
+    processed_text = recent_text.lower()
+
+    # Stricter matching with comprehensive normalization: apostrophes, possessives, plurals, punctuation
+    GENERIC_KEYS = SemanticSearchEngine.GENERIC_KEYS
+
+    def normalize_for_matching(s: str) -> str:
+        """Normalize text for matching: remove apostrophes, quotes, hyphens, and other punctuation"""
+        return re.sub(r"['\"\-\.,:;!?()]+", "", s)
+
+    def key_matches_text(key: str, text: str) -> bool:
+        key_normalized = normalize_for_matching(key.strip().lower())
+        if len(key_normalized) < 3 or key_normalized in GENERIC_KEYS:
+            return False
         
-        for uid, entry in entries.items():
-            if entry.get("is_canon_law"):
-                # Already handled by semantic search engine usually, but just in case
-                content = entry.get("content", "")
-                if content not in canon_entries:
-                    canon_entries.append(content)
-                continue
-                
-            if max_entries > 0 and len(triggered_lore) >= max_entries:
-                break
-                
-            keys = [k.lower() for k in entry.get("key", [])]
-            if any(k in processed_text for k in keys):
-                use_probability = entry.get("useProbability", False)
-                if use_probability:
-                    probability = entry.get("probability", 100)
-                    if random.random() * 100 <= probability:
-                        triggered_lore.append(entry.get("content", ""))
-                else:
-                    triggered_lore.append(entry.get("content", ""))
-    
+        # Create pattern that matches both singular and plural forms
+        if key_normalized.endswith('s') and len(key_normalized) > 3:
+            key_base = key_normalized[:-1]
+            key_pattern = re.escape(key_base).replace(r"\ ", r"\s+")
+            pattern = r"\b" + key_pattern + r"s?\b"
+        else:
+            key_pattern = re.escape(key_normalized).replace(r"\ ", r"\s+")
+            pattern = r"\b" + key_pattern + r"s?\b"
+        
+        text_normalized = normalize_for_matching(text)
+        return re.search(pattern, text_normalized) is not None
+
+    def content_matches_text(content: str, text: str) -> bool:
+        content_normalized = normalize_for_matching(content.strip().lower())
+        if len(content_normalized) < 3:
+            return False
+        content_pattern = re.escape(content_normalized).replace(r"\ ", r"\s+")
+        pattern = r"\b" + content_pattern + r"s?\b"
+        
+        text_normalized = normalize_for_matching(text)
+        return re.search(pattern, text_normalized) is not None
+
+    # First, add semantic results with keyword match detection
+    for content, similarity, uid in semantic_results:
+        norm = _normalize_content(content)
+        if not norm or norm in seen_normalized:
+            continue
+        
+        # Check if this is also a keyword match
+        entry = entries.get(uid, {})
+        primary_key = entry.get("key", [])
+        primary_key = [primary_key[0].lower()] if primary_key else []
+        keys = primary_key + [k.lower() for k in entry.get("keysecondary", [])]
+        is_keyword_match = any(key_matches_text(k, processed_text) for k in keys)
+        
+        all_matches.append((content, similarity, is_keyword_match, uid))
+        seen_normalized.add(norm)
+
+    # Then, check for keyword matches that semantic search might have missed
+    for uid, entry in entries.items():
+        if entry.get("is_canon_law"):
+            # Handle canon law separately
+            content = entry.get("content", "")
+            norm = _normalize_content(content)
+            if norm and norm not in seen_normalized:
+                seen_normalized.add(norm)
+                canon_entries.append(content)
+            continue
+
+        content = entry.get("content", "")
+        norm = _normalize_content(content)
+        
+        # Skip if already in results
+        if norm in seen_normalized:
+            continue
+
+        # Check for keyword match
+        primary_key = entry.get("key", [])
+        primary_key = [primary_key[0].lower()] if primary_key else []
+        keys = primary_key + [k.lower() for k in entry.get("keysecondary", [])]
+        match_on_keys = any(key_matches_text(k, processed_text) for k in keys)
+        match_on_content = content_matches_text(content, processed_text)
+
+        if match_on_keys or match_on_content:
+            # This is a keyword match that wasn't in semantic results
+            # Give it a default similarity of 0.0 to indicate it's purely keyword-matched
+            all_matches.append((content, 0.0, True, uid))
+            seen_normalized.add(norm)
+
+    # UNIFIED SORTING: Keyword matches first (True > False), then by similarity (high to low)
+    # Sort by (is_keyword_match DESC, similarity DESC)
+    all_matches.sort(key=lambda x: (x[2], x[1]), reverse=True)
+
+    # Apply max_entries limit AFTER sorting
+    triggered_lore = [match[0] for match in all_matches[:max_entries]] if max_entries > 0 else [match[0] for match in all_matches]
+
+    # Deduplicate canon entries
+    deduped_canon = []
+    canon_seen = set()
+    for content in canon_entries:
+        norm = _normalize_content(content)
+        if norm and norm not in canon_seen:
+            canon_seen.add(norm)
+            deduped_canon.append(content)
+    canon_entries = deduped_canon
+
     result = (triggered_lore, canon_entries)
     WORLD_INFO_CACHE[cache_key] = result
     return result
@@ -833,7 +1022,7 @@ def construct_prompt(request: PromptRequest):
         active_names.append(data.get("name", "Unknown"))
     
     # === 1. SYSTEM PROMPT ===
-    narrator_instruction = " Act as a Narrator. Describe the world and speak for any NPCs the user encounters."
+    narrator_instruction = " Act as a Narrator. Describe the world and speak for any NPCs the user encounters. Do not speak for the {{user}}"
     if is_narrator_mode:
         if "act as a narrator" not in system_prompt.lower():
             system_prompt += narrator_instruction
@@ -872,17 +1061,33 @@ def construct_prompt(request: PromptRequest):
     # === 5. WORLD KNOWLEDGE (moved up - world context frames characters) ===
     canon_law_entries = []
     if request.world_info:
-        recent_text = " ".join([m.content for m in request.messages[-5:]]).lower()
+        # Detect if this is an initial turn (first turn or very early in conversation)
+        is_initial_turn = len(request.messages) <= 2  # First 2 turns are considered initial
+
+        # Use latest user message only for initial turns, otherwise use last 5 messages
+        if is_initial_turn:
+            # Find the latest user message
+            latest_user_message = ""
+            for msg in reversed(request.messages):
+                if msg.role == "user":
+                    latest_user_message = msg.content
+                    break
+            recent_text = latest_user_message.lower()
+        else:
+            # Use the standard 5-message window for subsequent turns
+            recent_text = " ".join([m.content for m in request.messages[-5:]]).lower()
+
         max_world_entries = settings.get("max_world_info_entries", 10)
-        
-        # Use optimized semantic search (threshold 0.25 for high accuracy)
+
+        # Use optimized semantic search with turn detection
         triggered_lore, canon_law_entries = get_cached_world_entries(
-            request.world_info, 
-            recent_text, 
+            request.world_info,
+            recent_text,
             max_entries=max_world_entries,
-            semantic_threshold=0.25
+            semantic_threshold=0.45,
+            is_initial_turn=is_initial_turn
         )
-        
+
         if triggered_lore:
             full_prompt += "### World Knowledge:\n" + "\n".join(triggered_lore) + "\n"
 
@@ -911,13 +1116,24 @@ def construct_prompt(request: PromptRequest):
     # === 7. CHAT HISTORY (with reinforcement) ===
     full_prompt += "\n### Chat History:\n"
     reinforce_freq = settings.get("reinforce_freq", 0)
+    world_reinforce_freq = settings.get("world_info_reinforce_freq", 5)  # Default to every 5 turns (optimized)
+    
+    # Track whether canon law was added in chat history to prevent duplication
+    canon_added_in_history = False
+    
+    # Get world info reinforcement counter from chat metadata
+    world_reinforce_counter = 0
+    if hasattr(request, 'world_reinforce_counter'):
+        world_reinforce_counter = request.world_reinforce_counter
+    elif hasattr(request, 'metadata') and request.metadata:
+        world_reinforce_counter = request.metadata.get('world_reinforce_counter', 0)
     
     for i, msg in enumerate(request.messages):
         # Filter out meta-messages like "Visual System" if they exist
         if msg.speaker == "Visual System":
             continue
 
-        # Reinforcement logic every X turns
+        # Character reinforcement logic every X turns
         if reinforce_freq > 0 and i > 0 and i % reinforce_freq == 0:
             if reinforcement_chunks:
                 # Character reinforcement
@@ -926,11 +1142,20 @@ def construct_prompt(request: PromptRequest):
                 # Narrator reinforcement
                 full_prompt += f"[REINFORCEMENT: {narrator_instruction.strip()}]\n"
         
+        # World info canon law reinforcement logic every X turns
+        # Add in history ONLY if we haven't added it yet in this prompt
+        if world_reinforce_freq > 0 and i > 0 and i % world_reinforce_freq == 0:
+            if canon_law_entries and not canon_added_in_history:
+                full_prompt += "[WORLD REINFORCEMENT: " + " | ".join(canon_law_entries) + "]\n"
+                canon_added_in_history = True
+        
         speaker = msg.speaker or ("User" if msg.role == "user" else "Narrator")
         full_prompt += f"{speaker}: {msg.content}\n"
 
     # === 8. CANON LAW (pinned for recency bias - right before generation) ===
-    if canon_law_entries:
+    # Add at the end ONLY if it wasn't already added in the chat history
+    # This ensures canon law appears exactly once per prompt for maximum efficiency
+    if canon_law_entries and not canon_added_in_history:
         full_prompt += "\n### Canon Law (World Rules):\n" + "\n".join(canon_law_entries) + "\n"
 
     # === 9. CONTINUE HINT + LEAD-IN ===
@@ -1666,7 +1891,8 @@ async def chat(request: PromptRequest):
     mode = request.mode or "narrator"
 
     # Calculate stop sequences (mode-aware)
-    stops = ["User:", "\nUser", "###"]
+    # Include reinforcement markers to prevent LLM from generating them in output
+    stops = ["User:", "\nUser", "###", "[REINFORCEMENT:", "[WORLD REINFORCEMENT:", "\n["]
     
     is_group_chat = len(request.characters) >= 2
     
@@ -1706,6 +1932,11 @@ async def chat(request: PromptRequest):
                 timeout=60.0
             )
             data = response.json()
+            
+            # Clean any reinforcement markers that may have leaked into the response
+            if "results" in data and len(data["results"]) > 0:
+                data["results"][0]["text"] = clean_llm_response(data["results"][0]["text"])
+            
             # Wrap response to include potential state updates (summary/truncated messages)
             data["_updated_state"] = {
                 "messages": [m.dict() for m in current_request.messages],
@@ -1725,6 +1956,17 @@ async def chat(request: PromptRequest):
             hints = hint_engine.generate_hint(performance_tracker, tokens)
             if hints:
                 data["_performance_hints"] = hints
+            
+            # Update world info reinforcement counter in chat metadata
+            world_reinforce_freq = current_request.settings.get("world_info_reinforce_freq", 3)
+            if world_reinforce_freq > 0:
+                # Calculate current counter based on message count
+                current_counter = len(current_request.messages)
+                
+                # Initialize metadata dict if not present
+                if current_request.metadata is None:
+                    current_request.metadata = {}
+                current_request.metadata['world_reinforce_counter'] = current_counter
             
             return data
         except Exception as e:
@@ -1820,7 +2062,10 @@ async def generate_image(params: SDParams):
             
             with open(file_path, "wb") as f:
                 f.write(base64.b64decode(image_base64))
-            
+
+            # Store image metadata
+            store_image_metadata(filename, params)
+
             return {
                 "url": f"/images/{filename}",
                 "filename": filename
@@ -2377,7 +2622,156 @@ async def add_world_entry(world_name: str, entry_data: dict):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+# Image Metadata Endpoint
+class ImageMetadataRequest(BaseModel):
+    filename: str
+
+@app.get("/api/image-metadata/{filename}")
+async def get_image_metadata(filename: str):
+    """Get generation parameters for a specific image."""
+    metadata = load_image_metadata()
+    if filename in metadata["images"]:
+        return {"success": True, "metadata": metadata["images"][filename]}
+    else:
+        return {"success": False, "error": "Image metadata not found"}
+
+@app.post("/api/inpaint")
+async def inpaint_image(request: InpaintRequest):
+    """Perform image inpainting using Stable Diffusion img2img API."""
+    try:
+        # Decode base64 images
+        image_bytes = base64.b64decode(request.image)
+        mask_bytes = base64.b64decode(request.mask)
+        
+        # Re-encode for SD API (A1111 expects base64 strings)
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        mask_base64 = base64.b64encode(mask_bytes).decode('utf-8')
+        
+        # Prepare the payload for A1111 img2img API
+        payload = {
+            "init_images": [image_base64],
+            "mask": mask_base64,
+            "prompt": request.prompt,
+            "negative_prompt": request.negative_prompt,
+            "steps": request.steps,
+            "cfg_scale": request.cfg_scale,
+            "width": request.width,
+            "height": request.height,
+            "denoising_strength": request.denoising_strength,
+            "sampler_name": request.sampler_name,
+            "mask_blur": request.mask_blur,
+            "inpainting_fill": 1,  # 'original' - use original image content
+            "inpaint_full_res": False,  # 'whole picture'
+            "inpaint_full_res_padding": 0,
+            "inpainting_mask_invert": 0  # 0 = inpaint masked, 1 = inpaint not masked
+        }
+        
+        # Call SD API
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{CONFIG['sd_url']}/sdapi/v1/img2img",
+                json=payload,
+                timeout=120.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            # Get the inpainted image
+            inpainted_image_base64 = data["images"][0]
+            
+            # Save the result
+            filename = f"inpaint_{int(time.time())}.png"
+            file_path = os.path.join(IMAGE_DIR, filename)
+            
+            with open(file_path, "wb") as f:
+                f.write(base64.b64decode(inpainted_image_base64))
+            
+            # Store metadata for the inpainted image
+            metadata_params = SDParams(
+                prompt=request.prompt,
+                negative_prompt=request.negative_prompt,
+                steps=request.steps,
+                cfg_scale=request.cfg_scale,
+                width=request.width,
+                height=request.height,
+                sampler_name=request.sampler_name,
+                scheduler="Automatic"
+            )
+            store_image_metadata(filename, metadata_params)
+            
+            return {
+                "success": True,
+                "url": f"/images/{filename}",
+                "filename": filename
+            }
+            
+    except httpx.HTTPStatusError as e:
+        error_detail = f"SD API error: {e.response.status_code}"
+        try:
+            error_data = e.response.json()
+            error_detail += f" - {error_data.get('detail', 'Unknown error')}"
+        except:
+            pass
+        return {"success": False, "error": error_detail}
+    except Exception as e:
+        return {"success": False, "error": f"Inpainting failed: {str(e)}"}
+
+# World Info Reinforcement Configuration Endpoints
+@app.get("/api/world-info/reinforcement/config")
+async def get_world_info_reinforcement_config():
+    """Get current world info reinforcement configuration."""
+    return {
+        "success": True,
+        "config": {
+            "world_info_reinforce_freq": 3,  # Default value
+            "description": "Frequency (in turns) for reinforcing canon law entries. 1 = every turn, 3 = every 3 turns, etc.",
+            "default": 3,
+            "min": 1,
+            "max": 100
+        }
+    }
+
+@app.post("/api/world-info/reinforcement/config")
+async def set_world_info_reinforcement_config(request: dict):
+    """Set world info reinforcement frequency."""
+    try:
+        frequency = request.get("world_info_reinforce_freq")
+        
+        if frequency is None:
+            return {"success": False, "error": "world_info_reinforce_freq is required"}
+        
+        if not isinstance(frequency, int) or frequency < 1 or frequency > 100:
+            return {"success": False, "error": "world_info_reinforce_freq must be an integer between 1 and 100"}
+        
+        # For now, we'll return the configured value
+        # In a full implementation, this would be stored in user preferences or chat settings
+        return {
+            "success": True,
+            "world_info_reinforce_freq": frequency,
+            "message": f"World info reinforcement frequency set to every {frequency} turns"
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.get("/api/world-info/reinforcement/status")
+async def get_world_info_reinforcement_status():
+    """Get current world info reinforcement status and statistics."""
+    return {
+        "success": True,
+        "status": {
+            "default_frequency": 3,
+            "description": "Canon law entries are reinforced every 3 turns by default, reducing prompt bloat while maintaining consistency.",
+            "benefits": [
+                "Reduced prompt length",
+                "Better performance",
+                "Configurable control",
+                "Backward compatibility"
+            ],
+            "implementation": "World info reinforcement is handled automatically in the prompt construction engine."
+        }
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

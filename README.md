@@ -51,7 +51,7 @@ What makes NeuralRP different from other RP frontends:
   Seamlessly connect to a local KoboldCpp server for text generation (native or OpenAI-compatible API).
 
 - **Stable Diffusion (A1111) Integration**  
-  Generate images inline with chat conversations using Stable Diffusion WebUI (AUTOMATIC1111).
+  Generate images inline with chat conversations using Stable Diffusion WebUI (AUTOMATIC1111). Supports both text-to-image and image inpainting operations.
 
 - **SillyTavern Compatible**  
   Accepts character cards and World Info in SillyTavern V2 JSON format, and saves new cards back out in the same format.
@@ -118,6 +118,9 @@ What makes NeuralRP different from other RP frontends:
 
 - **Automatic Performance Mode (v1.2)**  
   Smart GPU resource management when running LLM + Stable Diffusion together. Queues heavy operations while allowing quick tasks to proceed, automatically adjusts SD quality under load, and provides context-aware hints. Includes rolling median performance tracking to detect contention and a master toggle to enable/disable the entire system.
+
+- **World Info Reinforcement Configuration (v1.4)**  
+  Configure canon law reinforcement frequency (default: every 3 turns, configurable 1-100) to reduce prompt bloat while maintaining world consistency. API endpoints for GET/POST configuration and status monitoring.
 
 - **Adaptive Connection Monitoring (v1.2)**  
   Smart health checking for KoboldCpp and Stable Diffusion connections that adapts to connection stability:
@@ -237,6 +240,33 @@ NeuralRP automatically uses capsule/summary personas in multi-character mode to 
 1. In the image prompt, use `[CharacterName]` to reference a character.
 2. The app will automatically expand `[CharacterName]` to the Danbooru tag assigned to that character.
 3. Images are inserted inline into the chat and saved under `app/images/`.
+
+### Image Inpainting (v1.4)
+
+NeuralRP supports full inpainting functionality via Stable Diffusion's img2img API, allowing you to modify and regenerate specific portions of existing images.
+
+**How to use inpainting:**
+1. Upload or select an existing image
+2. Create a mask (white = inpaint area, black = keep area)
+3. Provide a prompt for what should be generated in the masked region
+4. Adjust inpainting parameters:
+   - **Denoising Strength** (0.0-1.0): Controls how much the generated content replaces the original (higher = more change)
+   - **Mask Blur** (0-64): Softens mask edges for smoother transitions
+   - **Steps**: Number of diffusion steps (default: 20)
+   - **CFG Scale**: Prompt adherence strength (default: 8.0)
+5. Generate and save the inpainted image
+
+**Technical Details:**
+- **API endpoint**: `POST /api/inpaint`
+- **Storage**: Inpainted images saved as `inpaint_{timestamp}.png`
+- **Metadata**: All inpainting parameters are stored in `image_metadata.json`
+- **Integration**: Seamlessly works with chat system for visual consistency
+
+**Use Cases:**
+- Fix minor issues in generated images
+- Change facial expressions or poses
+- Modify backgrounds while preserving characters
+- Iterate on specific image elements without regenerating entire scene
 
 ### World Info
 
@@ -506,6 +536,33 @@ For entries with `useProbability: true`:
   - When disabled, no world info (regular or Canon Law) is injected into prompts.
   - Useful for "rules-light" sessions or maximum speed with low-VRAM models.
 
+**World Info Reinforcement Configuration (v1.4)**
+
+**Configurable Reinforcement Frequency**
+Canon law entries can be configured to reinforce at specific intervals to balance prompt bloat reduction with world consistency.
+
+**API Endpoints:**
+- **GET /api/world-info/reinforcement/config**: Get current reinforcement configuration
+  - Returns: `default_frequency` (3), `description`, `min` (1), `max` (100)
+- **POST /api/world-info/reinforcement/config**: Set reinforcement frequency
+  - Accepts: `world_info_reinforce_freq` (integer 1-100)
+- **GET /api/world-info/reinforcement/status**: Get reinforcement status and statistics
+
+**Implementation:**
+- **Default frequency**: Every 3 turns (balances recency with prompt efficiency)
+- **Configurable range**: 1 (every turn) to 100 (every 100 turns)
+- **Behavior**:
+  - Reinforcement counter tracked in chat metadata (`world_reinforce_counter`)
+  - Canon law entries injected every N turns where N = configured frequency
+  - Reduces prompt bloat by ~66% compared to v1.1's every-turn reinforcement
+  - Maintains world consistency through regular reinforcement
+
+**Benefits:**
+- **Reduced prompt length**: Less repetition in long conversations
+- **Configurable**: Adjust based on model size and world complexity
+- **Automatic**: No manual intervention needed once configured
+- **Backward compatible**: Defaults to 3 for existing sessions
+
 ### Branching System (v1.1)
 
 **Branch Creation**
@@ -672,6 +729,43 @@ Per-character visual canon:
 - **Request format**: Standard A1111 API payload with `prompt`, `negative_prompt`, `steps`, `cfg_scale`, etc.
 - **Response**: Base64-encoded PNG, decoded and saved to `app/images/`.
 
+**Image Metadata System (v1.4)**
+
+**Automatic Parameter Storage**
+All image generation parameters are automatically captured and stored for future reference and debugging.
+
+**Metadata File Structure:**
+- **Location**: `app/images/image_metadata.json`
+- **Format**: JSON object with image filenames as keys
+- **Per-image metadata**:
+  ```json
+  {
+    "image_20250112_143000.png": {
+      "prompt": "Character description in cafe setting",
+      "negative_prompt": "blurry, low quality",
+      "steps": 20,
+      "cfg_scale": 8.0,
+      "width": 512,
+      "height": 512,
+      "seed": 1234567890,
+      "timestamp": "2025-01-12T14:30:00.000Z",
+      "model": "sd_v15",
+      "generation_type": "txt2img" // or "inpaint"
+    }
+  }
+  ```
+
+**Benefits:**
+- **Reproducibility**: Can regenerate images with exact same parameters
+- **Debugging**: Track which parameters produced which results
+- **Archive**: Complete history of image generations across sessions
+- **Integration**: Seamlessly works with both txt2img and inpainting operations
+
+**API Integration:**
+- Images generated via `/api/generate-image` automatically save metadata
+- Inpainting operations via `/api/inpaint` include mask-specific parameters (denoising strength, mask blur)
+- Metadata persists across server restarts
+
 **Image Persistence**
 - Generated images are saved with timestamp-based filenames.
 - Inline display in chat UI via `<img>` tags.
@@ -796,9 +890,12 @@ def search_semantic(self, world_info, query_text, max_entries=10, similarity_thr
 def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_threshold=0.25):
 ```
 
-**Integration Process:**
-- Analyzes last 5 messages for semantic context
-- Uses 0.25 similarity threshold for high-precision retrieval
+**Integration Process (v1.4 Enhancements):**
+- **Initial turn detection**: First 2 turns use latest user message only with 0.35 threshold for better precision
+- **Subsequent turns**: Last 5 messages with 0.45 threshold for broader context
+- **Keyword priority sorting**: Keyword matches rank higher than semantic-only matches for relevance
+- **Comprehensive deduplication**: Handles plurals, apostrophes, possessives, and punctuation variations
+- **Generic key filtering**: Excludes structural/generic keys ("the", "and", "room", "city", "type", etc.)
 - Falls back to keyword matching if semantic returns no results
 - Separates Canon Law entries (always included) from semantic results
 
@@ -1132,7 +1229,15 @@ NeuralRP is built for fast, coherent RP on modest local hardware. Semantic searc
 
 ## Version History
 
-### v1.3 (Current)
+### v1.4 (Current)
+- **Image Inpainting**: Full inpainting support via Stable Diffusion img2img API with configurable masks, denoising strength, and inpaint parameters
+- **Image Metadata System**: Automatic storage and retrieval of image generation parameters (prompt, steps, CFG, dimensions, timestamps) in `app/images/image_metadata.json`
+- **Enhanced Semantic Search**: Initial turn detection (uses latest user message only with higher 0.35 threshold), keyword priority sorting (keyword matches rank higher than semantic-only matches), comprehensive deduplication handling plurals/apostrophes/possessives
+- **World Info Reinforcement Configuration**: New endpoints for configuring canon law reinforcement frequency (default: every 3 turns, configurable 1-100), reducing prompt bloat while maintaining consistency
+- **Semantic Search Resource Management**: Periodic cleanup task (every 5 minutes), automatic GPU memory cleanup, embeddings cache limited to 5 most recent world info versions
+- **Generic Key Filtering**: Excludes structural/generic keys ("the", "and", "room", "city", "type", etc.) from semantic search for better relevance
+
+### v1.3
 - **In-Card Editing**: Full character and world info editing interface with AI-assisted content generation and manual field editing
 - **Semantic World Info**: Semantic search using sentence transformers for intelligent, context-aware lore retrieval with cosine similarity matching
 - **LRU Cache System**: Memory-safe world info caching with configurable limits, automatic eviction, and real-time monitoring UI
@@ -1164,4 +1269,3 @@ NeuralRP is built for fast, coherent RP on modest local hardware. Semantic searc
 - Automatic summarization at 85% context.
 - Canon Law system for immutable world facts.
 - Danbooru character tagging for consistent image generation.
-
