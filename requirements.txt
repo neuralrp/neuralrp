@@ -4,3 +4,4 @@ httpx
 pydantic
 sentence-transformers
 torch
+sqlite-vec

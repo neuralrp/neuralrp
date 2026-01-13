@@ -1,4 +1,39 @@
-# Python
+# ============================================
+# PERSONAL DATA - NEVER COMMIT
+# ============================================
+# SQLite databases (main personal data storage)
+app/data/neuralrp.db
+app/data/*.db
+app/data/*.db-shm
+app/data/*.db-wal
+
+# Embeddings and ML data
+app/data/embeddings.pkl
+app/data/*.pkl
+
+# Generated images and metadata
+app/images/*.png
+app/images/*.jpg
+app/images/*.jpeg
+app/images/*.gif
+app/images/*.webp
+app/images/image_metadata.json
+
+# Legacy JSON data (pre-SQLite migration)
+app/data/characters/*.json
+app/data/worldinfo/*.json
+app/data/chats/*.json
+
+# Keep .gitkeep files to preserve folder structure
+!app/data/.gitkeep
+!app/data/chats/.gitkeep
+!app/data/characters/.gitkeep
+!app/data/worldinfo/.gitkeep
+!app/images/.gitkeep
+
+# ============================================
+# PYTHON
+# ============================================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -19,38 +54,36 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+env/
+venv/
+ENV/
+.venv
 
+# ============================================
 # IDEs
+# ============================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
+# ============================================
 # OS
+# ============================================
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Application specific
-app/images/*.png
-app/images/*.jpg
-app/images/*.jpeg
-app/images/dt_*.db
-# Keep the .gitkeep file to preserve folder structure
-!app/images/.gitkeep
-
-# Personal data - keep folders but ignore content
-app/data/chats/*.json
-app/data/characters/*.json
-app/data/worldinfo/*.json
-# Keep the .gitkeep files to preserve folder structure
-!app/data/chats/.gitkeep
-!app/data/characters/.gitkeep
-!app/data/worldinfo/.gitkeep
-
-# Logs
+# ============================================
+# LOGS
+# ============================================
 *.log
+logs/
 
-# Environment variables
+# ============================================
+# ENVIRONMENT VARIABLES
+# ============================================
 .env
 .env.local
+.env.*.local

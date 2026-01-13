@@ -1,1271 +1,164 @@
 # NeuralRP
 
-NeuralRP is an opinionated roleplay interface for local LLMs. It's built for users who already understand the basics — temperature, context length, model choice — and want a fast, coherent RP experience without managing dozens of knobs or extensions. Optimized for modest GPUs, NeuralRP integrates KoboldCpp and Stable Diffusion WebUI (AUTOMATIC1111) directly, applies strong narrative defaults, and turns live roleplay sessions into portable, SillyTavern-compatible character and world cards.
+**Hardware-efficient roleplay for local LLMs.** NeuralRP is built for experienced users who want SillyTavern-quality RP on modest GPUs (12-16GB VRAM). No configuration sprawl, no extension management—just integrated LLM + Stable Diffusion with persistent world state and strong narrative defaults.
+
+If you already know what temperature and context length mean, and you're tired of tweaking 100+ settings to get coherent output, NeuralRP is for you.
 
 ---
 
-## Overview
+## Why NeuralRP?
 
-This section covers what NeuralRP does, who it's for, and how to use it.
+NeuralRP solves specific problems for local LLM users:
 
-### Design Philosophy
-
-NeuralRP is designed for experienced RP users who want:
-- **Speed over tweakability** – Strong defaults, fewer configuration knobs, faster setup.
-- **Coherence over flexibility** – Opinionated prompt structure that maintains character voices and world consistency.
-- **Efficiency on constrained hardware** – Built to run text generation and image generation together on modest GPUs (like 12GB cards) without requiring massive context windows or cloud infrastructure.
-- **Portability** – Generated JSON cards are optimized with PList and plain text that follow best practices for SillyTavern and other tools.
-- **Strong visual support** -  Customizable per‑character image prompts and inline generations that avoid leaking text into the chat context while storing images in a dedicated folder.
-
-If you're looking for a generic LLM dashboard with every possible parameter exposed, this isn't it. NeuralRP focuses on fast, hardware-efficient roleplay workflows with minimal friction.
-
-### Key Differentiators
-
-What makes NeuralRP different from other RP frontends:
-
-1. **Dual-Source Card Generation**  
-   Create character cards and world info from either chat history OR plain-text descriptions. Most tools only do one or the other.
-
-2. **Per-Character Visual Canon (Danbooru Tags)**  
-   Assign tags to each character once; use `[CharacterName]` in image prompts forever. Consistent character appearance without rewriting prompts each time.
-
-3. **Canon Law + Scalable World Info**  
-   Mark critical lore as "Canon Law" (always included, never capped). Regular entries use keyword matching with configurable caps and probability weighting, so huge worlds stay fast.
-
-4. **Auto Mode with Smart Speaker Selection**
-   Let the AI decide who speaks (narrator or which character) turn-by-turn based on context, using compressed capsule personas to keep every voice distinct.
-
-5. **Small-GPU friendly design**
-   Prompt structure, automatic summarization, and capped World Info are tuned so you can run a text model and an image model together locally on 12GB cards without massive context windows. Automatic Performance Mode helps manage strained GPU's with multiple models loaded.
-
-6. **Dedicated Narrator Mode**
-   Built-in third-person narrator mode where the AI acts as game master and storyteller, separate from character voices, without needing custom cards or prompt hacks.
+- **Tired of SillyTavern's 100+ extensions?** → NeuralRP ships with opinionated defaults that just work
+- **Running LLM + SD on 12GB VRAM?** → Automatic Performance Mode queues operations intelligently
+- **Want branching narratives without Git?** → File-based branches with UI management
+- **Character cards drift over time?** → Canon Law + semantic World Info keep lore consistent
+- **Building cards for other tools is tedious?** → Dual-source card generation (from chat or text)
+- **Image prompts are repetitive?** → Per-character Danbooru tags, reference with `[CharacterName]`
 
 ---
 
-## Features
+## Core Features
 
-### Core Functionality
+### Play
+- **Chat Modes**: Narrator (third-person GM), Focus (first-person character), Auto (AI chooses speaker)
+- **Multi-Character Support**: Capsule personas keep voices distinct without prompt bloat
+- **Branching**: Fork from any message, independent timelines, rename/delete/switch via UI
+- **Persistent Memory**: Automatic summarization when context fills, sessions run indefinitely
 
-- **KoboldCpp Integration**  
-  Seamlessly connect to a local KoboldCpp server for text generation (native or OpenAI-compatible API).
+### Build
+- **Dual-Source Card Generation**: Create character cards from chat history OR plain-text descriptions
+- **World Info with Canon Law**: Mark critical lore as always-included, regular entries use semantic search
+- **Live Editing**: AI-generated content appears in editable textboxes before saving
+- **SillyTavern Compatible**: Import/export character cards and world info seamlessly
 
-- **Stable Diffusion (A1111) Integration**  
-  Generate images inline with chat conversations using Stable Diffusion WebUI (AUTOMATIC1111). Supports both text-to-image and image inpainting operations.
+### Visualize
+- **Integrated Stable Diffusion**: Generate images inline during chat
+- **Per-Character Tags**: Assign Danbooru tags once, use `[CharacterName]` in prompts forever
+- **Inpainting**: Modify existing images with mask-based regeneration
+- **Image Metadata**: All generation parameters stored for reproducibility
 
-- **SillyTavern Compatible**  
-  Accepts character cards and World Info in SillyTavern V2 JSON format, and saves new cards back out in the same format.
-
-- **Narrator Mode**  
-  Chat with characters, or select no characters for a pure third-person narrator experience in any world.
-
-- **Multi-Character Support**  
-  Chat with multiple characters in the same scene. NeuralRP uses capsule personas to keep voices distinct without bloating the prompt.
-
-- **Branching Chat Sessions (v1.1)**  
-  Fork from any message to create independent branches with their own chat files. Each branch records its origin chat and message, supports rename/delete, and appears in a dedicated branch management UI for easy navigation between alternate timelines.
-
-### Card & World Factory
-
-- **AI-Powered Character Creation (From Chat or Manual Text)**  
-  Generate new character cards either from the current chat history or from plain-text descriptions. Start from a loose idea, roleplay it out, or paste a concept paragraph, then convert it into a structured SillyTavern-compatible character card using PList-style fields.
-
-- **AI-Powered World Building (From Chat or Manual Text)**  
-  Create World Info entries (history, locations, creatures, factions) from conversations or manually supplied lore text. NeuralRP turns freeform worldbuilding into reusable World Info JSON.
-
-- **Automatic Formatting and Quotes**  
-  The app handles field structure, escaping, and pulling out example dialogues and first messages, so you don't have to hand-edit JSON before importing into SillyTavern.
-
-- **Live Editing Before Save (v1.1)**  
-  All generated PList text appears in editable textboxes. You can tweak, partially rewrite, or completely replace the LLM output before saving the character card or world file.
-
-- **In-Card Editing with AI Assistance**  
-  Edit existing character cards and world info entries directly, with optional AI-assisted content generation. Manually adjust all fields (personality, body, scenario, tags, keys, content) or use context-aware AI to refine specific sections. Save/cancel buttons positioned at bottom for mobile-friendly UX.
-
-- **Use as a Dedicated Card Factory**  
-  Even if you prefer to play in SillyTavern, you can use NeuralRP as a focused environment to generate and refine character/world cards, then import them into other frontends.
-
-### Advanced Features
-
-- **Automatic Summarization**  
-  When context usage reaches the configured threshold of the model's max (default: 85%), older messages are summarized so their content remains accessible to the LLM after the raw window is exceeded. This threshold is configurable in settings.
-
-- **Token Counter**  
-  Monitor token usage for the assembled prompt in real time.
-
-- **Image Generation with Character Tags**  
-  Assign a Danbooru-style tag to each character. Use `[CharacterName]` in the positive prompt and NeuralRP will expand it to the configured tag for consistent A1111 generations, even when you're not actively chatting with that character.
-
-- **Chat Persistence**  
-  Save and load previous chat sessions, including associated characters, world, and images.
-
-- **Canon Law System**  
-  Mark important World Info entries as **Canon Law** (click to toggle, entries highlight red). Canon Law entries are always injected and prioritized in the context to reduce world drift.
-
-- **Efficient World Info for Large Worlds (v1.1)**  
-  World Info is now optimized for big settings:
-  - Cached world-info structures to avoid reprocessing on every request.  
-  - One-time lowercase preprocessing of keys for faster, case-insensitive matching.  
-  - Configurable cap on the number of regular entries included per turn to prevent prompt bloat, while Canon Law entries remain uncapped and always included.  
-  - Optional probability weighting (`useProbability` + `probability`) to allow some entries to appear stochastically instead of every time they trigger.  
-  - A global "Enable World Info" toggle in Settings for sessions where you want maximum speed or rules-light play.
-
-- **Semantic World Info Retrieval (v1.3)**  
-  Semantic search engine using `all-mpnet-base-v2` sentence transformers for intelligent lore retrieval. Computes embeddings for world info entries and uses cosine similarity to find contextually relevant entries based on recent chat content. Falls back to keyword matching if semantic search returns no results. Includes LRU caching for embeddings to avoid reprocessing, automatic GPU detection, and configurable similarity thresholds (default: 0.25).
-
-- **LRU Cache for World Info (v1.3)**  
-  Proper memory management for world info caching using custom LRU (Least Recently Used) eviction policy. Default 1000-entry cache prevents memory leaks while maintaining performance. Includes user-configurable cache size, real-time statistics (entries, usage percentage, estimated memory), manual cache clearing, and API endpoints for monitoring and management.
-
-- **Automatic Performance Mode (v1.2)**  
-  Smart GPU resource management when running LLM + Stable Diffusion together. Queues heavy operations while allowing quick tasks to proceed, automatically adjusts SD quality under load, and provides context-aware hints. Includes rolling median performance tracking to detect contention and a master toggle to enable/disable the entire system.
-
-- **World Info Reinforcement Configuration (v1.4)**  
-  Configure canon law reinforcement frequency (default: every 3 turns, configurable 1-100) to reduce prompt bloat while maintaining world consistency. API endpoints for GET/POST configuration and status monitoring.
-
-- **Adaptive Connection Monitoring (v1.2)**  
-  Smart health checking for KoboldCpp and Stable Diffusion connections that adapts to connection stability:
-  - Reduces monitoring frequency from 12 to 2-4 checks per minute during stable connections
-  - Increases check frequency automatically when connection issues are detected
-  - Pauses all monitoring when the browser tab is in background to save battery and network resources
-  - Provides immediate feedback during manual user actions (URL updates, connection tests)
-
-### Customization Options
-
-NeuralRP keeps the UI minimal but exposes the essentials:
-
-- **System Prompt**  
-  Customize the global behavior and style (narrator vs character focus, tone, formatting).
-
-- **Temperature Control**  
-  Adjust creativity (0.0–1.0+).
-
-- **Reply Length**  
-  Set maximum response length in tokens.
-
-- **User Persona**  
-  Define your user/player persona, used as part of the context.
-
-- **Context Reinforcement**  
-  Control how often character cards or narrator prompts are re-inserted into the context window.
-
-### Mode Selection
-
-- **Narrator Mode**  
-  Third-person cinematic narration; the narrator may move all characters and NPCs.
-
-- **Focus Mode**  
-  Speak as a specific character in first person; the hidden prompt constrains the LLM to that character's voice.
-
-- **Auto Mode**  
-  Let the LLM automatically select whether to respond as narrator or a specific character based on context, for a more natural roleplay flow.
+### Performance
+- **Automatic Resource Management**: Queues heavy operations, allows light tasks to proceed
+- **Semantic World Info**: Intelligent lore retrieval with vector search, falls back to keywords
+- **SQLite-Backed Architecture**: ACID transactions prevent data corruption, scales to 10,000+ entries
+- **Token Monitoring**: Real-time context usage tracking with configurable summarization thresholds
 
 ---
 
-## Installation
+## Hardware Requirements
 
-### Prerequisites
+**Recommended:**
+- 12-16GB VRAM GPU (NVIDIA/AMD)
+- Python 3.8+
+- KoboldCpp (for LLM inference)
+- AUTOMATIC1111 WebUI (for image generation)
 
-- Python 3.8 or higher  
-- [KoboldCpp](https://github.com/LostRuins/koboldcpp) running locally (e.g. `http://127.0.0.1:5001`) with the API enabled  
-- [Stable Diffusion WebUI (AUTOMATIC1111)](https://github.com/AUTOMATIC1111/stable-diffusion-webui) running locally (e.g. `http://127.0.0.1:7861`) for image generation
+**Minimum:**
+- 8GB VRAM (with Performance Mode enabled)
+- Supports: KoboldCpp, Ollama, Tabby (OpenAI-compatible endpoints)
 
-### Quick Start (Windows)
+---
 
-1. Double-click `launcher.bat` to run the application.  
-   - The launcher will automatically check for and install dependencies.  
-   - On first run, this may take a few minutes.
+## Quick Start
 
-2. Open your browser and navigate to:  
-   `http://localhost:8000`
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/neuralrp/neuralrp.git
+   cd neuralrp
+   ```
 
-### Manual Installation
-
-1. Clone or download this repository.
-
-2. Install dependencies:
+2. **Install dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Run the application:
+3. **Configure endpoints** (edit `main.py` if needed)
+   - KoboldCpp API: `http://127.0.0.1:5001`
+   - Stable Diffusion API: `http://127.0.0.1:7861`
+
+4. **Run NeuralRP**
    ```bash
    python main.py
    ```
+   Or use `launcher.bat` on Windows
+
+5. **Open browser**
+   Navigate to `http://localhost:8000`
 
 ---
 
-## Configuration
+## Philosophy
 
-### API Endpoints
+NeuralRP is opinionated. It doesn't try to be everything to everyone. It does one thing exceptionally well: **local, hardware-efficient roleplay with integrated image generation and persistent world state.**
 
-By default, the app expects:
-- KoboldCpp API: `http://127.0.0.1:5001`
-- Stable Diffusion WebUI API: `http://127.0.0.1:7861`
+We believe strong defaults beat endless configurability. The interface exposes what matters (temperature, context, personas) and hides what doesn't (cache sizes, embedding models, lock patterns). If you want to tweak those, you can—check the technical docs.
 
-To change these, modify the `CONFIG` dictionary in `main.py`:
-
-```python
-CONFIG = {
-    "kobold_url": "http://127.0.0.1:5001",
-    "sd_url": "http://127.0.0.1:7861",
-    # ...
-}
-```
+This is the focused alternative to SillyTavern: fewer knobs, more immersion.
 
 ---
 
-## Usage
+## What's Included
 
-### Basic Chat
-
-1. Load or create a character card (optional) and select a world.
-2. Adjust settings as needed (temperature, reply length, etc.).
-3. Start chatting in the main interface in:
-   - **Narrator mode**, or
-   - **Focus mode** for a specific character, or
-   - **Auto mode**.
-
-### Multi-Character Chat
-
-1. Load two or more characters into the session.
-2. Use the mode selector to choose:
-   - **Narrator** – Narrator controls the scene and any characters.
-   - **Focus: [Name]** – Speak as a specific character in first person.
-   - **Auto** – Let the LLM decide who should respond / narrate based on context.
-
-NeuralRP automatically uses capsule/summary personas in multi-character mode to keep definitions short and distinct.
-
-### Image Generation
-
-1. In the image prompt, use `[CharacterName]` to reference a character.
-2. The app will automatically expand `[CharacterName]` to the Danbooru tag assigned to that character.
-3. Images are inserted inline into the chat and saved under `app/images/`.
-
-### Image Inpainting (v1.4)
-
-NeuralRP supports full inpainting functionality via Stable Diffusion's img2img API, allowing you to modify and regenerate specific portions of existing images.
-
-**How to use inpainting:**
-1. Upload or select an existing image
-2. Create a mask (white = inpaint area, black = keep area)
-3. Provide a prompt for what should be generated in the masked region
-4. Adjust inpainting parameters:
-   - **Denoising Strength** (0.0-1.0): Controls how much the generated content replaces the original (higher = more change)
-   - **Mask Blur** (0-64): Softens mask edges for smoother transitions
-   - **Steps**: Number of diffusion steps (default: 20)
-   - **CFG Scale**: Prompt adherence strength (default: 8.0)
-5. Generate and save the inpainted image
-
-**Technical Details:**
-- **API endpoint**: `POST /api/inpaint`
-- **Storage**: Inpainted images saved as `inpaint_{timestamp}.png`
-- **Metadata**: All inpainting parameters are stored in `image_metadata.json`
-- **Integration**: Seamlessly works with chat system for visual consistency
-
-**Use Cases:**
-- Fix minor issues in generated images
-- Change facial expressions or poses
-- Modify backgrounds while preserving characters
-- Iterate on specific image elements without regenerating entire scene
-
-### World Info
-
-1. Navigate to the World Info tab.
-2. Load or create World Info files in SillyTavern-compatible JSON format.
-3. Click entries to mark them as **Canon Law** (they turn red).
-4. Use the "Enable World Info" toggle in Settings to turn lore injection on or off for the current session.
-
-Regular entries are matched via case-insensitive keyword search against the last few messages, with a configurable maximum number of entries per turn and optional probability weighting; Canon Law entries are always included.
-
-### Creating Characters (Gen Card)
-
-1. Open the **Gen Card** tab for your current session.
-2. Choose a source mode:
-   - **Current Chat** – Analyze recent conversation to infer the character's description, personality, and example lines.
-   - **Manual Input** – Paste a plain-text description of the character instead of using chat history.
-3. Click **Generate** to create PList-style character data.
-4. Review and edit the generated text in the editable textbox.
-5. Click **Save** to write a SillyTavern-compatible character card file.
-
-### Creating World Info (Gen World)
-
-1. Open the **Gen World** tab.
-2. Choose a source mode:
-   - **Current Chat** – Analyze recent world interactions and exposition.
-   - **Manual Input** – Paste your own lore text or notes.
-3. Click **Generate** to extract structured World Info entries (history, locations, creatures, factions) into PList-style text.
-4. Edit the generated content as needed.
-5. Save entries into your world's World Info file.
-
-### Branching and Forks (v1.1)
-
-1. In any chat, click the fork icon for a specific message to open the **Fork Dialog**.
-2. Accept the auto-generated branch name (based on message content and timestamp) or provide a custom name.
-3. Confirm to create a new branch; a separate chat file is created starting from that message, inheriting the current characters, world, and settings.
-4. Use the **Branch Management** dialog or sidebar sections to:
-   - View all branches and their origins.
-   - Rename or delete branches.
-   - Switch between the main timeline and any branch.
+- **SQLite-backed storage** for characters, chats, world info, and images
+- **Semantic search** using vector embeddings for intelligent lore retrieval
+- **Automatic performance management** for LLM + SD on the same GPU
+- **Adaptive connection monitoring** that reduces overhead during stable operation
+- **Branch management** with origin tracking and timeline independence
+- **SillyTavern compatibility** for character cards and world info
 
 ---
 
-## Data & File Structure
+## Documentation
 
-All saved content lives under `app/data/` and can be backed up, synced, or version-controlled:
-
-- **Characters** → `app/data/characters/` (SillyTavern V2 JSON format)
-- **World Info** → `app/data/worldinfo/` (SillyTavern-compatible JSON)
-- **Chats** (including branches) → `app/data/chats/` (JSON with messages + metadata)
-- **Images** → `app/images/` (PNG files from Stable Diffusion)
-
----
-
-## Project Structure
-
-```
-neuralrp/
-├── main.py                 # Main FastAPI application
-├── launcher.bat            # Windows launcher script
-├── requirements.txt        # Python dependencies
-├── README.md               # This file
-├── app/
-│   ├── index.html          # Frontend interface
-│   ├── data/
-│   │   ├── characters/     # Character card storage
-│   │   ├── chats/          # Saved chat sessions (including branches)
-│   │   └── worldinfo/      # World Info entries
-│   └── images/             # Generated images
-└── frontend/               # Frontend build files
-```
-
----
-
-## Requirements
-
-```
-fastapi
-uvicorn[standard]
-httpx
-pydantic
-```
+- [**Technical Documentation**](docs/TECHNICAL.md) - Deep dives into context assembly, SQLite architecture, performance mode, semantic search
+- [**Changelog**](CHANGELOG.md) - Version history and release notes
+- [**Contributing**](CONTRIBUTING.md) - For developers (coming soon)
 
 ---
 
 ## Troubleshooting
 
-### "Python is not installed"
-- Install Python 3.8+ from [https://www.python.org/](https://www.python.org/)
-- Make sure to check "Add Python to PATH" during installation
+**Can't connect to KoboldCpp/Stable Diffusion?**
+- Ensure services are running with `--api` flags enabled
+- Check ports: KoboldCpp (5001), SD WebUI (7861)
+- Verify firewall isn't blocking localhost connections
 
-### "Failed to install dependencies"
-- Ensure you have a stable internet connection
-- Try running `pip install --upgrade pip` first
-- Check if you're behind a corporate firewall that blocks pip
+**Images not generating?**
+- Confirm Stable Diffusion WebUI is running and accessible
+- Check `app/images/` directory exists and is writable
+- Review server logs for specific error messages
 
-### Can't connect to KoboldCpp/SD
-- Ensure KoboldCpp is running on port 5001
-- Ensure Stable Diffusion WebUI is running on port 7861
-- Check that `--api` flag is enabled in KoboldCpp
-- Check that `--api` flag is enabled in Stable Diffusion WebUI
-
-### Images not generating
-- Verify Stable Diffusion is running and accessible
-- Check that the image directory (`app/images/`) exists and is writable
-- Review the server logs for specific error messages
+**Performance issues with LLM + SD together?**
+- Enable Automatic Performance Mode in Settings
+- Consider reducing context reinforcement frequency
+- Generate images outside of heavy chat sessions
 
 ---
 
-## Contributing
+## Data Structure
 
-This project is designed to be extended and customized. Feel free to fork, modify, and improve it for your needs.
+All content lives in `app/data/` and can be backed up or version-controlled:
 
----
+```
+app/data/
+├── neuralrp.db          # SQLite database (characters, chats, world info, embeddings)
+├── characters/          # Exported SillyTavern V2 JSON cards
+├── chats/               # Exported chat sessions
+└── worldinfo/           # Exported world info JSON
 
-## License
-
-This project is provided as-is for educational and personal use.
+app/images/              # Generated images from Stable Diffusion
+```
 
 ---
 
 ## Credits
 
-- Built with [FastAPI](https://fastapi.tiangolo.com/)
-- Frontend integration with vanilla JavaScript
-- Compatible with [SillyTavern](https://github.com/SillyTavern/SillyTavern) card formats
-- Integrates with [KoboldCpp](https://github.com/LostRuins/koboldcpp) and [Stable Diffusion](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
+Built with [FastAPI](https://fastapi.tiangolo.com/) • Compatible with [SillyTavern](https://github.com/SillyTavern/SillyTavern) • Integrates [KoboldCpp](https://github.com/LostRuins/koboldcpp) and [AUTOMATIC1111 Stable Diffusion](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
 
 ---
 
-## Technical Notes
+## License
 
-This section documents implementation details, design decisions, and internal mechanics. It serves as a running log of what's been built and how it works.
-
-### Context Assembly
-
-On each generation, NeuralRP builds the prompt in layers to maintain stable structure and predictable behavior:
-
-1. **System and Mode Instructions**
-   - Global system prompt sets narrator vs character focus, tone, and formatting rules.
-   - Mode-specific instructions (Narrator / Focus / Auto) tell the model how to respond:
-     - **Narrator**: Third-person, omniscient narration controlling all characters and NPCs.
-     - **Focus**: First-person voice locked to a specific character's persona.
-     - **Auto**: Let the model decide which character should speak or narrate based on context.
-
-2. **User Persona (Optional)**
-   - A short description of the player/user is injected so the model can keep your POV and preferences in mind.
-   - Placed early in the prompt to influence tone and perspective throughout.
-
-3. **World Info (Keyword-Triggered + Canon Law)**
-   - If World Info is enabled:
-     - **Canon Law entries** are collected first (always included, never capped, never probabilistic).
-     - **Regular entries** are matched via case-insensitive keyword search on the last 5 messages:
-       - Configurable cap on the number of regular entries per turn (default: 10).
-       - Optional probability weighting (`useProbability` + `probability` fields) allows entries to appear stochastically.
-   - **Placement**:
-     - Regular entries are inserted after system + mode + persona, before character definitions.
-     - Canon Law entries are injected near the end of the prompt to override drift and restate core facts.
-
-4. **Character Definitions**
-   - **Single-character**: Full character card description and personality.
-   - **Multi-character**: Short "capsule personas" (1-2 sentences + key traits + speech style) to avoid prompt bloat.
-   - **Focus mode**: Selected character's persona is emphasized so the model speaks in that voice.
-   - **Narrator mode**: Character cards are present but narration is instructed to be third-person.
-
-5. **Conversation History and Memory**
-   - Recent messages are included verbatim.
-   - **Automatic summarization** triggers when total context approaches ~85% of the model's limit:
-     - Oldest 10 messages are removed and distilled into a summary.
-     - Summary is prepended to existing summary field and kept alongside latest turns.
-     - This allows the model to reference past events without exceeding context window.
-
-6. **Generation Lead-In**
-   - A short final instruction sets the expected format (e.g., "Continue the roleplay…").
-   - Followed by the user's latest message.
-
-**Result**: This layered approach keeps Canon Law and core instructions stable, limits lore spam via caps/probabilities, and allows indefinite session length through automatic summarization.
-
-### World Info Engine
-
-**Keyword Matching (Not Semantic Search)**
-NeuralRP uses pure keyword matching, not vector embeddings or semantic search. This keeps the system simple, fast, and predictable.
-
-**How it works:**
-- Collect the last 5 messages and lowercase them: `recent_text`.
-- For each World Info entry, check if any of its keywords (also lowercased) appear in `recent_text` using substring matching: `any(k.lower() in recent_text for k in keys)`.
-- If a match is found and the entry passes probability checks (if enabled), add its content to the prompt.
-
-**Caching System (v1.3)**
-
-**LRU Cache Implementation:**
-NeuralRP uses a custom `LRUCache` class based on `OrderedDict` to prevent memory leaks while maintaining performance:
-
-```python
-class LRUCache:
-    def __init__(self, max_size=1000):
-        self.cache = OrderedDict()
-        self.max_size = max_size
-```
-
-**Cache Characteristics:**
-- **Default size**: 1000 entries (configurable via API)
-- **Eviction policy**: Least Recently Used (LRU) - removes oldest accessed entries when limit reached
-- **Operations**: O(1) get/put using OrderedDict move_to_end()
-- **Memory estimate**: ~2KB per cached entry (conservative estimate for world info processing results)
-- **Thread safety**: Single-threaded access (matches FastAPI async model)
-
-**Cache Key Structure:**
-```python
-f"{str(world_info.get('entries', {}))}_{recent_text.lower()}_{max_entries}"
-```
-- **world_info entries**: String representation of entire world info entries dict
-- **recent_text**: Lowercase version of last 5 messages
-- **max_entries**: Current max_world_info_entries setting
-
-**Automatic Invalidation:**
-- Cache key includes full entries dict, so any world info changes produce different keys
-- Old entries naturally evicted via LRU policy when cache fills
-- Manual clearing available via API endpoint or UI button
-
-**Cache Management API:**
-- **GET /api/world-info/cache/stats** - Returns current cache size, max size, usage percentage
-- **POST /api/world-info/cache/clear** - Manually clears entire cache (confirmation required in UI)
-- **POST /api/world-info/cache/configure** - Updates max cache size (requires server restart to apply)
-- **GET /api/world-info/cache/status** - Detailed diagnostics (entry count, memory estimate, eviction count)
-
-**Frontend Integration:**
-- **Location**: Settings sidebar under "Cache Management"
-- **Real-time display**: Entry count, max size, usage bar, estimated memory (entries × 2KB)
-- **User controls**: Refresh stats, clear cache, configure size limit
-- **Visual feedback**: Progress bar color changes (green < 70%, yellow 70-90%, red > 90%)
-
-**Performance Benefits:**
-- Eliminates redundant world info processing for repeated contexts
-- Reduces CPU overhead by ~60-80% for stable chat sessions
-- Prevents out-of-memory errors during extended sessions with large world info databases
-
-**Backward Compatibility:**
-- Cache is transparent to users - no breaking changes to existing functionality
-- Disabling cache (size=0) falls back to uncached behavior with no errors
-- All existing world info processing optimizations (case-insensitive preprocessing, entry caps) preserved
-
-**Case-Insensitive Preprocessing (v1.1)**
-All keywords are lowercased once during world info loading via `preprocess_world_info()`.
-- Eliminates repeated `.lower()` calls during keyword matching (~10-20% performance improvement).
-
-**Entry Cap Logic (v1.1)**
-When regular entries exceed `max_entries` (default: 10):
-- The engine keeps the **first N matching entries** found while iterating through `world_info["entries"]`.
-- Since Python 3.7+, dict iteration follows insertion order, so this effectively keeps the first 10 entries defined in the JSON file that match keywords.
-- **Exception**: Canon Law entries (`is_canon_law: true`) are always included and do not count toward the cap.
-
-**Probability Weighting (v1.1)**
-For entries with `useProbability: true`:
-- **Random roll**: Done once per entry per generation inside `get_cached_world_entries()`.
-- **Roll logic**: `if random.random() * 100 > probability: skip_entry`
-- **Failure result**: If an entry fails the roll, it is skipped for that turn even if its keywords match. It will not be added to `triggered_lore`.
-- **Purpose**: Allows some lore to appear stochastically instead of every time it triggers, creating variation in large worlds.
-
-**Canon Law System**
-- **Definition**: World Info entries marked with `is_canon_law: true` in the JSON.
-- **Behavior**:
-  - Always collected, regardless of keyword matching.
-  - Never subject to entry caps or probability rolls.
-  - Injected near the end of the prompt (after regular world info, after character definitions) to override drift and restate immutable facts.
-- **UI**: Entries marked as Canon Law are highlighted red in the World Info editor; click to toggle.
-- **Enable/Disable Toggle (v1.1)**: A global "Enable World Info" checkbox in Settings.
-  - When disabled, no world info (regular or Canon Law) is injected into prompts.
-  - Useful for "rules-light" sessions or maximum speed with low-VRAM models.
-
-**World Info Reinforcement Configuration (v1.4)**
-
-**Configurable Reinforcement Frequency**
-Canon law entries can be configured to reinforce at specific intervals to balance prompt bloat reduction with world consistency.
-
-**API Endpoints:**
-- **GET /api/world-info/reinforcement/config**: Get current reinforcement configuration
-  - Returns: `default_frequency` (3), `description`, `min` (1), `max` (100)
-- **POST /api/world-info/reinforcement/config**: Set reinforcement frequency
-  - Accepts: `world_info_reinforce_freq` (integer 1-100)
-- **GET /api/world-info/reinforcement/status**: Get reinforcement status and statistics
-
-**Implementation:**
-- **Default frequency**: Every 3 turns (balances recency with prompt efficiency)
-- **Configurable range**: 1 (every turn) to 100 (every 100 turns)
-- **Behavior**:
-  - Reinforcement counter tracked in chat metadata (`world_reinforce_counter`)
-  - Canon law entries injected every N turns where N = configured frequency
-  - Reduces prompt bloat by ~66% compared to v1.1's every-turn reinforcement
-  - Maintains world consistency through regular reinforcement
-
-**Benefits:**
-- **Reduced prompt length**: Less repetition in long conversations
-- **Configurable**: Adjust based on model size and world complexity
-- **Automatic**: No manual intervention needed once configured
-- **Backward compatible**: Defaults to 3 for existing sessions
-
-### Branching System (v1.1)
-
-**Branch Creation**
-When a user forks from a specific message:
-- **New chat file** is created with filename format:
-  ```
-  {origin_chat_name}_fork_{timestamp}.json
-  ```
-  Where `timestamp` is `int(time.time())` (Unix epoch).
-- **Origin metadata** is stored in the branch file's top-level `metadata` object:
-  ```json
-  "metadata": {
-      "origin_chat_id": "original_filename",
-      "origin_message_id": 12345678,
-      "branch_name": "Custom Branch Name",
-      "created_at": 1736279867.123
-  }
-  ```
-- **Chat state inheritance**: The new branch starts from the selected message and inherits:
-  - All messages up to and including the fork point.
-  - Current characters loaded.
-  - World info file.
-  - Settings (temperature, reply length, etc.).
-
-**Branch Independence**
-Each branch is a completely separate chat file.
-- No shared mutable state between branches.
-- Editing one branch does not affect any other branch or the main timeline.
-- Branches can be deleted without affecting the origin chat.
-
-**Branch Management**
-- **API Endpoints**:
-  - `POST /api/chats/fork` – Creates a new branch from a specific message.
-  - `GET /api/chats/{name}/branches` – Lists all branches that originated from a chat.
-  - `GET /api/chats/{name}/origin` – Gets origin information for a branch chat.
-  - `PUT /api/chats/{name}/rename-branch` – Renames a branch.
-- **UI Features**:
-  - **Fork Dialog**: Modal for creating branches with auto-generated names based on message content and timestamp.
-  - **Branch Management Dialog**: View and manage all branches for the current chat.
-  - **Rename Branch Dialog**: Custom naming for branches.
-  - **Sidebar Sections**:
-    - Main Timelines: Shows original chats and branches with visual indicators.
-    - Active Branches: Lists branches for the currently loaded chat.
-
-**Design Decision: No Merge Semantics**
-Branches are independent timelines, not branches that merge back together. This keeps the mental model simple:
-- "Fork = create a new what-if timeline."
-- "Switch = load that timeline."
-- No automatic merging, rebasing, or graph-level conflict resolution.
-
-### Memory & Summarization
-
-**Automatic Summarization (Configurable Threshold)**
-When context usage approaches the model's limit:
-- **Trigger condition**:
-  - Total tokens > configured threshold of model's max context window (default: 85%).
-  - AND messages > 10 (minimum history required for summarization).
-- **Process**:
-  - Take oldest 10 messages verbatim.
-  - Send them to the LLM to create a concise summary.
-  - Prepend this new summary to the existing `summary` field in the chat file.
-  - Remove those 10 messages from the active chat history.
-  - Keep the rest of the messages verbatim.
-- **Summary storage**:
-  - Stored as a top-level `summary` field in the chat JSON file.
-  - Used during prompt assembly (Section 3: LONG-TERM CONTEXT).
-  - Not shown in the UI; only affects what the model sees.
-
-**What Gets Kept vs. Summarized**
-- **Verbatim retention**: Most recent messages up to ~85% of context budget.
-- **Summarization threshold**: When limit is reached, oldest 10 messages are compressed.
-- **Result**: Sessions can run indefinitely without losing narrative coherence or exceeding context windows.
-
-**No UI Indicator (Currently)**
-Summarization happens transparently in the backend.
-- Users see the full chat history in the UI, but the model only sees recent messages + summary.
-- **Future enhancement**: Add a subtle indicator when summarization has occurred (e.g., "(Summary active)" badge).
-
-### Card & World Generation
-
-**Dual-Source Mode (v1.1)**
-Both character and world generation now support two source modes:
-- **Current Chat** (`source_mode: "chat"`):
-  - Frontend sends last 20-50 messages from active chat.
-  - Backend analyzes conversation for character traits, world lore, etc.
-- **Manual Input** (`source_mode: "manual"`):
-  - Frontend sends text from a manual input textarea.
-  - User pastes plain-text descriptions, notes, or concepts.
-- **Backend parameter**: `source_mode` is a string in the request. Backend treats both modes as `req.context` and formats the extraction prompt accordingly.
-
-**PList Extraction Prompts**
-NeuralRP uses specific PList field structures for structured generation:
-- **For Character Personality**:
-  ```
-  "Convert them into a PList personality array format. Use this exact format:
-  [{char_name}'s Personality= "trait1", "trait2", "trait3", ...]"
-  ```
-- **For World Info (Locations)**:
-  ```
-  "[LocationName(nickname if any): type(room/town/area), features(physical details),
-  atmosphere(mood/feeling), purpose(what happens here), inhabitants(who is usually here)]"
-  ```
-- Similar formats exist for:
-  - Character descriptions
-  - Example dialogues
-  - First messages
-  - World history, factions, creatures, etc.
-
-**Live Editing Before Save (v1.1)**
-All generated PList text appears in editable textboxes in the UI.
-- Users can tweak, partially rewrite, or completely replace the LLM output.
-- "Save" button captures current textbox state, not original generation.
-- This makes NeuralRP viable as a primary card authoring tool, not just a helper.
-
-**Export Format**
-- **Character cards**: SillyTavern V2 JSON format (compatible with CharacterHub, Pygmalion booru, etc.).
-- **World Info**: SillyTavern-compatible JSON with `entries` object containing keyword-triggered lore.
-
-### Multi-Character Support
-
-**Capsule Persona Compression**
-To avoid prompt bloat with multiple characters, NeuralRP uses "capsule summaries":
-- **Format**:
-  ```
-  Name: [Name].
-  Role: [1 sentence role/situation].
-  Key traits: [3-5 comma-separated personality traits].
-  Speech style: [short/long, formal/casual, any verbal tics].
-  Example line: "[One characteristic quote from descriptions]"
-  ```
-- **Usage**:
-  - When 2+ characters are active, capsules are used in the prompt instead of full `description` fields.
-  - Keeps each character distinct while saving ~80% of tokens per character.
-- **Generation**:
-  - Can be manually triggered via "Generate Capsule" button in character editor.
-  - Auto-generated the first time a character enters a group chat (if not already defined).
-
-**Auto Mode Speaker Selection**
-In Auto mode:
-- The model receives all active character capsules.
-- The prompt instructs: "Choose the most appropriate character to respond, or narrate in third person if needed."
-- No hard constraints; the model decides turn-by-turn who speaks.
-- **Why it works**:
-  - Capsule format includes speech style and example lines.
-  - Recent conversation context shows who last spoke.
-  - Model naturally follows conversational flow based on cues.
-
-### Image Generation with Character Tags
-
-**Danbooru Tag System**
-Per-character visual canon:
-- Each character can be assigned a Danbooru-style tag string (e.g., `"1girl, long_hair, blue_eyes, red_dress"`).
-- Stored in character card JSON under a `danbooru_tag` or similar field.
-- **Prompt expansion**:
-  - User types: `[CharacterName] sitting in a cafe`
-  - NeuralRP expands to: `1girl, long_hair, blue_eyes, red_dress, sitting in a cafe`
-  - Sent to Stable Diffusion WebUI API.
-- **Decoupled from chat**:
-  - Tags work even when character isn't in the active chat.
-  - Useful for generating reference images during world-building or card creation.
-
-**A1111 Integration**
-- **API endpoint**: `http://127.0.0.1:7861/sdapi/v1/txt2img`
-- **Request format**: Standard A1111 API payload with `prompt`, `negative_prompt`, `steps`, `cfg_scale`, etc.
-- **Response**: Base64-encoded PNG, decoded and saved to `app/images/`.
-
-**Image Metadata System (v1.4)**
-
-**Automatic Parameter Storage**
-All image generation parameters are automatically captured and stored for future reference and debugging.
-
-**Metadata File Structure:**
-- **Location**: `app/images/image_metadata.json`
-- **Format**: JSON object with image filenames as keys
-- **Per-image metadata**:
-  ```json
-  {
-    "image_20250112_143000.png": {
-      "prompt": "Character description in cafe setting",
-      "negative_prompt": "blurry, low quality",
-      "steps": 20,
-      "cfg_scale": 8.0,
-      "width": 512,
-      "height": 512,
-      "seed": 1234567890,
-      "timestamp": "2025-01-12T14:30:00.000Z",
-      "model": "sd_v15",
-      "generation_type": "txt2img" // or "inpaint"
-    }
-  }
-  ```
-
-**Benefits:**
-- **Reproducibility**: Can regenerate images with exact same parameters
-- **Debugging**: Track which parameters produced which results
-- **Archive**: Complete history of image generations across sessions
-- **Integration**: Seamlessly works with both txt2img and inpainting operations
-
-**API Integration:**
-- Images generated via `/api/generate-image` automatically save metadata
-- Inpainting operations via `/api/inpaint` include mask-specific parameters (denoising strength, mask blur)
-- Metadata persists across server restarts
-
-**Image Persistence**
-- Generated images are saved with timestamp-based filenames.
-- Inline display in chat UI via `<img>` tags.
-- Chat JSON stores image filenames so they reload with the session.
-
-### Adaptive Connection Monitoring (v1.2)
-
-**Overview**
-NeuralRP continuously monitors the health of KoboldCpp and Stable Diffusion API endpoints to provide real-time connection status and enable/disable generation features automatically. As of v1.2, the monitoring system uses adaptive intervals and background optimization to minimize resource usage while maintaining responsiveness.
-
-**Monitoring Architecture**
-
-**Base Monitoring Strategy**
-- **Primary interval**: 30 seconds for stable connections (60% reduction from v1.0's fixed 10-second interval)
-- **Page Visibility API integration**: Automatically pauses all monitoring when the browser tab is not visible
-- **Event-driven checks**: Immediate health checks triggered by user actions (URL changes, manual test button clicks)
-- **Connection state awareness**: Different monitoring behaviors based on current connection status (connected, disconnected, error)
-
-**Adaptive Interval System**
-
-The monitoring frequency dynamically adjusts based on connection quality and stability:
-
-1. **Stable Connection Mode** (30-60 seconds)
-   - Starts at base interval of 30 seconds after successful connection
-   - Gradually increases to 60 seconds for connections stable >5 minutes
-   - Minimizes network overhead and CPU usage during normal operation
-   
-2. **Initial Failure Mode** (10 seconds)
-   - Triggered on first connection failure after stable period
-   - Increases check frequency to detect recovery quickly
-   - Provides faster feedback when services restart
-   
-3. **Persistent Failure Mode** (5 seconds)
-   - Activated after 3+ consecutive connection failures
-   - Maximum monitoring frequency for rapid recovery detection
-   - Helps catch services that are restarting or experiencing intermittent issues
-   
-4. **Recovery Mode** (gradual increase)
-   - After successful reconnection, gradually returns to base interval
-   - Prevents oscillation between fast/slow checking
-   - Allows system to stabilize before reducing monitoring frequency
-
-**Stability Tracking**
-```javascript
-{
-  lastSuccessTime: timestamp,          // Last successful connection
-  consecutiveFailures: count,          // Current failure streak
-  connectionQuality: 'stable'|'unstable'  // Overall health assessment
-}
-```
-
-**Background Tab Optimization**
-
-When the user switches away from the NeuralRP tab:
-- All monitoring timers are immediately paused
-- No network requests are made while tab is hidden
-- State is preserved (connection status, failure counts, last check time)
-- On tab focus, an immediate health check is performed to refresh status
-- Normal adaptive monitoring resumes after focus check completes
-
-**Performance Metrics**
-
-| Scenario | v1.0 (Fixed Interval) | v1.2 (Adaptive) | Improvement |
-|----------|----------------------|-----------------|-------------|
-| Stable connection | 12 checks/min | 2-4 checks/min | 60-67% reduction |
-| Initial failure | 12 checks/min | 6 checks/min | 50% reduction |
-| Persistent failure | 12 checks/min | 12 checks/min | Same (intentional) |
-| Background tab | 12 checks/min | 0 checks/min | 100% reduction |
-
-**Health Check Endpoints**
-
-- **KoboldCpp**: GET {kobold_url}/api/v1/model or /v1/models (OpenAI-compatible)
-- **Stable Diffusion**: GET {sd_url}/sdapi/v1/options
-- **Timeout**: 5 seconds per request
-- **Failure criteria**: Network error, timeout, or non-2xx HTTP status
-
-**State Management**
-
-- Connection monitoring runs independently of chat/generation state
-- Health status updates trigger UI state changes (enable/disable generation buttons)
-- Monitoring continues during active generation (but not during background tab state)
-- Connection history is not persisted across page reloads
-
-**Browser Compatibility**
-
-- Page Visibility API support: All modern browsers (Chrome, Firefox, Safari, Edge)
-- Fallback behavior: If Visibility API unavailable, uses base 30-second interval continuously
-
-### Semantic Search Engine (v1.3)
-
-**Overview**
-The `SemanticSearchEngine` class provides intelligent, context-aware world info retrieval as an alternative to pure keyword matching. It uses sentence transformers to understand semantic relationships between chat context and lore entries.
-
-**Implementation Details**
-
-**Model Architecture:**
-- **Transformer model**: `all-mpnet-base-v2` from `sentence-transformers` library
-- **Embedding dimensions**: 768-dimensional dense vectors
-- **Device detection**: Automatic GPU/CPU selection with memory availability checks
-- **Dependencies**: `sentence-transformers`, `torch`, `sklearn.metrics.pairwise`, `numpy`
-
-**Search Algorithm:**
-```python
-def search_semantic(self, world_info, query_text, max_entries=10, similarity_threshold=0.3):
-```
-
-**Process Flow:**
-- **Query Processing**: Convert recent chat messages into semantic embedding
-- **Similarity Calculation**: Compute cosine similarity between query and all cached world info embeddings
-- **Threshold Filtering**: Return only entries with similarity > 0.3 (configurable, default 0.25 in production)
-- **Result Ranking**: Sort by similarity score descending
-- **Probability Weighting**: Apply useProbability filtering to non-canon entries
-
-**Caching Strategy:**
-- **Content-based hashing**: Detects when world info entries change
-- **Automatic invalidation**: Clears cached embeddings when world info is modified
-- **LRU eviction**: Custom LRUCache class prevents unbounded memory growth
-- **Memory efficiency**: Embeddings cached per-entry to avoid recomputing unchanged content
-
-**Integration with Prompt System:**
-```python
-def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_threshold=0.25):
-```
-
-**Integration Process (v1.4 Enhancements):**
-- **Initial turn detection**: First 2 turns use latest user message only with 0.35 threshold for better precision
-- **Subsequent turns**: Last 5 messages with 0.45 threshold for broader context
-- **Keyword priority sorting**: Keyword matches rank higher than semantic-only matches for relevance
-- **Comprehensive deduplication**: Handles plurals, apostrophes, possessives, and punctuation variations
-- **Generic key filtering**: Excludes structural/generic keys ("the", "and", "room", "city", "type", etc.)
-- Falls back to keyword matching if semantic returns no results
-- Separates Canon Law entries (always included) from semantic results
-
-**Performance Characteristics:**
-- **Cold start**: ~2-3 seconds for initial embedding computation (depends on world info size)
-- **Warm cache**: <50ms for semantic search with cached embeddings
-- **Memory overhead**: ~3KB per entry for embeddings (768 floats × 4 bytes)
-- **GPU acceleration**: 5-10× faster on CUDA-enabled GPUs vs CPU
-
-**Comparison: Semantic vs Keyword Matching**
-
-| Feature | Keyword Matching | Semantic Search |
-|---------|------------------|-----------------|
-| Speed (cold) | Instant | 2-3s initial |
-| Speed (warm) | <10ms | <50ms |
-| Accuracy | Exact match only | Conceptual understanding |
-| False positives | High (e.g., "ai" in "Maine") | Low (understands context) |
-| Memory overhead | Minimal | ~3KB per entry |
-| Dependencies | None | sentence-transformers, torch |
-| Debuggability | High (inspect keywords) | Medium (similarity scores) |
-
-**Usage Recommendation:**
-- Enable semantic search for worlds with >50 entries or complex conceptual relationships
-- Use keyword matching for small worlds (<20 entries) or when running on very limited hardware
-- Hybrid approach (current default): Semantic with keyword fallback provides best of both worlds
-
-**Future Enhancements:**
-- User-selectable embedding models (trade speed vs accuracy)
-- Incremental embedding updates (avoid full recomputation on single entry changes)
-- Similarity score visualization in UI for debugging
-
-### Dynamic Resource Management (v1.2)
-
-**Overview**
-When running both LLM (KoboldCpp) and Stable Diffusion on the same GPU, resource contention can cause slowdowns, timeouts, or out-of-memory errors. NeuralRP's performance mode intelligently manages these operations using async queuing and statistical analysis to maintain responsiveness without requiring manual intervention.
-
-**Resource Manager Class**
-Coordinates GPU access using `asyncio.Lock()` for thread-safe operation:
-- **Operation classification**:
-  - Light: Text generation with small contexts, status checks, UI updates
-  - Heavy: Image generation, large context text, card/world generation
-- **Queuing behavior**:
-  - Heavy operations queue when another heavy op is in progress
-  - Light operations bypass the queue and proceed immediately
-  - Prevents deadlock through careful lock acquisition/release patterns
-- **State tracking**: Maintains `active_llm`, `active_sd`, and queue status for real-time monitoring
-- **Status reporting**: Returns `idle`, `running`, or `queued` for both text and image operations
-
-**Performance Tracker**
-Maintains rolling median timing using `collections.deque(maxlen=10)`:
-- **Statistical method**: `statistics.median()` ignores outliers (cold starts, system spikes)
-- **Per-operation tracking**: Separate medians for LLM and SD operations
-- **Contention detection formula**: Flags resource conflict when:
-(current_sd_time > 3× median_sd_time) AND (context_tokens > 8000)
-
-- **Memory bounded**: Fixed-size rolling window prevents unbounded growth
-
-**SD Context-Aware Presets**
-Three-tier optimization automatically selected based on story length:
-
-```python
-SD_PRESETS = {
-  "normal": {"steps": 20, "width": 512, "height": 512, "threshold": 0},
-  "light": {"steps": 15, "width": 384, "height": 384, "threshold": 8000},
-  "emergency": {"steps": 10, "width": 256, "height": 256, "threshold": 12000}
-}
-Automatic selection: select_sd_preset() checks current context token count
-
-Threshold behavior:
-
-0-7999 tokens: Normal quality (512×512, 20 steps) to free VRAM for text
-
-8000-11999 tokens: Light quality (384×384, 15 steps) to free VRAM for text
-
-12000+ tokens: Emergency quality (256×256, 10 steps) to avoid conflicts
-```
-
-**Smart Hint Engine**
-Context-aware suggestions triggered by performance metrics:
-- **Contention hints**: When SD timing exceeds 3× median with large context
-- **Quality hints**: When emergency preset is active
-- **Optimization tips**: Actionable suggestions (reduce context reinforcement, generate images outside chat)
-- **Non-intrusive**: Dismissible notifications, no repetition
-
-**API Endpoints**
-RESTful interface for status monitoring and control:
-- **GET /api/performance/status**: Returns current operation states and queue depth
-- **POST /api/performance/toggle**: Enable/disable performance mode
-- **GET /api/performance/hints**: Fetch current contextual hints
-- **Error handling**: Graceful degradation when performance mode is disabled
-
-**Frontend Components**
-Real-time status display with automatic updates:
-- **Settings toggle**: "Automatic performance mode (recommended when running LLM + SD on same GPU)"
-- **Persistence**: Settings persisted via localStorage
-- **Backend sync**: Immediate synchronization via togglePerformanceMode()
-- **Status polling**: updatePerformanceStatus() checks backend state every 2 seconds
-- **Status indicators**: Simple idle/running/queued badges for Text and Images
-- **Hint display**: Contextual tips with dismiss functionality
-- **Conditional UI**: Status and hints only visible when performance mode is enabled
-
-**Thread Safety and Async Design**
-- **Async locking**: asyncio.Lock() prevents race conditions between concurrent operations
-- **Lock patterns**: Acquire → execute → release with exception handling
-- **Deadlock prevention**: Light operations never acquire heavy locks; heavy operations use timeout patterns
-
-**Production Readiness**
-Automatically optimizes for users with:
-- **Large story contexts**: 12K+ tokens
-- **Single-GPU setups**: Running both LLM and SD
-- **Heavy workloads**: Image generation workloads
-- **Multiple operations**: Concurrent operations
-
-**Performance Characteristics**
-- **Memory overhead**: Fixed at ~160 bytes per operation type (10-element deque)
-- **CPU overhead**: Median calculation is O(n log n) but only runs on 10 elements
-- **Latency impact**: Lock contention adds <1ms for light operations
-- **Cache behavior**: No persistent cache; all tracking is session-based
-
----
-
-## Design Decisions & Tradeoffs
-
-### Why Adaptive Monitoring Instead of Fixed Intervals?
-
-**v1.0 Approach: Fixed 10-second interval**
-- Simple implementation
-- Consistent behavior
-- Guaranteed detection within 10 seconds
-
-**v1.2 Approach: Adaptive intervals with background pause**
-
-**Pros:**
-- 60-67% reduction in network overhead during normal operation
-- Zero resource usage when tab is in background (battery-friendly for mobile devices)
-- Faster recovery detection during connection failures (5-10 second intervals)
-- Self-tuning based on actual connection quality
-- Better "good neighbor" behavior for local API services
-
-**Cons:**
-- More complex state management (stability tracking, failure counts, visibility events)
-- Slightly slower detection of failures during stable periods (30 seconds vs 10 seconds)
-- Requires Page Visibility API (though has graceful fallback)
-
-**Why This Matters:**
-NeuralRP is designed for long-running local sessions where users may:
-- Leave the tab open for hours while working in other applications
-- Run on laptops where battery life matters
-- Host KoboldCpp and SD on the same machine (reducing self-inflicted load)
-- Have multiple browser tabs open competing for resources
-
-The adaptive system optimizes for the common case (stable connections over long periods) while maintaining responsiveness when it matters (during connection issues or active user interaction).
-
-**Tuning Parameters:**
-- Base interval: 30s (balances detection speed vs overhead)
-- Stable interval: 60s (assumes local services rarely fail after 5+ minutes of stability)
-- Initial failure interval: 10s (fast enough to catch restarts)
-- Persistent failure interval: 5s (aggressive recovery detection)
-- Stability threshold: 5 minutes (empirically determined for local LLM services)
-
-**Future Enhancement:** 
-User-configurable intervals via Settings panel for power users who want different tradeoffs.
-
-### Why Keyword Matching Instead of Semantic Search?
-**Pros:**
-- Simple, fast, predictable.
-- No embedding model dependencies.
-- Users can debug ("Why didn't this entry trigger? Check the keywords.").
-
-**Cons:**
-- No fuzzy matching or concept-based retrieval.
-- Short keywords can cause false positives (e.g., "ai" matches "Maine").
-
-**Mitigation:**
-- Case-insensitive matching reduces some noise.
-- Canon Law system ensures critical lore always appears.
-- Entry caps prevent prompt bloat even with many false positives.
-
-**Future enhancement**: Optional whole-word/regex matching for single-word keys.
-
-### Why In-Memory Caching Instead of Persistent Cache?
-**Pros:**
-- Zero disk I/O overhead.
-- Automatically cleared on server restart (no stale cache issues).
-- Simple implementation (one global dict).
-
-**Cons:**
-- Cache grows indefinitely during server uptime.
-- Lost on restart (but rebuilds quickly on first use).
-
-**Mitigation:**
-- For local desktop use, server restarts are frequent enough that memory leaks are rare.
-- If needed, could add a manual "Clear Cache" API endpoint.
-
-### Why Branches as Separate Files Instead of Single File with Graph?
-**Pros:**
-- Each branch is a fully independent, portable JSON file.
-- No risk of corruption affecting multiple branches.
-- Easy to back up, version control, or share individual branches.
-- Simpler mental model: "one file = one timeline."
-
-**Cons:**
-- More files to manage for power users with many branches.
-- No single-file "view all branches" graph (would require aggregation).
-
-**Mitigation:**
-- Branch management UI aggregates metadata across files for easy navigation.
-- Origin metadata enables future timeline visualization without restructuring storage.
-
-### Why 85% Summarization Threshold?
-**Reasoning:**
-- Below 85%: Still room for model to breathe, no urgency.
-- At 85%: Enough headroom to generate a summary and insert it without exceeding limit.
-- Above 85%: Risk of abrupt truncation if context fills during generation.
-
-**Tuning:**
-- Default threshold is 85%, but fully configurable in settings under "Summ Threshold"
-- 85% aligns with Anthropic's Claude Code approach and community best practices.
-- Users can adjust based on their model's context window and performance requirements.
-
-### Why Async Locking Instead of Process-Level Resource Management?
-**Pros:**
-- Works within single-process FastAPI server (no multi-process coordination needed)
-- `asyncio.Lock()` is lightweight and fast (<1ms overhead)
-- Proper deadlock prevention through careful lock patterns
-- Clean integration with existing async/await codebase
-
-**Cons:**
-- Only protects within NeuralRP process; doesn't prevent external tools from overloading GPU
-- No cross-process coordination if running multiple NeuralRP instances
-
-**Mitigation:**
-- NeuralRP is designed for single-user local desktop use where one instance is typical
-- Performance tracker detects contention from external sources via timing analysis
-- Hints guide users to close other GPU-intensive applications when detected
-
-### Why LRU Cache Instead of Unbounded Dictionary?
-
-**Previous Approach (v1.1): Unbounded in-memory dict**
-- Simple implementation
-- Fast access
-- No eviction logic needed
-
-**Current Approach (v1.3): LRU Cache with configurable limit**
-
-**Pros:**
-- Prevents memory leaks during long-running sessions
-- Predictable memory footprint (max_size × 2KB)
-- User-configurable based on system resources
-- Maintains performance benefits of caching
-- Backward compatibility with existing functionality
-
-**Cons:**
-- Slightly more complex implementation (OrderedDict + eviction logic)
-- Overhead of tracking access order (~16 bytes per entry)
-- Potential cache misses after eviction (rare in practice)
-
-**Why This Matters:**
-NeuralRP is designed for local hardware with varying resource constraints. An unbounded cache could grow to gigabytes over extended sessions with large world databases, causing system instability. LRU eviction provides a middle ground: aggressive caching for performance while respecting user-defined memory limits.
-
-**Tuning Parameters:**
-- Default cache size: 1000 entries (handles ~2MB of cached world info processing)
-- Recommended minimum: 100 entries (for small worlds)
-- Recommended maximum: 5000 entries (for 32GB+ RAM systems with huge worlds)
-- Memory estimate formula: `cache_size × 2KB = estimated_memory`
-
-**Measured Impact:**
-- Cache hit rate: ~85-95% during typical RP sessions
-- Memory savings: Prevents unbounded growth that reached 500MB+ in v1.1 during 8-hour sessions
-- Performance maintenance: Retains 60-80% CPU reduction from caching despite eviction overhead
-
-### Why Semantic Search is Invisible by Default?
-
-**Opinionated Upgrade, Not a New Knob**
-
-Semantic search replaces pure keyword matching as the default world info retrieval strategy because it consistently produces more coherent, context-aware lore injection with minimal overhead on typical NeuralRP hardware. It runs automatically in the background and requires no configuration or extra UX.
-
-**Pros:**
-- Provides conceptual understanding for complex worlds, not just exact keyword hits.  
-- Greatly reduces false positives from short or ambiguous keywords.  
-- Finds relevant lore even when the chat references concepts indirectly.  
-- Runs transparently with a small startup cost and modest memory footprint on 12GB-class GPUs.
-
-**Cons:**
-- Requires additional dependencies (`sentence-transformers`, `torch`).  
-- Adds a small cold start delay (~2–3 seconds for initial embeddings).  
-- Increases memory usage slightly (~3KB per world info entry).
-
-**Why This Matters:**
-NeuralRP is built for fast, coherent RP on modest local hardware. Semantic search is treated as a backend optimization, not a power-user feature: it improves world consistency and reduces lore noise without adding sliders, toggles, or setup friction. For edge cases or very constrained environments, the system still falls back to keyword matching when semantic results are insufficient or unavailable.
-
-**Design Decision:**
-- Semantic search is always enabled as the primary retrieval method.  
-- Automatic fallback to keyword matching if semantic search returns no results or cannot run.  
-- Canon Law behavior is unchanged and remains deterministic and always-included.  
-- No UI toggle is exposed; this is an opinionated default in service of coherence and minimal configuration.
-
-## Future Considerations
-
-### Potential Enhancements
-
-**Timeline Visualization**
-- Read-only branch map showing origin relationships.
-- Use React Flow or similar to render conversation tree.
-
-**Whole-Word Keyword Matching**
-- Add regex-based word boundary checks for single-word keys.
-- Reduce false positives without moving to semantic search.
-
-**Persistent Cache with Invalidation**
-- Move from in-memory to disk-based cache (SQLite or similar).
-- Invalidate on world info file mtime change.
-
-**Multi-Tier Memory System**
-- Short-term: Last 10 turns verbatim.
-- Medium-term: Turns 11-60 as bullet-point summaries.
-- Long-term: Semantic search over all older content.
-
-**UI Indicator for Summarization**
-- Show "(Summary active)" badge when 85% threshold has triggered.
-- Optional: Display summary text in a collapsible section.
-
-### Known Limitations
-
-- No merge semantics for branches: Branches are independent; no automatic reconciliation.
-- No vector/semantic search: World info is keyword-only; no fuzzy concept matching.
-- In-memory cache growth: Cache grows unbounded until server restart.
-- No UI for summarization visibility: Users don't see when summarization happens.
-
----
-
-## Version History
-
-### v1.4 (Current)
-- **Image Inpainting**: Full inpainting support via Stable Diffusion img2img API with configurable masks, denoising strength, and inpaint parameters
-- **Image Metadata System**: Automatic storage and retrieval of image generation parameters (prompt, steps, CFG, dimensions, timestamps) in `app/images/image_metadata.json`
-- **Enhanced Semantic Search**: Initial turn detection (uses latest user message only with higher 0.35 threshold), keyword priority sorting (keyword matches rank higher than semantic-only matches), comprehensive deduplication handling plurals/apostrophes/possessives
-- **World Info Reinforcement Configuration**: New endpoints for configuring canon law reinforcement frequency (default: every 3 turns, configurable 1-100), reducing prompt bloat while maintaining consistency
-- **Semantic Search Resource Management**: Periodic cleanup task (every 5 minutes), automatic GPU memory cleanup, embeddings cache limited to 5 most recent world info versions
-- **Generic Key Filtering**: Excludes structural/generic keys ("the", "and", "room", "city", "type", etc.) from semantic search for better relevance
-
-### v1.3
-- **In-Card Editing**: Full character and world info editing interface with AI-assisted content generation and manual field editing
-- **Semantic World Info**: Semantic search using sentence transformers for intelligent, context-aware lore retrieval with cosine similarity matching
-- **LRU Cache System**: Memory-safe world info caching with configurable limits, automatic eviction, and real-time monitoring UI
-- **Cache Management API**: RESTful endpoints for cache statistics, manual clearing, and size configuration
-- **Enhanced Edit Functionality**: Reliable character toggle (add/remove from chat), improved responsive design across devices
-
-### v1.2
-- Adaptive Connection Monitoring: Intelligent health checking system that adjusts monitoring frequency based on connection stability (60% reduction in network overhead during stable periods)
-- Background Tab Optimization: Automatic pause of monitoring when browser tab is not visible, eliminating unnecessary resource usage
-- Connection Quality Tracking: Smart intervals that decrease during failures and increase during stable periods
-- Event-Driven Updates: Immediate health checks after manual user actions
-- Dynamic Resource Management: Smart GPU queuing system with async locking for LLM + SD coordination.
-- Context-Aware SD Presets: Automatic quality adjustment (Normal/Light/Emergency) based on story length.
-- Rolling Median Performance Tracking: Outlier-resistant timing statistics with contention detection.
-- Smart Hint Engine: Context-aware optimization suggestions with dismissible UI notifications.
-- Master Performance Toggle: One-click enable/disable for entire performance system.
-- Real-time Status Indicators: Idle/running/queued badges for text and image operations.
-
-### v1.1
-- Branching system: Fork from any message, independent chat files, origin metadata, branch management UI.
-- Dual-source card/world generation: From chat or manual text input, with live editing before save.
-- Efficient World Info: Caching, case-insensitive preprocessing, configurable caps, probability weighting, enable/disable toggle.
-
-### v1.0 (Initial Release)
-- KoboldCpp and Stable Diffusion integration.
-- SillyTavern-compatible character cards and World Info.
-- Narrator/Focus/Auto modes.
-- Multi-character support with capsule personas.
-- Automatic summarization at 85% context.
-- Canon Law system for immutable world facts.
-- Danbooru character tagging for consistent image generation.
+Provided as-is for educational and personal use. See [LICENSE](LICENSE) for details.

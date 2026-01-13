@@ -16,6 +16,18 @@ from collections import deque
 from bisect import insort
 from statistics import median
 
+# Import database module for SQLite operations
+from app.database import (
+    db_get_all_characters, db_get_character, db_save_character, db_delete_character,
+    db_get_all_worlds, db_get_world, db_save_world, db_delete_world, db_update_world_entry,
+    db_get_all_chats, db_get_chat, db_save_chat, db_delete_chat,
+    db_save_image_metadata, db_get_image_metadata, db_get_all_image_metadata,
+    db_save_performance_metric, db_get_median_performance, db_cleanup_old_metrics,
+    db_get_recent_performance_metrics,
+    db_get_world_content_hash, db_get_world_entry_hash, db_update_world_entry_hash,
+    db_save_embedding, db_get_embedding, db_search_similar_embeddings
+)
+
 app = FastAPI()
 
 app.add_middleware(
@@ -70,10 +82,13 @@ class ResourceManager:
                 # Queue heavy LLM if SD is running
                 future = asyncio.Future()
                 self.llm_queue.append(future)
-                self.lock.release()
-                await future
-                self.lock.acquire_immediately()
-                self.active_llm = True
+        
+        # Wait outside the lock to avoid deadlock
+        if op_type == "heavy" and self.active_sd:
+            await future
+        
+        async with self.lock:
+            self.active_llm = True
         
         try:
             result = await operation()
@@ -96,9 +111,12 @@ class ResourceManager:
             if self.active_llm:
                 future = asyncio.Future()
                 self.sd_queue.append(future)
-                self.lock.release()
-                await future
-                self.lock.acquire_immediately()
+        
+        # Wait outside the lock to avoid deadlock
+        if self.active_llm:
+            await future
+        
+        async with self.lock:
             self.active_sd = True
         
         try:
@@ -125,32 +143,54 @@ class ResourceManager:
             "sd_queue_length": len(self.sd_queue)
         }
 
-# Performance Tracker with rolling medians
+# Performance Tracker with rolling medians and database persistence
 class PerformanceTracker:
     def __init__(self, max_samples=10):
         self.llm_times = deque(maxlen=max_samples)
         self.sd_times = deque(maxlen=max_samples)
         self.max_samples = max_samples
+        self._load_from_db()
     
-    def record_llm(self, duration):
-        """Record LLM operation duration"""
+    def _load_from_db(self):
+        """Load recent metrics from database on startup"""
+        # Load LLM metrics
+        llm_metrics = db_get_recent_performance_metrics("llm", self.max_samples)
+        for duration in reversed(llm_metrics):  # Reverse to maintain chronological order
+            self.llm_times.append(duration)
+        
+        # Load SD metrics
+        sd_metrics = db_get_recent_performance_metrics("sd", self.max_samples)
+        for duration in reversed(sd_metrics):
+            self.sd_times.append(duration)
+        
+        if llm_metrics or sd_metrics:
+            print(f"Loaded {len(llm_metrics)} LLM and {len(sd_metrics)} SD metrics from database")
+    
+    def record_llm(self, duration, context_tokens=0):
+        """Record LLM operation duration and persist to database"""
         self.llm_times.append(duration)
+        # Persist to database
+        db_save_performance_metric("llm", duration, context_tokens)
     
-    def record_sd(self, duration):
-        """Record SD operation duration"""
+    def record_sd(self, duration, context_tokens=0):
+        """Record SD operation duration and persist to database"""
         self.sd_times.append(duration)
+        # Persist to database
+        db_save_performance_metric("sd", duration, context_tokens)
     
     def get_median_llm(self):
-        """Get median LLM time"""
-        if not self.llm_times:
-            return None
-        return median(list(self.llm_times))
+        """Get median LLM time from in-memory cache or database"""
+        if self.llm_times:
+            return median(list(self.llm_times))
+        # Fallback to database if in-memory is empty
+        return db_get_median_performance("llm", self.max_samples)
     
     def get_median_sd(self):
-        """Get median SD time"""
-        if not self.sd_times:
-            return None
-        return median(list(self.sd_times))
+        """Get median SD time from in-memory cache or database"""
+        if self.sd_times:
+            return median(list(self.sd_times))
+        # Fallback to database if in-memory is empty
+        return db_get_median_performance("sd", self.max_samples)
     
     def detect_contention(self, sd_duration, context_tokens):
         """Detect if SD is experiencing contention"""
@@ -424,7 +464,6 @@ from collections import OrderedDict
 # Semantic Search Engine
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 import hashlib
 import threading
 import asyncio
@@ -485,7 +524,9 @@ class LRUCache:
         """Enable item access for LRUCache"""
         return self.get(key)
 
-WORLD_INFO_CACHE = LRUCache(max_size=1000)
+# Optimized cache size - reduced from 1000 to 300 since query repetition is less common than expected
+# Cache stores processed search results (not embeddings which are in sqlite-vec)
+WORLD_INFO_CACHE = LRUCache(max_size=300)
 
 # Semantic Search Engine
 class SemanticSearchEngine:
@@ -725,10 +766,13 @@ class SemanticSearchEngine:
         try:
             query_embedding = self.model.encode([query_text], convert_to_numpy=True)[0]
 
-            # Calculate similarities
+            # Calculate similarities using numpy (SIMD-accelerated via numpy)
             similarities = []
             for uid, entry_embedding in embeddings.items():
-                similarity = cosine_similarity([query_embedding], [entry_embedding])[0][0]
+                # Compute cosine similarity: dot(a,b) / (norm(a) * norm(b))
+                similarity = np.dot(query_embedding, entry_embedding) / (
+                    np.linalg.norm(query_embedding) * np.linalg.norm(entry_embedding)
+                )
                 similarities.append((uid, similarity))
 
             # Sort by similarity (descending)
@@ -774,18 +818,9 @@ semantic_search_engine = SemanticSearchEngine()
 cleanup_task = None
 
 def store_image_metadata(filename: str, params: SDParams):
-    """Store image generation parameters in metadata file."""
-    metadata_file = os.path.join(IMAGE_DIR, "image_metadata.json")
-
-    # Load existing metadata
-    if os.path.exists(metadata_file):
-        with open(metadata_file, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-    else:
-        metadata = {"images": {}}
-
-    # Store the parameters (convert to dict for JSON serialization)
-    metadata["images"][filename] = {
+    """Store image generation parameters in database and JSON file for compatibility."""
+    # Save to database (primary source)
+    params_dict = {
         "prompt": params.prompt,
         "negative_prompt": params.negative_prompt,
         "steps": params.steps,
@@ -796,20 +831,23 @@ def store_image_metadata(filename: str, params: SDParams):
         "scheduler": params.scheduler,
         "timestamp": int(time.time())
     }
-
-    # Save updated metadata
+    db_save_image_metadata(filename, params_dict)
+    
+    # Also export to JSON file for backward compatibility
+    metadata_file = os.path.join(IMAGE_DIR, "image_metadata.json")
+    if os.path.exists(metadata_file):
+        with open(metadata_file, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    else:
+        metadata = {"images": {}}
+    
+    metadata["images"][filename] = params_dict
     with open(metadata_file, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
 def load_image_metadata():
-    """Load image metadata from file."""
-    metadata_file = os.path.join(IMAGE_DIR, "image_metadata.json")
-
-    if os.path.exists(metadata_file):
-        with open(metadata_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    else:
-        return {"images": {}}
+    """Load image metadata from database."""
+    return db_get_all_image_metadata()
 
 # Periodic cleanup task for semantic search engine
 async def periodic_cleanup():
@@ -821,11 +859,90 @@ async def periodic_cleanup():
         except Exception as e:
             print(f"Periodic cleanup failed: {e}")
 
+# Auto-import JSON files on startup
+def auto_import_json_files():
+    """Scan JSON folders and import any new files not already in the database."""
+    import_count = {"characters": 0, "worlds": 0, "chats": 0}
+    
+    # Import characters
+    char_dir = os.path.join(DATA_DIR, "characters")
+    if os.path.exists(char_dir):
+        for f in os.listdir(char_dir):
+            if f.endswith(".json") and f != ".gitkeep":
+                file_path = os.path.join(char_dir, f)
+                try:
+                    # Check if already in database
+                    existing = db_get_character(f)
+                    if existing is None:
+                        # Load and import
+                        with open(file_path, "r", encoding="utf-8") as cf:
+                            char_data = json.load(cf)
+                        if db_save_character(char_data, f):
+                            import_count["characters"] += 1
+                            print(f"Auto-imported character: {f}")
+                except Exception as e:
+                    print(f"Failed to auto-import character {f}: {e}")
+    
+    # Import world info
+    wi_dir = os.path.join(DATA_DIR, "worldinfo")
+    if os.path.exists(wi_dir):
+        for f in os.listdir(wi_dir):
+            if f.endswith(".json") and f != ".gitkeep":
+                name = f.replace(".json", "")
+                file_path = os.path.join(wi_dir, f)
+                try:
+                    # Check if already in database
+                    existing = db_get_world(name)
+                    if existing is None:
+                        # Load and import
+                        with open(file_path, "r", encoding="utf-8") as wf:
+                            world_data = json.load(wf)
+                        # db_save_world expects entries dict, not the full object
+                        entries = world_data.get("entries", world_data) if isinstance(world_data, dict) else {}
+                        if entries and db_save_world(name, entries):
+                            import_count["worlds"] += 1
+                            print(f"Auto-imported world info: {name}")
+                except Exception as e:
+                    print(f"Failed to auto-import world info {f}: {e}")
+    
+    # Import chats
+    chat_dir = os.path.join(DATA_DIR, "chats")
+    if os.path.exists(chat_dir):
+        for f in os.listdir(chat_dir):
+            if f.endswith(".json") and f != ".gitkeep":
+                name = f.replace(".json", "")
+                file_path = os.path.join(chat_dir, f)
+                try:
+                    # Check if already in database
+                    existing = db_get_chat(name)
+                    if existing is None:
+                        # Load and import
+                        with open(file_path, "r", encoding="utf-8") as cf:
+                            chat_data = json.load(cf)
+                        if db_save_chat(name, chat_data):
+                            import_count["chats"] += 1
+                            print(f"Auto-imported chat: {name}")
+                except Exception as e:
+                    print(f"Failed to auto-import chat {f}: {e}")
+    
+    total = import_count["characters"] + import_count["worlds"] + import_count["chats"]
+    if total > 0:
+        print(f"Auto-import complete: {import_count['characters']} characters, {import_count['worlds']} worlds, {import_count['chats']} chats")
+    else:
+        print("Auto-import: No new JSON files to import")
+    
+    return import_count
+
 # FastAPI startup and shutdown handlers
 @app.on_event("startup")
 async def startup_event():
     """Initialize resources when the FastAPI app starts"""
     global cleanup_task
+    
+    # Auto-import any new JSON files dropped into folders
+    print("Scanning for new JSON files to import...")
+    auto_import_json_files()
+    
     # Start the periodic cleanup task when the app starts
     cleanup_task = asyncio.create_task(periodic_cleanup())
     print("Periodic cleanup task started")
@@ -863,14 +980,19 @@ def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_t
     # Preprocess world info for case-insensitive matching
     world_info = preprocess_world_info(world_info)
 
-    # Create cache key using hash-based approach for efficiency
-    # Hash the world info content to avoid expensive string conversion
-    world_content = ""
-    for entry in world_info.get("entries", {}).values():
-        world_content += entry.get("content", "") + "|"
+    # Use database-backed content hash for efficient cache invalidation
+    # This detects changes to world info automatically
+    world_name = world_info.get("name", "")
+    if world_name:
+        content_hash = db_get_world_content_hash(world_name)
+    else:
+        # Fallback for unnamed world info (shouldn't happen in practice)
+        world_content = ""
+        for entry in world_info.get("entries", {}).values():
+            world_content += entry.get("content", "") + "|"
+        content_hash = hashlib.md5(world_content.encode('utf-8')).hexdigest()
 
     # Create a composite hash key
-    content_hash = hashlib.md5(world_content.encode('utf-8')).hexdigest()
     text_hash = hashlib.md5(recent_text.lower().encode('utf-8')).hexdigest()
     config_hash = hashlib.md5(f"{max_entries}_{semantic_threshold}_{is_initial_turn}".encode('utf-8')).hexdigest()
 
@@ -2002,21 +2124,14 @@ async def generate_image(params: SDParams):
     # Identify bracketed character names [Name]
     bracketed_names = re.findall(r"\[(.*?)\]", params.prompt)
     if bracketed_names:
-        char_dir = os.path.join(DATA_DIR, "characters")
-        # Load all characters to find matches
-        all_chars = []
-        for f in os.listdir(char_dir):
-            if f.endswith(".json"):
-                try:
-                    with open(os.path.join(char_dir, f), "r", encoding="utf-8") as cf:
-                        all_chars.append(json.load(cf))
-                except:
-                    continue
+        # Load all characters from database (primary source)
+        all_chars = db_get_all_characters()
         
         for name in bracketed_names:
             # Case-insensitive match for name
             matched_char = next((c for c in all_chars if c.get("data", {}).get("name", "").lower() == name.lower()), None)
             if matched_char:
+                # Get danbooru_tag from extensions (already injected by db_get_all_characters)
                 danbooru_tag = matched_char.get("data", {}).get("extensions", {}).get("danbooru_tag", "")
                 if danbooru_tag:
                     # Replace [Name] with the tag
@@ -2096,99 +2211,174 @@ async def generate_image(params: SDParams):
         except Exception as e:
             return {"error": str(e)}
 
+@app.post("/api/reimport")
+async def reimport_json_files():
+    """Manually trigger re-import of JSON files from folders."""
+    try:
+        import_count = auto_import_json_files()
+        return {
+            "success": True,
+            "imported": import_count,
+            "message": f"Imported {import_count['characters']} characters, {import_count['worlds']} worlds, {import_count['chats']} chats"
+        }
+    except Exception as e:
+        print(f"Re-import failed: {e}")
+        return {"success": False, "error": str(e)}
+
 @app.get("/api/characters")
 async def list_characters():
-    chars = []
-    char_dir = os.path.join(DATA_DIR, "characters")
-    for f in os.listdir(char_dir):
-        if f.endswith(".json"):
-            file_path = os.path.join(char_dir, f)
-            try:
-                with open(file_path, "r", encoding="utf-8") as char_file:
-                    data = json.load(char_file)
-                    # Inject current filename into response so frontend can track it
-                    data["_filename"] = f
-                    chars.append(data)
-            except Exception as e:
-                print(f"FAILED to load character {f}: {e}")
-    return chars
+    """Get all characters from database."""
+    try:
+        chars = db_get_all_characters()
+        return chars
+    except Exception as e:
+        print(f"Error loading characters from database: {e}")
+        return []
 
 @app.post("/api/characters")
 async def save_character(char: dict):
-    # Use existing filename if provided, else name.json
-    filename = char.get("_filename")
-    if not filename:
-        char_data = char.get("data", char)
-        name = char_data.get("name", "NewCharacter")
-        filename = f"{name}.json"
-    
-    file_path = os.path.join(DATA_DIR, "characters", filename)
-    with open(file_path, "w", encoding="utf-8") as f:
-        # Strip internal tracking field before saving
+    """Save character to database and auto-export to JSON for SillyTavern compatibility."""
+    try:
+        # Use existing filename if provided, else name.json
+        filename = char.get("_filename")
+        if not filename:
+            char_data = char.get("data", char)
+            name = char_data.get("name", "NewCharacter")
+            filename = f"{name}.json"
+        
+        # Save to database
+        if not db_save_character(char, filename):
+            return {"success": False, "error": "Failed to save to database"}
+        
+        # Auto-export to JSON for SillyTavern compatibility
+        file_path = os.path.join(DATA_DIR, "characters", filename)
         save_data = char.copy()
-        if "_filename" in save_data: del save_data["_filename"]
-        json.dump(save_data, f, indent=2, ensure_ascii=False)
-    
-    return {"success": True, "filename": filename}
+        if "_filename" in save_data:
+            del save_data["_filename"]
+        
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(save_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"Character saved to DB and exported to JSON: {filename}")
+        return {"success": True, "filename": filename}
+    except Exception as e:
+        print(f"Error saving character: {e}")
+        return {"success": False, "error": str(e)}
 
 @app.delete("/api/characters/{filename}")
 async def delete_character(filename: str):
-    file_path = os.path.join(DATA_DIR, "characters", filename)
-    if os.path.exists(file_path):
-        os.remove(file_path)
+    """Delete character from database and optionally remove JSON file."""
+    try:
+        # Delete from database
+        if not db_delete_character(filename):
+            return {"error": "Character not found in database"}
+        
+        # Also remove JSON file if it exists
+        file_path = os.path.join(DATA_DIR, "characters", filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        print(f"Character deleted from DB and JSON: {filename}")
         return {"success": True}
-    return {"error": "File not found"}
+    except Exception as e:
+        print(f"Error deleting character: {e}")
+        return {"error": str(e)}
 
 @app.get("/api/world-info")
 async def list_world_info():
-    wi_list = []
-    wi_dir = os.path.join(DATA_DIR, "worldinfo")
-    for f in os.listdir(wi_dir):
-        if f.endswith(".json"):
-            file_path = os.path.join(wi_dir, f)
-            try:
-                with open(file_path, "r", encoding="utf-8") as wi_file:
-                    content = json.load(wi_file)
-                    wi_list.append({"name": f.replace(".json", ""), **content})
-            except Exception as e:
-                print(f"FAILED to load world info {f}: {e}")
-    return wi_list
+    """Get all world info from database."""
+    try:
+        worlds = db_get_all_worlds()
+        return worlds
+    except Exception as e:
+        print(f"Error loading world info from database: {e}")
+        # Fall back to JSON files
+        wi_list = []
+        wi_dir = os.path.join(DATA_DIR, "worldinfo")
+        for f in os.listdir(wi_dir):
+            if f.endswith(".json"):
+                file_path = os.path.join(wi_dir, f)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as wi_file:
+                        content = json.load(wi_file)
+                        wi_list.append({"name": f.replace(".json", ""), **content})
+                except Exception as e:
+                    print(f"FAILED to load world info {f}: {e}")
+        return wi_list
 
 @app.post("/api/world-info")
 async def save_world_info(request: dict):
+    """Save world info to database and export to JSON for compatibility."""
     name = request.get("name")
     if not name: return {"error": "No name found"}
-    file_path = os.path.join(DATA_DIR, "worldinfo", f"{name}.json")
+    
     data = request if "entries" in request else {"entries": request.get("data", {})}
+    
+    # Save to database (primary source)
+    # This also clears stale embeddings in sqlite-vec via db_save_world
+    try:
+        db_save_world(name, data)
+    except Exception as e:
+        print(f"Error saving world info to database: {e}")
+    
+    # Clear the in-memory embeddings cache to force recomputation
+    # The semantic search engine will recompute embeddings on next search
+    # since the world info content hash will have changed
+    semantic_search_engine.embeddings_cache.clear()
+    print(f"Cleared semantic search embeddings cache for world info update: {name}")
+    
+    # Also clear the world info search results cache
+    WORLD_INFO_CACHE.clear()
+    
+    # Also export to JSON for backward compatibility
+    file_path = os.path.join(DATA_DIR, "worldinfo", f"{name}.json")
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    print(f"World info saved to DB and exported to JSON: {name}")
     return {"success": True}
 
 # Chat session management
 @app.get("/api/chats")
 async def list_chats():
-    chats = []
-    chat_dir = os.path.join(DATA_DIR, "chats")
-    for f in os.listdir(chat_dir):
-        if f.endswith(".json"):
-            file_path = os.path.join(chat_dir, f)
-            try:
-                with open(file_path, "r", encoding="utf-8") as chat_file:
-                    chat_data = json.load(chat_file)
-                    metadata = chat_data.get("metadata", {})
+    """Get all chats from database."""
+    try:
+        chats = db_get_all_chats()
+        return chats
+    except Exception as e:
+        print(f"Error loading chats from database: {e}")
+        # Fall back to JSON files
+        chats = []
+        chat_dir = os.path.join(DATA_DIR, "chats")
+        for f in os.listdir(chat_dir):
+            if f.endswith(".json"):
+                file_path = os.path.join(chat_dir, f)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as chat_file:
+                        chat_data = json.load(chat_file)
+                        metadata = chat_data.get("metadata", {})
+                        chats.append({
+                            "id": f.replace(".json", ""),
+                            "branch_name": metadata.get("branch_name")
+                        })
+                except:
                     chats.append({
                         "id": f.replace(".json", ""),
-                        "branch_name": metadata.get("branch_name")
+                        "branch_name": None
                     })
-            except:
-                chats.append({
-                    "id": f.replace(".json", ""),
-                    "branch_name": None
-                })
-    return chats
+        return chats
 
 @app.get("/api/chats/{name}")
 async def load_chat(name: str):
+    """Load chat from database."""
+    try:
+        chat_data = db_get_chat(name)
+        if chat_data:
+            return chat_data
+    except Exception as e:
+        print(f"Error loading chat from database: {e}")
+    
+    # Fall back to JSON file
     file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
     if os.path.exists(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
@@ -2197,19 +2387,41 @@ async def load_chat(name: str):
 
 @app.post("/api/chats")
 async def save_chat(request: dict):
+    """Save chat to database and export to JSON for compatibility."""
     name = request.get("name")
     if not name:
         name = f"chat_{int(time.time())}"
+    
+    chat_data = request.get("data", {})
+    
+    # Save to database (primary source)
+    try:
+        db_save_chat(name, chat_data)
+    except Exception as e:
+        print(f"Error saving chat to database: {e}")
+    
+    # Also export to JSON for backward compatibility
     file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
     with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(request.get("data"), f, indent=2, ensure_ascii=False)
+        json.dump(chat_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"Chat saved to DB and exported to JSON: {name}")
     return {"success": True, "name": name}
 
 @app.delete("/api/chats/{name}")
-async def delete_chat(name: str):
+async def delete_chat_endpoint(name: str):
+    """Delete chat from database and JSON file."""
+    try:
+        # Delete from database
+        db_delete_chat(name)
+    except Exception as e:
+        print(f"Error deleting chat from database: {e}")
+    
+    # Also remove JSON file if it exists
     file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
     if os.path.exists(file_path):
         os.remove(file_path)
+        print(f"Chat deleted from DB and JSON: {name}")
         return {"success": True}
     return {"error": "File not found"}
 
@@ -2226,13 +2438,21 @@ async def fork_chat(request: ForkRequest):
     fork_from_message_id = request.fork_from_message_id
     branch_name = request.branch_name
     
-    # Load origin chat
-    origin_file_path = os.path.join(DATA_DIR, "chats", f"{origin_chat_name}.json")
-    if not os.path.exists(origin_file_path):
-        return {"success": False, "error": "Origin chat not found"}
+    # Load origin chat - try database first, then JSON fallback
+    origin_chat = None
+    try:
+        origin_chat = db_get_chat(origin_chat_name)
+    except Exception as e:
+        print(f"Error loading origin chat from database: {e}")
     
-    with open(origin_file_path, "r", encoding="utf-8") as f:
-        origin_chat = json.load(f)
+    # Fall back to JSON if database failed
+    if not origin_chat:
+        origin_file_path = os.path.join(DATA_DIR, "chats", f"{origin_chat_name}.json")
+        if not os.path.exists(origin_file_path):
+            return {"success": False, "error": "Origin chat not found"}
+        
+        with open(origin_file_path, "r", encoding="utf-8") as f:
+            origin_chat = json.load(f)
     
     # Find the fork point
     messages = origin_chat.get("messages", [])
@@ -2274,12 +2494,19 @@ async def fork_chat(request: ForkRequest):
     
     # Generate unique branch filename
     base_name = f"{origin_chat_name}_fork_{int(time.time())}"
-    branch_file_path = os.path.join(DATA_DIR, "chats", f"{base_name}.json")
     
-    # Save the branch
+    # Save to database (primary source)
+    try:
+        db_save_chat(base_name, branch_data)
+    except Exception as e:
+        print(f"Error saving fork to database: {e}")
+    
+    # Also export to JSON for backward compatibility
+    branch_file_path = os.path.join(DATA_DIR, "chats", f"{base_name}.json")
     with open(branch_file_path, "w", encoding="utf-8") as f:
         json.dump(branch_data, f, indent=2, ensure_ascii=False)
     
+    print(f"Fork saved to DB and exported to JSON: {base_name}")
     return {
         "success": True, 
         "name": base_name,
@@ -2627,13 +2854,19 @@ class ImageMetadataRequest(BaseModel):
     filename: str
 
 @app.get("/api/image-metadata/{filename}")
-async def get_image_metadata(filename: str):
-    """Get generation parameters for a specific image."""
-    metadata = load_image_metadata()
-    if filename in metadata["images"]:
-        return {"success": True, "metadata": metadata["images"][filename]}
-    else:
-        return {"success": False, "error": "Image metadata not found"}
+async def get_image_metadata_endpoint(filename: str):
+    """Get generation parameters for a specific image from database."""
+    # Try database first
+    metadata = db_get_image_metadata(filename)
+    if metadata:
+        return {"success": True, "metadata": metadata}
+    
+    # Fall back to JSON file for backward compatibility
+    json_metadata = load_image_metadata()
+    if filename in json_metadata.get("images", {}):
+        return {"success": True, "metadata": json_metadata["images"][filename]}
+    
+    return {"success": False, "error": "Image metadata not found"}
 
 @app.post("/api/inpaint")
 async def inpaint_image(request: InpaintRequest):

@@ -144,7 +144,7 @@
                     <div class="space-y-4">
                         <div class="flex gap-2">
                             <button @click="startNewCharacter()" class="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all">New Character</button>
-                            <button @click="fetchCharacters()" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-slate-300" title="Refresh List"><i class="fa-solid fa-rotate"></i></button>
+                            <button @click="reimportAndRefreshCharacters()" class="bg-slate-700 hover:bg-slate-600 px-3 rounded-lg text-slate-300" :class="isReimporting ? 'animate-spin' : ''" title="Refresh List (imports new JSON files)"><i class="fa-solid fa-rotate"></i></button>
                         </div>
                         
                         <!-- Character Editing Interface -->
@@ -289,7 +289,7 @@
                     <div class="space-y-4">
                         <div class="flex gap-2">
                             <div class="flex-1"></div>
-                            <button @click="fetchWorldInfo()" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-300" title="Refresh World Info"><i class="fa-solid fa-rotate"></i></button>
+                            <button @click="reimportAndRefreshWorldInfo()" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-300" :class="isReimporting ? 'animate-spin' : ''" title="Refresh World Info (imports new JSON files)"><i class="fa-solid fa-rotate"></i></button>
                         </div>
                         
                         <!-- World Info Editing Interface -->
@@ -1333,6 +1333,7 @@
                     }
                 },
                 isGeneratingCapsule: false,
+                isReimporting: false,
                 
                 // Mode selector state
                 selectedMode: 'auto', // 'auto', 'narrator', or 'focus:CharacterName'
@@ -1826,6 +1827,38 @@
                             if (updated) this.activeWI = updated;
                         }
                     } catch (e) { console.error(e); }
+                },
+
+                // Reimport characters from JSON files and refresh list
+                async reimportAndRefreshCharacters() {
+                    this.isReimporting = true;
+                    try {
+                        // First reimport any new JSON files into the database
+                        await axios.post('/api/reimport/characters');
+                        // Then fetch the updated list
+                        await this.fetchCharacters();
+                    } catch (e) {
+                        console.error('Failed to reimport characters:', e);
+                        alert('Failed to reimport characters. Is the backend running?');
+                    } finally {
+                        this.isReimporting = false;
+                    }
+                },
+
+                // Reimport world info from JSON files and refresh list
+                async reimportAndRefreshWorldInfo() {
+                    this.isReimporting = true;
+                    try {
+                        // First reimport any new JSON files into the database
+                        await axios.post('/api/reimport/worldinfo');
+                        // Then fetch the updated list
+                        await this.fetchWorldInfo();
+                    } catch (e) {
+                        console.error('Failed to reimport world info:', e);
+                        alert('Failed to reimport world info. Is the backend running?');
+                    } finally {
+                        this.isReimporting = false;
+                    }
                 },
 
                 toggleCanonLaw(wi, uid) {
