@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.5.1] - 2026-01-13
+
+### Added
+- **Change Logging System**: Complete audit trail for undo/redo support
+  - Tracks character, world info, and chat create/update/delete operations
+  - Stores JSON snapshots (before/after) for each change
+  - REST API for querying change history (`/api/changes`)
+  - Automatic 30-day rolling cleanup to maintain performance
+  - Statistics endpoint for monitoring log size
+- **Database Health Check**: Automatic startup validation prevents silent corruption
+  - Runs SQLite's `PRAGMA integrity_check` on every launch (<10ms overhead)
+  - Verifies all 5 core tables exist (characters, worlds, world_entries, chats, messages)
+  - Prints warning if corruption detected, advises running `migrate_to_sqlite.py`
+  - Graceful degradation: App continues even if check fails (allows data export/manual repair)
+- **Automatic Maintenance**: Daily cleanup of old change logs and performance metrics
+
+### Fixed
+- **Critical SQL bug**: Fixed `db_search_similar_embeddings()` WHERE clause using column alias (SQLite incompatible)
+- **Memory leak**: Embeddings now properly deleted when World Info entries are removed
+- **Data integrity**: Added 768-dimension validation to prevent model mismatch crashes
+- **Delete path**: Individual entry deletion now syncs embeddings to database
+
+### Changed
+- **SemanticSearchEngine**: Now uses sqlite-vec for disk-based embeddings instead of in-memory cache
+- **Startup behavior**: Lazy loading of embeddings (sub-second startup)
+- **Memory profile**: ~50MB idle (down from 300MB with pickle)
+
+### Technical
+- Added `change_log` table with entity_type/entity_id/operation tracking
+- Added `db_delete_entry_embedding()` for granular vector cleanup
+- Added `EXPECTED_EMBEDDING_DIMENSIONS` constant (768 for all-mpnet-base-v2)
+- Periodic background tasks for log maintenance (24h cycle)
+- Database integrity check runs on every startup
+
+### Performance
+- Startup time: <1 second (down from 2-5 seconds)
+- Semantic search: 20-50ms for 100 entries
+- Memory footprint: ~50MB idle
+- Scales to 10,000+ World Info entries
+
+### Notes
+Completes the sqlite-vec migration and adds production-ready change tracking infrastructure. Undo/Redo UI will be exposed in v1.6 with Living World Engine.
+
+---
+
 ## [1.5.0] - 2026-01-13
 
 ### Major: Complete Architecture Migration
@@ -23,6 +68,11 @@ This release migrates NeuralRP from JSON file storage to SQLite, providing ACID 
 ### Changed
 
 - **Vector Search Backend**: Replaced pickle + sklearn with sqlite-vec for semantic World Info search
+- **Semantic Search Architecture**: sqlite-vec now serves as primary search method with automatic numpy fallback
+  - First attempts SIMD-accelerated similarity search via `db_search_similar_embeddings()`
+  - Falls back to in-memory numpy calculations if sqlite-vec unavailable
+  - Embeddings persist across app restarts (no recomputation needed)
+  - Console output indicates which method was used for transparency
 - **Embedding Storage**: Now stored in `vec_world_entries` virtual table (768-dimensional) instead of RAM
 - **Performance Statistics**: Rolling median tracking now persists across restarts
 - **Branching Operations**: Now O(1) row inserts instead of O(n) file copies

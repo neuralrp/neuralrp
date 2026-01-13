@@ -25,7 +25,12 @@ from app.database import (
     db_save_performance_metric, db_get_median_performance, db_cleanup_old_metrics,
     db_get_recent_performance_metrics,
     db_get_world_content_hash, db_get_world_entry_hash, db_update_world_entry_hash,
-    db_save_embedding, db_get_embedding, db_search_similar_embeddings
+    db_save_embedding, db_get_embedding, db_search_similar_embeddings,
+    db_delete_entry_embedding,
+    # Change log functions (v1.5.1 - Undo/Redo Foundation)
+    get_recent_changes, get_last_change, db_cleanup_old_changes, log_change,
+    # Health check function
+    verify_database_health
 )
 
 app = FastAPI()
@@ -687,27 +692,44 @@ class SemanticSearchEngine:
         return hashlib.md5(content.encode('utf-8')).hexdigest()
     
     def get_entry_embeddings(self, world_info):
-        """Get or compute embeddings for all world info entries"""
+        """Get or compute embeddings for all world info entries using sqlite-vec for persistence"""
         if not world_info or "entries" not in world_info:
             return {}
         
-        world_hash = self.get_world_info_hash(world_info)
-        
-        # Check if we already have embeddings for this world info
-        if world_hash in self.embeddings_cache:
-            return self.embeddings_cache[world_hash]
+        world_name = world_info.get("name", "")
+        if not world_name:
+            # Fallback to hash-based identification for unnamed world info
+            world_name = self.get_world_info_hash(world_info)
         
         # Load model if not loaded
         if not self.load_model():
             return {}
         
-        print(f"Computing embeddings for {len(world_info['entries'])} world info entries...")
-        
-        # Extract content for embedding
-        contents = []
-        uids = []
+        # Try to load embeddings from sqlite-vec first
+        embeddings_from_db = {}
+        missing_uids = []
         
         for uid, entry in world_info["entries"].items():
+            # Try to get embedding from sqlite-vec
+            embedding = db_get_embedding(world_name, uid)
+            if embedding is not None:
+                embeddings_from_db[uid] = embedding
+            else:
+                missing_uids.append(uid)
+        
+        # If all embeddings are in database, return them
+        if not missing_uids:
+            print(f"Loaded {len(embeddings_from_db)} embeddings from sqlite-vec for world '{world_name}'")
+            return embeddings_from_db
+        
+        # Compute missing embeddings
+        print(f"Computing {len(missing_uids)} new embeddings for world '{world_name}'...")
+        
+        contents = []
+        uids_to_compute = []
+        
+        for uid in missing_uids:
+            entry = world_info["entries"][uid]
             # Embed only the PRIMARY key (first line/phrase); remaining keys are for understanding only
             primary_key = entry.get("key", [])
             primary_key = primary_key[0] if primary_key else ""
@@ -720,43 +742,37 @@ class SemanticSearchEngine:
                 if secondary:
                     prefixed_content += f"; Secondary: {secondary}"
                 contents.append(prefixed_content)
-                uids.append(uid)
+                uids_to_compute.append(uid)
         
         if not contents:
-            return {}
+            return embeddings_from_db
         
         # Compute embeddings
         try:
             embeddings = self.model.encode(contents, convert_to_numpy=True, show_progress_bar=False)
             
-            # Store embeddings with UIDs
-            result = {uids[i]: embeddings[i] for i in range(len(uids))}
+            # Save new embeddings to sqlite-vec and add to result
+            for i, uid in enumerate(uids_to_compute):
+                embedding = embeddings[i]
+                # Save to sqlite-vec for persistence
+                db_save_embedding(world_name, uid, embedding)
+                embeddings_from_db[uid] = embedding
             
-            # Cache the embeddings
-            self.embeddings_cache[world_hash] = result
-            
-            # Limit cache size to prevent memory issues
-            # Remove multiple entries to maintain size constraint
-            while len(self.embeddings_cache) >= 10:
-                oldest_key = next(iter(self.embeddings_cache))
-                del self.embeddings_cache[oldest_key]
-            
-            print(f"Computed embeddings for {len(result)} entries")
-            return result
+            print(f"Computed and saved {len(uids_to_compute)} new embeddings to sqlite-vec")
+            return embeddings_from_db
             
         except Exception as e:
             print(f"Failed to compute embeddings: {e}")
-            return {}
+            return embeddings_from_db
     
     def search_semantic(self, world_info, query_text, max_entries=10, similarity_threshold=0.3, is_initial_turn=False):
-        """Perform semantic search on world info entries - returns entries with similarity scores"""
+        """Perform semantic search on world info entries using sqlite-vec SIMD-accelerated search"""
         if not world_info or "entries" not in world_info:
             return [], []
 
-        # Get embeddings
-        embeddings = self.get_entry_embeddings(world_info)
-        if not embeddings:
-            return [], []
+        world_name = world_info.get("name", "")
+        if not world_name:
+            world_name = self.get_world_info_hash(world_info)
 
         # Load model if not loaded
         if not self.load_model():
@@ -766,7 +782,56 @@ class SemanticSearchEngine:
         try:
             query_embedding = self.model.encode([query_text], convert_to_numpy=True)[0]
 
-            # Calculate similarities using numpy (SIMD-accelerated via numpy)
+            # Adjust threshold for initial turns
+            effective_threshold = similarity_threshold
+            if is_initial_turn:
+                effective_threshold = max(0.35, similarity_threshold)  # Higher threshold for initial turns
+
+            # Try sqlite-vec SIMD-accelerated search first
+            try:
+                # Get more results than needed to allow for filtering
+                search_results = db_search_similar_embeddings(
+                    world_name, 
+                    query_embedding, 
+                    k=max_entries * 3 if max_entries > 0 else 100,
+                    threshold=effective_threshold
+                )
+                
+                if search_results:
+                    # Process results from sqlite-vec
+                    triggered_lore = []
+                    canon_entries = []
+                    
+                    for uid, similarity in search_results:
+                        if uid not in world_info["entries"]:
+                            continue
+                        
+                        entry = world_info["entries"][uid]
+                        
+                        # Always include canon law entries
+                        if entry.get("is_canon_law"):
+                            canon_entries.append(entry.get("content", ""))
+                            continue
+                        
+                        # Add to results with similarity score
+                        triggered_lore.append((entry.get("content", ""), similarity, uid))
+                        
+                        # Stop if we've reached max_entries
+                        if max_entries > 0 and len(triggered_lore) >= max_entries:
+                            break
+                    
+                    print(f"sqlite-vec search: {len(triggered_lore)} semantic matches (threshold: {effective_threshold})")
+                    return triggered_lore, canon_entries
+            
+            except Exception as vec_error:
+                print(f"sqlite-vec search failed, falling back to numpy: {vec_error}")
+            
+            # Fallback to numpy-based search if sqlite-vec fails
+            embeddings = self.get_entry_embeddings(world_info)
+            if not embeddings:
+                return [], []
+
+            # Calculate similarities using numpy
             similarities = []
             for uid, entry_embedding in embeddings.items():
                 # Compute cosine similarity: dot(a,b) / (norm(a) * norm(b))
@@ -777,11 +842,6 @@ class SemanticSearchEngine:
 
             # Sort by similarity (descending)
             similarities.sort(key=lambda x: x[1], reverse=True)
-
-            # Adjust threshold for initial turns
-            effective_threshold = similarity_threshold
-            if is_initial_turn:
-                effective_threshold = max(0.35, similarity_threshold)  # Higher threshold for initial turns
 
             # Filter by threshold and return entries WITH similarity scores
             triggered_lore = []  # List of (content, similarity, uid) tuples
@@ -798,13 +858,14 @@ class SemanticSearchEngine:
                     canon_entries.append(entry.get("content", ""))
                     continue
 
-                # Add to results with similarity score (probability no longer gates matched entries)
+                # Add to results with similarity score
                 triggered_lore.append((entry.get("content", ""), similarity, uid))
 
-                # Stop if we've reached max_entries (we'll apply proper limit later)
+                # Stop if we've reached max_entries
                 if max_entries > 0 and len(triggered_lore) >= max_entries:
                     break
 
+            print(f"numpy fallback search: {len(triggered_lore)} semantic matches")
             return triggered_lore, canon_entries
 
         except Exception as e:
@@ -849,13 +910,25 @@ def load_image_metadata():
     """Load image metadata from database."""
     return db_get_all_image_metadata()
 
-# Periodic cleanup task for semantic search engine
+# Periodic cleanup task for semantic search engine and change log
 async def periodic_cleanup():
-    """Periodically clean up semantic search engine resources"""
+    """Periodically clean up semantic search engine resources and old data"""
     while True:
         try:
             await asyncio.sleep(300)  # Run every 5 minutes
             semantic_search_engine.cleanup_resources()
+            
+            # Clean up old change log entries every 24 hours (check every 5 min, run once per day)
+            # We use a simple counter to avoid checking too frequently
+            if not hasattr(periodic_cleanup, '_last_change_cleanup'):
+                periodic_cleanup._last_change_cleanup = 0
+            
+            periodic_cleanup._last_change_cleanup += 1
+            if periodic_cleanup._last_change_cleanup >= 288:  # 288 * 5 min = 24 hours
+                db_cleanup_old_changes(30)  # Keep 30 days of history
+                db_cleanup_old_metrics(7)   # Keep 7 days of performance metrics
+                periodic_cleanup._last_change_cleanup = 0
+                print("Periodic cleanup: Cleaned old change logs and metrics")
         except Exception as e:
             print(f"Periodic cleanup failed: {e}")
 
@@ -938,6 +1011,11 @@ def auto_import_json_files():
 async def startup_event():
     """Initialize resources when the FastAPI app starts"""
     global cleanup_task
+    
+    # Verify database integrity before proceeding
+    if not verify_database_health():
+        print("⚠️  Database health check failed - app may not function correctly")
+        print("   Try running: python migrate_to_sqlite.py")
     
     # Auto-import any new JSON files dropped into folders
     print("Scanning for new JSON files to import...")
@@ -2775,7 +2853,7 @@ async def edit_world_entry_ai(req: WorldEditEntryRequest):
 
 @app.post("/api/world-info/delete-entry")
 async def delete_world_entry(world_name: str, entry_uid: str):
-    """Delete a specific world info entry."""
+    """Delete a specific world info entry and its embedding."""
     try:
         file_path = os.path.join(DATA_DIR, "worldinfo", f"{world_name}.json")
         if not os.path.exists(file_path):
@@ -2788,14 +2866,26 @@ async def delete_world_entry(world_name: str, entry_uid: str):
         if entry_uid not in world_data.get("entries", {}):
             return {"success": False, "error": "Entry not found"}
         
-        # Remove the entry
+        # Remove the entry from world data
         del world_data["entries"][entry_uid]
         
-        # Save the updated world info
+        # Clean up the embedding from sqlite-vec to prevent orphans
+        db_delete_entry_embedding(world_name, entry_uid)
+        
+        # Also update the database entry
+        try:
+            db_save_world(world_name, world_data.get("entries", {}))
+        except Exception as db_error:
+            print(f"Warning: Failed to sync world deletion to database: {db_error}")
+        
+        # Save the updated world info to JSON
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(world_data, f, indent=2, ensure_ascii=False)
         
-        return {"success": True, "message": f"Entry '{entry_uid}' deleted successfully"}
+        # Clear caches to reflect the change
+        WORLD_INFO_CACHE.clear()
+        
+        return {"success": True, "message": f"Entry '{entry_uid}' and its embedding deleted successfully"}
         
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -3004,6 +3094,139 @@ async def get_world_info_reinforcement_status():
             "implementation": "World info reinforcement is handled automatically in the prompt construction engine."
         }
     }
+
+
+# ============================================================================
+# CHANGE LOG API ENDPOINTS (v1.5.1 - Undo/Redo Foundation)
+# ============================================================================
+
+@app.get("/api/changes")
+async def get_changes(entity_type: Optional[str] = None, entity_id: Optional[str] = None, limit: int = 20):
+    """Get recent changes for debugging/undo preview.
+    
+    Query parameters:
+    - entity_type: Filter by 'character', 'world_info', or 'chat' (optional)
+    - entity_id: Filter by specific entity ID (optional, requires entity_type)
+    - limit: Maximum number of changes to return (default: 20)
+    """
+    try:
+        changes = get_recent_changes(entity_type, entity_id, limit)
+        return {
+            "success": True,
+            "changes": changes,
+            "count": len(changes)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/changes/{entity_type}/{entity_id}")
+async def get_entity_changes(entity_type: str, entity_id: str, limit: int = 10):
+    """Get change history for a specific entity.
+    
+    Useful for showing undo options for a particular character, world, or chat.
+    """
+    try:
+        changes = get_recent_changes(entity_type, entity_id, limit)
+        return {
+            "success": True,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "changes": changes,
+            "count": len(changes)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/changes/{entity_type}/{entity_id}/last")
+async def get_entity_last_change(entity_type: str, entity_id: str):
+    """Get the most recent change for a specific entity.
+    
+    Useful for implementing a quick undo button.
+    """
+    try:
+        change = get_last_change(entity_type, entity_id)
+        if change:
+            return {
+                "success": True,
+                "change": change,
+                "can_undo": change["operation"] in ["UPDATE", "DELETE"]
+            }
+        return {
+            "success": True,
+            "change": None,
+            "can_undo": False
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/changes/cleanup")
+async def cleanup_old_changes(request: dict = None):
+    """Manually trigger cleanup of old change log entries.
+    
+    Optional: Pass {"days": N} to specify cleanup window (default: 30 days).
+    """
+    try:
+        days = 30
+        if request and "days" in request:
+            days = int(request["days"])
+            if days < 1 or days > 365:
+                return {"success": False, "error": "Days must be between 1 and 365"}
+        
+        success = db_cleanup_old_changes(days)
+        return {
+            "success": success,
+            "message": f"Cleaned up change log entries older than {days} days"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/changes/stats")
+async def get_change_log_stats():
+    """Get statistics about the change log.
+    
+    Useful for monitoring log size and usage.
+    """
+    try:
+        # Get counts by entity type
+        all_changes = get_recent_changes(limit=1000)  # Get up to 1000 for stats
+        
+        stats = {
+            "total_entries": len(all_changes),
+            "by_entity_type": {},
+            "by_operation": {},
+            "oldest_entry": None,
+            "newest_entry": None
+        }
+        
+        for change in all_changes:
+            # Count by entity type
+            entity_type = change["entity_type"]
+            if entity_type not in stats["by_entity_type"]:
+                stats["by_entity_type"][entity_type] = 0
+            stats["by_entity_type"][entity_type] += 1
+            
+            # Count by operation
+            operation = change["operation"]
+            if operation not in stats["by_operation"]:
+                stats["by_operation"][operation] = 0
+            stats["by_operation"][operation] += 1
+        
+        # Get oldest and newest
+        if all_changes:
+            stats["newest_entry"] = all_changes[0]["timestamp"]
+            stats["oldest_entry"] = all_changes[-1]["timestamp"]
+        
+        return {
+            "success": True,
+            "stats": stats
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 
 if __name__ == "__main__":
     import uvicorn

@@ -140,6 +140,53 @@ All data operations use SQLite transactions:
 - **Isolation**: Concurrent reads don't interfere with writes
 - **Durability**: WAL mode ensures crash recovery
 
+### Startup Health Check
+
+NeuralRP performs automatic database validation on every startup to catch corruption early:
+
+```python
+def verify_database_health() -> bool:
+    """Run on startup to catch corruption early."""
+    try:
+        # SQLite integrity check (fast on small DBs)
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+        if result[0] != "ok":
+            print(f"⚠️  Database corruption detected: {result[0]}")
+            return False
+        
+        # Quick check core tables exist
+        cursor = conn.execute("""
+            SELECT COUNT(*) FROM sqlite_master 
+            WHERE type='table' AND name IN 
+            ('characters', 'worlds', 'world_entries', 'chats', 'messages')
+        """)
+        table_count = cursor.fetchone()[0]
+        if table_count != 5:
+            print(f"⚠️  Missing core tables ({table_count}/5 found)")
+            return False
+        
+        print("✓ Database integrity verified")
+        return True
+    except Exception as e:
+        print(f"⚠️  Database health check failed: {e}")
+        return False
+```
+
+**What's Checked:**
+- **PRAGMA integrity_check**: SQLite's built-in corruption detection
+- **Core tables**: Verifies all 5 essential tables exist
+- **Timing**: <10ms on typical database sizes
+
+**On Failure:**
+- Prints warning to console
+- App continues (graceful degradation)
+- User advised to run `migrate_to_sqlite.py` to rebuild from JSON backups
+
+**Why Not Exit?**
+- Some operations (e.g., world info) might still work
+- User may need to export data before repair
+- Allows manual intervention without forced shutdown
+
 ### SillyTavern Compatibility
 
 NeuralRP maintains backward compatibility through auto-export:
@@ -234,57 +281,126 @@ Canon Law reinforcement can be throttled:
 
 ---
 
-## Semantic Search
+## Semantic Search Architecture
 
-### Implementation
+### Model
 
-The `SemanticSearchEngine` uses sentence transformers for embedding-based retrieval:
+- **Model**: sentence-transformers/all-mpnet-base-v2
+- **Dimensions**: 768
+- **Format**: float32, little-endian byte order
+- **Hardware**: Automatic GPU/CPU detection
 
-**Model**: `all-mpnet-base-v2`
-- 768-dimensional embeddings
-- Good balance of speed and accuracy
-- Automatic GPU/CPU detection
+### Storage
 
-**Storage**: sqlite-vec virtual table
-- Disk-based, not in RAM
-- SIMD-accelerated similarity (AVX2/SSE2)
-- Zero idle memory overhead
+- **Table**: `vec_world_entries` (vec0 virtual table)
+- **Backend**: sqlite-vec with SIMD acceleration
+- **Location**: Disk-based (in `neuralrp.db`)
+- **Memory**: Zero RAM overhead (lazy loading)
+
+### Retrieval Strategy: Fresh Scan
+
+On every turn, NeuralRP performs semantic search on the last 5 messages:
+
+1. **Canon Law**: Always included, never scanned
+2. **Regular Entries**: Only included if semantically relevant to recent context
+3. **Semantic Match**: Uses cosine similarity via sqlite-vec
+
+**Trade-off**: Entries don't "stick" after being triggered. If a dragon is mentioned in Turn 1 but not in Turns 2-5, it drops out of context.
+
+**Benefit**: Keeps context lean (~2k tokens) for 12GB VRAM optimization.
+
+**Future (v1.6)**: "Sticky Window" - triggered entries persist for 3 turns even if not re-mentioned.
 
 ### Search Algorithm
 
+NeuralRP uses a dual-path approach for maximum compatibility:
+
 ```python
-def search_semantic(world_info_id, query_text, max_entries=10, threshold=0.25):
+def search_semantic(world_info, query_text, max_entries=10, threshold=0.3, is_initial_turn=False):
     # 1. Embed query text
-    query_embedding = model.encode(query_text)
+    query_embedding = model.encode([query_text], convert_to_numpy=True)[0]
     
-    # 2. Vector similarity search
-    results = db.execute("""
-        SELECT entry_id, distance
-        FROM vec_world_entries
-        WHERE world_info_id = ?
-        ORDER BY embedding <-> ?
-        LIMIT ?
-    """, [world_info_id, query_embedding, max_entries])
+    # Adjust threshold for initial turns
+    effective_threshold = max(0.35, threshold) if is_initial_turn else threshold
     
-    # 3. Filter by threshold
-    return [r for r in results if (1 - r.distance) >= threshold]
+    # 2. Try sqlite-vec SIMD-accelerated search first
+    try:
+        search_results = db_search_similar_embeddings(
+            world_name, 
+            query_embedding, 
+            k=max_entries * 3,
+            threshold=effective_threshold
+        )
+        
+        if search_results:
+            # Process results from sqlite-vec
+            print(f"sqlite-vec search: {len(triggered_lore)} semantic matches")
+            return process_results(search_results)
+    
+    except Exception as vec_error:
+        print(f"sqlite-vec search failed, falling back to numpy: {vec_error}")
+    
+    # 3. Fallback to numpy-based search
+    embeddings = get_entry_embeddings(world_info)  # Loads from sqlite-vec or computes
+    similarities = compute_cosine_similarity(query_embedding, embeddings)
+    print(f"numpy fallback search: {len(triggered_lore)} semantic matches")
+    return process_results(similarities)
 ```
 
-### Cache Invalidation
+**Why Two Paths?**
+- **sqlite-vec (primary)**: SIMD-accelerated, disk-based, zero RAM overhead
+- **numpy (fallback)**: Always available, slightly slower, uses RAM for embeddings
 
-Embeddings update automatically when world info changes:
-- Entry content hash tracked in database
+### Embedding Persistence
+
+Embeddings are computed once and stored permanently in sqlite-vec:
+
+**First Load**:
+1. Check `vec_world_entries` table for existing embeddings
+2. Compute only missing entries (new or modified)
+3. Save new embeddings to sqlite-vec via `db_save_embedding()`
+
+**Subsequent Loads**:
+1. Load all embeddings from sqlite-vec (disk-based)
+2. Skip computation entirely
+3. Typical load time: <50ms vs 2-3s cold start
+
+**Cache Invalidation**:
+- When world info is saved via `db_save_world()`, stale embeddings are deleted
 - Modified entries re-embedded on next search
-- In-memory caches cleared on world info save
+- Uses world name + entry UID for identification
+
+### Performance
+
+- **Search Time**: 20-50ms for 100 entries
+- **Startup**: <1 second (no embedding preload)
+- **Scalability**: O(log n) indexed queries
+- **Hardware**: SIMD acceleration (AVX2/SSE2)
 
 ### Performance Characteristics
 
-| Metric | Value |
-|--------|-------|
-| Cold start | ~2-3s (embedding computation) |
-| Warm search | <50ms |
-| Memory per entry | ~3KB (768 floats × 4 bytes) |
-| GPU acceleration | 5-10× faster than CPU |
+| Metric | First Load | Warm Load |
+|--------|-----------|-----------|
+| Cold start (new world) | ~2-3s (embedding computation) | N/A |
+| Warm start (existing world) | <50ms (load from sqlite-vec) | <50ms |
+| Search time (sqlite-vec) | 20-50ms | 20-50ms |
+| Search time (numpy fallback) | 30-50ms | 30-50ms |
+| Memory per entry (disk) | ~3KB (768 floats × 4 bytes) | ~3KB |
+| Memory per entry (RAM) | 0 bytes (disk-based) | 0 bytes |
+| GPU acceleration | 5-10× faster than CPU | N/A |
+
+### Validation
+
+Embeddings are validated on save:
+
+```python
+EXPECTED_EMBEDDING_DIMENSIONS = 768
+
+if len(embedding) != EXPECTED_EMBEDDING_DIMENSIONS:
+    raise ValueError(f"Expected 768-dim, got {len(embedding)}")
+```
+
+This prevents crashes from model changes or corrupted data.
 
 ---
 
@@ -350,6 +466,65 @@ Context-aware suggestions triggered by metrics:
 - Contention detected: "Consider generating images outside chat"
 - Emergency preset active: "Quality reduced due to high context"
 - Dismissible, non-repetitive notifications
+
+---
+
+## Change Logging System
+
+NeuralRP maintains an audit trail of all significant data changes for undo/redo support.
+
+### What's Logged
+
+**Always Logged:**
+- Character creates, updates, deletes
+- World Info creates, updates, deletes
+- Chat deletes, branch creation, renames
+- Character additions/removals from chats
+
+**Never Logged:**
+- Individual chat messages (tracked in `chat_messages` table)
+- Auto-summarization (background task)
+- Performance mode operations (system optimization)
+
+### Storage Format
+
+Each change includes:
+- `entity_type`: 'character', 'world_info', or 'chat'
+- `entity_id`: Name or ID of affected entity
+- `operation`: 'CREATE', 'UPDATE', or 'DELETE'
+- `old_data`: JSON snapshot before change (null for CREATE)
+- `new_data`: JSON snapshot after change (null for DELETE)
+- `timestamp`: Unix timestamp
+
+### Retention Policy
+
+- **Duration**: 30 days rolling window
+- **Cleanup**: Automatic, runs every 24 hours
+- **Manual**: `POST /api/changes/cleanup`
+
+### Querying the Log
+
+```python
+# Get recent changes
+GET /api/changes?limit=20
+
+# Get changes for specific entity
+GET /api/changes/character/Alice
+
+# Get most recent change (for undo button)
+GET /api/changes/character/Alice/last
+
+# Get statistics
+GET /api/changes/stats
+```
+
+### Future (v1.6)
+
+UI will expose:
+
+- **Toast notifications**: "Character updated. [Undo]"
+- **History panel**: View all changes for an entity
+- **Revert functionality**: One-click restore to previous state
 
 ---
 

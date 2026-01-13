@@ -42,6 +42,7 @@ NeuralRP solves specific problems for local LLM users:
 ### Performance
 - **Automatic Resource Management**: Queues heavy operations, allows light tasks to proceed
 - **Semantic World Info**: Intelligent lore retrieval with vector search, falls back to keywords
+- **Persistent Vector Embeddings**: World Info embeddings computed once, stored in sqlite-vec, survive restarts
 - **SQLite-Backed Architecture**: ACID transactions prevent data corruption, scales to 10,000+ entries
 - **Token Monitoring**: Real-time context usage tracking with configurable summarization thresholds
 
@@ -102,7 +103,8 @@ This is the focused alternative to SillyTavern: fewer knobs, more immersion.
 ## What's Included
 
 - **SQLite-backed storage** for characters, chats, world info, and images
-- **Semantic search** using vector embeddings for intelligent lore retrieval
+- **Semantic search** using vector embeddings (sqlite-vec) for intelligent lore retrieval
+- **Change logging system** for undo/redo support (UI coming in v1.6)
 - **Automatic performance management** for LLM + SD on the same GPU
 - **Adaptive connection monitoring** that reduces overhead during stable operation
 - **Branch management** with origin tracking and timeline independence

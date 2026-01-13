@@ -155,6 +155,29 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_performance_metrics_type ON performance_metrics(operation_type, timestamp)
         """)
         
+        # Change log for undo/redo support (v1.5.1 foundation)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS change_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                old_data TEXT,
+                new_data TEXT,
+                timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_change_log_entity 
+            ON change_log(entity_type, entity_id)
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_change_log_time 
+            ON change_log(timestamp DESC)
+        """)
+        
         conn.commit()
         print("Database initialized successfully")
 
@@ -225,6 +248,10 @@ def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
 def db_save_character(char_data: Dict[str, Any], filename: str) -> bool:
     """Save or update a character in the database."""
     try:
+        # Get old state before saving (for change logging)
+        old_char = db_get_character(filename)
+        is_create = old_char is None
+        
         with get_connection() as conn:
             cursor = conn.cursor()
             
@@ -250,6 +277,11 @@ def db_save_character(char_data: Dict[str, Any], filename: str) -> bool:
             """, (filename, name, data_json, danbooru_tag, capsule, timestamp))
             
             conn.commit()
+            
+            # Log the change (characters are always significant)
+            operation = 'CREATE' if is_create else 'UPDATE'
+            log_change('character', filename, operation, old_char, save_data)
+            
             return True
     except Exception as e:
         print(f"Error saving character to database: {e}")
@@ -259,11 +291,20 @@ def db_save_character(char_data: Dict[str, Any], filename: str) -> bool:
 def db_delete_character(filename: str) -> bool:
     """Delete a character from the database."""
     try:
+        # Get old state before deleting (for change logging)
+        old_char = db_get_character(filename)
+        
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM characters WHERE filename = ?", (filename,))
             conn.commit()
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+            
+            # Log the deletion (characters are always significant)
+            if deleted and old_char:
+                log_change('character', filename, 'DELETE', old_char, None)
+            
+            return deleted
     except Exception as e:
         print(f"Error deleting character from database: {e}")
         return False
@@ -382,6 +423,10 @@ def db_save_world(name: str, entries: Dict[str, Any]) -> bool:
     will recompute embeddings when the hash changes.
     """
     try:
+        # Get old state before saving (for change logging)
+        old_world = db_get_world(name)
+        is_create = old_world is None
+        
         with get_connection() as conn:
             cursor = conn.cursor()
             
@@ -432,6 +477,11 @@ def db_save_world(name: str, entries: Dict[str, Any]) -> bool:
                       metadata_json))
             
             conn.commit()
+            
+            # Log the change (world info changes are always significant)
+            operation = 'CREATE' if is_create else 'UPDATE'
+            log_change('world_info', name, operation, old_world, {'entries': entries})
+            
             return True
     except Exception as e:
         print(f"Error saving world to database: {e}")
@@ -441,11 +491,20 @@ def db_save_world(name: str, entries: Dict[str, Any]) -> bool:
 def db_delete_world(name: str) -> bool:
     """Delete a world and all its entries."""
     try:
+        # Get old state before deleting (for change logging)
+        old_world = db_get_world(name)
+        
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM worlds WHERE name = ?", (name,))
             conn.commit()
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+            
+            # Log the deletion (world info changes are always significant)
+            if deleted and old_world:
+                log_change('world_info', name, 'DELETE', old_world, None)
+            
+            return deleted
     except Exception as e:
         print(f"Error deleting world from database: {e}")
         return False
@@ -625,11 +684,21 @@ def db_save_chat(chat_id: str, data: Dict[str, Any]) -> bool:
 def db_delete_chat(chat_id: str) -> bool:
     """Delete a chat and all its messages."""
     try:
+        # Get old state before deleting (for change logging)
+        # Chat deletion is a significant operation
+        old_chat = db_get_chat(chat_id)
+        
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
             conn.commit()
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+            
+            # Log the deletion (chat deletion is always significant)
+            if deleted and old_chat:
+                log_change('chat', chat_id, 'DELETE', old_chat, None)
+            
+            return deleted
     except Exception as e:
         print(f"Error deleting chat from database: {e}")
         return False
@@ -772,6 +841,11 @@ def db_save_embedding(world_name: str, entry_uid: str, embedding: np.ndarray) ->
     try:
         import sqlite_vec
         
+        # Validate embedding dimensions before saving
+        if len(embedding) != EXPECTED_EMBEDDING_DIMENSIONS:
+            print(f"WARNING: Embedding for {world_name}/{entry_uid} has {len(embedding)} dimensions, expected {EXPECTED_EMBEDDING_DIMENSIONS}. Skipping save.")
+            return False
+        
         with get_connection() as conn:
             sqlite_vec.load(conn)
             
@@ -791,6 +865,32 @@ def db_save_embedding(world_name: str, entry_uid: str, embedding: np.ndarray) ->
         return False
     except Exception as e:
         print(f"Error saving embedding to sqlite-vec: {e}")
+        return False
+
+
+def db_delete_entry_embedding(world_name: str, entry_uid: str) -> bool:
+    """Delete a specific embedding for a world entry from sqlite-vec."""
+    try:
+        import sqlite_vec
+        
+        with get_connection() as conn:
+            sqlite_vec.load(conn)
+            
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM vec_world_entries 
+                WHERE world_name = ? AND entry_uid = ?
+            """, (world_name, entry_uid))
+            
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            if deleted:
+                print(f"Deleted embedding for {world_name}/{entry_uid}")
+            return deleted
+    except ImportError:
+        return False
+    except Exception as e:
+        print(f"Error deleting entry embedding from sqlite-vec: {e}")
         return False
 
 
@@ -821,6 +921,10 @@ def db_get_embedding(world_name: str, entry_uid: str) -> Optional[np.ndarray]:
         return None
 
 
+# Expected embedding dimensions for all-mpnet-base-v2
+EXPECTED_EMBEDDING_DIMENSIONS = 768
+
+
 def db_search_similar_embeddings(world_name: str, query_embedding: np.ndarray, 
                                    k: int = 10, threshold: float = 0.3) -> List[Tuple[str, float]]:
     """
@@ -830,6 +934,11 @@ def db_search_similar_embeddings(world_name: str, query_embedding: np.ndarray,
     try:
         import sqlite_vec
         
+        # Validate embedding dimensions
+        if len(query_embedding) != EXPECTED_EMBEDDING_DIMENSIONS:
+            print(f"WARNING: Query embedding has {len(query_embedding)} dimensions, expected {EXPECTED_EMBEDDING_DIMENSIONS}")
+            return []
+        
         with get_connection() as conn:
             sqlite_vec.load(conn)
             
@@ -838,11 +947,16 @@ def db_search_similar_embeddings(world_name: str, query_embedding: np.ndarray,
             
             cursor = conn.cursor()
             # Use vec_distance_cosine for cosine similarity (1 - cosine_distance = similarity)
+            # Note: Cannot use column aliases in WHERE clause, so we use a subquery
             cursor.execute("""
-                SELECT entry_uid, 
-                       (1 - vec_distance_cosine(embedding, ?)) as similarity
-                FROM vec_world_entries
-                WHERE world_name = ? AND similarity >= ?
+                SELECT entry_uid, similarity
+                FROM (
+                    SELECT entry_uid, 
+                           (1 - vec_distance_cosine(embedding, ?)) as similarity
+                    FROM vec_world_entries
+                    WHERE world_name = ?
+                ) AS subquery
+                WHERE similarity >= ?
                 ORDER BY similarity DESC
                 LIMIT ?
             """, (query_bytes, world_name, threshold, k))
@@ -978,6 +1092,151 @@ def db_cleanup_old_metrics(days: int = 7) -> bool:
 
 
 # ============================================================================
+# CHANGE LOG OPERATIONS (v1.5.1 - Undo/Redo Foundation)
+# ============================================================================
+
+# Significant chat operations that warrant logging (not every message save)
+SIGNIFICANT_CHAT_OPERATIONS = {
+    'DELETE',
+    'CREATE_BRANCH',
+    'RENAME',
+    'CLEAR',
+    'ADD_CHARACTER',
+    'REMOVE_CHARACTER',
+    'MANUAL_SUMMARIZE'
+}
+
+
+def should_log_chat_change(operation: str) -> bool:
+    """Determine if a chat operation is significant enough to log.
+    
+    We don't log every message save (too frequent), only structural changes
+    that users might want to undo.
+    """
+    return operation in SIGNIFICANT_CHAT_OPERATIONS
+
+
+def log_change(entity_type: str, entity_id: str, operation: str, 
+               old_data: Any = None, new_data: Any = None) -> bool:
+    """Log a change for undo/redo support.
+    
+    Args:
+        entity_type: 'character', 'world_info', or 'chat'
+        entity_id: Character filename, world name, or chat ID
+        operation: 'CREATE', 'UPDATE', 'DELETE', or significant chat operations
+        old_data: JSON-serializable snapshot before change (None for CREATE)
+        new_data: JSON-serializable snapshot after change (None for DELETE)
+    
+    Returns:
+        True if logged successfully, False otherwise
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO change_log (entity_type, entity_id, operation, old_data, new_data)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                entity_type, 
+                entity_id, 
+                operation,
+                json.dumps(old_data, ensure_ascii=False) if old_data else None,
+                json.dumps(new_data, ensure_ascii=False) if new_data else None
+            ))
+            conn.commit()
+            print(f"Change logged: {operation} {entity_type}/{entity_id}")
+            return True
+    except Exception as e:
+        print(f"Error logging change: {e}")
+        return False
+
+
+def get_recent_changes(entity_type: Optional[str] = None, 
+                       entity_id: Optional[str] = None,
+                       limit: int = 20) -> List[Dict[str, Any]]:
+    """Get recent changes for debugging/undo.
+    
+    Args:
+        entity_type: Filter by type ('character', 'world_info', 'chat') or None for all
+        entity_id: Filter by specific entity ID or None for all of type
+        limit: Maximum number of changes to return
+    
+    Returns:
+        List of change records with id, entity_type, entity_id, operation,
+        old_data (parsed), new_data (parsed), and timestamp
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        if entity_type and entity_id:
+            cursor.execute("""
+                SELECT id, entity_type, entity_id, operation, old_data, new_data, timestamp
+                FROM change_log 
+                WHERE entity_type = ? AND entity_id = ?
+                ORDER BY timestamp DESC LIMIT ?
+            """, (entity_type, entity_id, limit))
+        elif entity_type:
+            cursor.execute("""
+                SELECT id, entity_type, entity_id, operation, old_data, new_data, timestamp
+                FROM change_log 
+                WHERE entity_type = ? 
+                ORDER BY timestamp DESC LIMIT ?
+            """, (entity_type, limit))
+        else:
+            cursor.execute("""
+                SELECT id, entity_type, entity_id, operation, old_data, new_data, timestamp
+                FROM change_log 
+                ORDER BY timestamp DESC LIMIT ?
+            """, (limit,))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'id': row['id'],
+                'entity_type': row['entity_type'],
+                'entity_id': row['entity_id'],
+                'operation': row['operation'],
+                'old_data': json.loads(row['old_data']) if row['old_data'] else None,
+                'new_data': json.loads(row['new_data']) if row['new_data'] else None,
+                'timestamp': row['timestamp']
+            })
+        
+        return results
+
+
+def get_last_change(entity_type: str, entity_id: str) -> Optional[Dict[str, Any]]:
+    """Get the most recent change for a specific entity.
+    
+    Useful for implementing undo functionality.
+    """
+    changes = get_recent_changes(entity_type, entity_id, limit=1)
+    return changes[0] if changes else None
+
+
+def db_cleanup_old_changes(days: int = 30) -> bool:
+    """Clean up change log entries older than specified days.
+    
+    Default is 30 days - a reasonable undo window without unbounded growth.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff_time = int(time.time()) - (days * 24 * 60 * 60)
+            cursor.execute("""
+                DELETE FROM change_log
+                WHERE timestamp < ?
+            """, (cutoff_time,))
+            conn.commit()
+            deleted_count = cursor.rowcount
+            if deleted_count > 0:
+                print(f"Cleaned up {deleted_count} old change log entries")
+            return True
+    except Exception as e:
+        print(f"Error cleaning up change log: {e}")
+        return False
+
+
+# ============================================================================
 # WORLD INFO HASH OPERATIONS
 # ============================================================================
 
@@ -1068,6 +1327,43 @@ def db_get_world_content_hash(world_name: str) -> str:
             return "empty"
         
         return hashlib.md5(hash_content.encode('utf-8')).hexdigest()
+
+
+# ============================================================================
+# DATABASE HEALTH CHECK
+# ============================================================================
+
+def verify_database_health() -> bool:
+    """Run on startup to catch corruption early.
+    
+    Performs SQLite integrity check and verifies core tables exist.
+    Returns True if healthy, False if issues detected.
+    """
+    try:
+        with get_connection() as conn:
+            # SQLite integrity check (fast on small DBs)
+            result = conn.execute("PRAGMA integrity_check").fetchone()
+            if result[0] != "ok":
+                print(f"⚠️  Database corruption detected: {result[0]}")
+                print("   Consider running migrate_to_sqlite.py to rebuild from JSON backup")
+                return False
+            
+            # Quick check core tables exist
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM sqlite_master 
+                WHERE type='table' AND name IN 
+                ('characters', 'worlds', 'world_entries', 'chats', 'messages')
+            """)
+            table_count = cursor.fetchone()[0]
+            if table_count != 5:
+                print(f"⚠️  Missing core tables ({table_count}/5 found) - database may need reinitialization")
+                return False
+            
+            print("✓ Database integrity verified")
+            return True
+    except Exception as e:
+        print(f"⚠️  Database health check failed: {e}")
+        return False
 
 
 # Initialize database on module import
