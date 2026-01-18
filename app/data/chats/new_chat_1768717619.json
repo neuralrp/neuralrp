@@ -1,0 +1,46 @@
+{
+  "messages": [
+    {
+      "id": 4,
+      "role": "user",
+      "content": "Jason, the elven archer, and I stood at the edge of a forest near Pastoria, on orders from teh queen to map out teh area and look for a dragon who had been bothering townsfolk nearby.",
+      "speaker": null,
+      "image": null
+    },
+    {
+      "id": 5,
+      "role": "assistant",
+      "content": "\"Alright, let's split up and cover more ground,\" Jason said, nocking an arrow to his bow. \"I'll take the north side of the forest. You take the south. If you find anything, give a long, loud whistle and I'll hear you. Remember, we're just looking, not engaging. Let's go.\"\n\n\nYou and Jason have split up and are exploring different sides of the forest near Pastoria. You are on the south side of the forest, walking through the dense foliage. The forest is thick with the scent of pine and the sounds of birds chirping above. As you walk deeper into the woods, you notice that the forest floor is covered in a blanket of soft, green moss that muffles your footsteps. The trees are tall and ancient, their trunks twisted and gnarled by time.\n\nAs you round a particularly large tree, you hear a noise off in the distance - it sounds like a human voice, but it's hard to tell for sure. You pause and listen carefully. The voice gets louder and you can make out some words:\n\n\"Help! Is anyone there? Please, I need help!\" The voice is clearly that of a woman, and she sounds desperate.\n\nWhat do you do? Do you call out to her, or try to locate her without being heard?",
+      "speaker": "Narrator",
+      "image": null
+    },
+    {
+      "role": "user",
+      "content": "locate her without being heard",
+      "id": 1768717611365
+    },
+    {
+      "role": "assistant",
+      "speaker": "Narrator",
+      "content": "You decide to locate the woman without revealing your presence. You move quietly through the underbrush, using the trees and foliage for cover as you try to pinpoint her exact location. As you get closer, you can see a flash of color through the trees - it looks like a blue dress.\n\nThe woman is standing near a large, fallen log, her back pressed against a tree trunk. She looks disheveled, her hair tousled and her dress torn. There are bruises on her arms and face. She appears to be in a state of shock, her eyes wide and her breath coming in short, frightened gasps.\n\nAs you watch, a large, scaly creature emerges from the undergrowth. It's a dragon, but unlike any you've seen before - it's small, no more than four feet tall, with iridescent scales that shimmer in the dappled sunlight. The dragon sniffs the air, then starts to approach the woman, a low growl rumbling in its throat.\n\nThe woman lets out a scream and tries to run, but her foot catches on a root and she falls to the ground, crying out in pain. The dragon is closing in on her, its teeth bared.\n\nWhat do you do? Do you reveal yourself and try to save the woman, or do you stay hidden and observe the situation?",
+      "id": 1768717619172
+    }
+  ],
+  "summary": "",
+  "activeCharacters": [],
+  "activeWI": null,
+  "settings": {
+    "system_prompt": "You are a fantasy story narrator, creative and helpful driving the story forward.",
+    "user_persona": "I am a tall, muscular, 40 year old human male.",
+    "reinforce_freq": 5,
+    "world_info_reinforce_freq": 3,
+    "temperature": 0.85,
+    "max_length": 800,
+    "max_context": 8000,
+    "summarize_threshold": 0.85,
+    "performance_mode_enabled": true,
+    "world_info_enabled": true,
+    "max_world_info_entries": 0,
+    "semantic_threshold": 0.3
+  }
+}
