@@ -29,10 +29,18 @@ from app.database import (
     db_delete_entry_embedding,
     # Change log functions (v1.5.1 - Undo/Redo Foundation)
     get_recent_changes, get_last_change, db_cleanup_old_changes, log_change,
+    # Undo/Redo functions
+    mark_change_undone, undo_last_delete, restore_version,
+    # Search functions (FTS5 full-text search)
+    db_search_messages, db_get_message_context, db_get_available_speakers,
+    migrate_populate_fts,
     # Health check function
     verify_database_health,
     # Autosave cleanup functions
-    db_cleanup_old_autosaved_chats, db_cleanup_empty_chats
+    db_cleanup_old_autosaved_chats, db_cleanup_empty_chats,
+    # Relationship tracker functions
+    db_get_relationship_state, db_get_all_relationship_states, db_update_relationship_state,
+    db_copy_relationship_states_for_branch
 )
 
 app = FastAPI()
@@ -417,7 +425,7 @@ class CapsuleGenRequest(BaseModel):
 class WorldGenRequest(BaseModel):
     world_name: str
     section: str # history, locations, creatures, factions
-    tone: str # sfw, spicy, veryspicy
+    tone: str # neutral (simplified - only neutral option now)
     context: str
     source_mode: Optional[str] = "chat" # "chat" or "manual"
 
@@ -451,6 +459,42 @@ class WorldEditEntryRequest(BaseModel):
     tone: str  # sfw, spicy, veryspicy
     context: Optional[str] = ""
     source_mode: Optional[str] = "manual"
+
+# Character name helper for consistency with relationship tracking
+def get_character_name(character_obj: Any) -> str:
+    """
+    Extract character name consistently from any character reference.
+    
+    CRITICAL: This is the ONLY approved way to get character names.
+    DO NOT extract first name only or modify the name string.
+    This ensures relationship tracker and other features work correctly.
+    
+    Args:
+        character_obj: Can be:
+            - Dict with 'data.name' (from db_get_character)
+            - Dict with 'name' (from character card)
+            - String (already a name)
+    
+    Returns:
+        Full character name, never empty
+    """
+    if isinstance(character_obj, str):
+        # Already a name string
+        return character_obj.strip() or "Unknown"
+    
+    if isinstance(character_obj, dict):
+        # Standard format: {'data': {'name': '...'}}
+        if 'data' in character_obj:
+            name = character_obj['data'].get('name', 'Unknown')
+            if name and isinstance(name, str):
+                return name.strip()
+        
+        # Fallback: {'name': '...'}
+        name = character_obj.get('name', 'Unknown')
+        if name and isinstance(name, str):
+            return name.strip()
+    
+    return "Unknown"
 
 # Token counting helper
 async def get_token_count(text: str):
@@ -878,7 +922,387 @@ class SemanticSearchEngine:
 # Global semantic search engine instance
 semantic_search_engine = SemanticSearchEngine()
 
-# Global variable to store the cleanup task
+# ============================================================================
+# RELATIONSHIP TRACKING ENGINE
+# ============================================================================
+
+class RelationshipAnalyzer:
+    """
+    Analyzes relationships using direct semantic comparison of conversation text.
+    No LLM generation - uses embeddings + keyword polarity detection.
+    """
+    
+    def __init__(self, semantic_search_engine):
+        self.model = semantic_search_engine.model
+        
+        # Single prototype sentence per category (more efficient than 5-sentence averaging)
+        category_prototypes = {
+            'trust': "deep trust faith reliability honesty belief confidence dependable loyal",
+            'emotional_bond': "love affection attraction romance care adoration strong feelings",
+            'conflict': "argument tension disagreement anger hostility fighting opposition",
+            'power_dynamic': "dominance authority control leadership command submission obedience",
+            'fear_anxiety': "fear terror dread intimidation threat anxiety scared nervous"
+        }
+        
+        # Pre-compute category embeddings once at startup
+        self.category_embeddings = {}
+        for category, text in category_prototypes.items():
+            if self.model is not None:
+                self.category_embeddings[category] = self.model.encode(text, convert_to_numpy=True)
+            else:
+                self.category_embeddings[category] = None
+        
+        # Polarity indicators for direction (+/-)
+        self.positive_indicators = {
+            'trust': ['trust', 'faith', 'rely', 'believe', 'confident', 'honest', 
+                     'reliable', 'loyal', 'depend', 'truthful'],
+            'emotional_bond': ['love', 'care', 'affection', 'close', 'bond', 'adore',
+                              'attracted', 'kiss', 'embrace', 'cherish', 'like'],
+            'conflict': ['harmony', 'agree', 'resolve', 'peace', 'cooperate', 
+                        'reconcile', 'forgive', 'understand'],  # Low conflict = positive
+            'power_dynamic': ['lead', 'dominate', 'command', 'authority', 'control',
+                             'superior', 'order', 'direct'],
+            'fear_anxiety': ['calm', 'ease', 'comfort', 'safe', 'relaxed', 
+                            'secure', 'peaceful', 'confident']  # Low fear = positive
+        }
+        
+        self.negative_indicators = {
+            'trust': ['distrust', 'doubt', 'suspect', 'betray', 'deceive', 'lie',
+                     'backstab', 'unreliable', 'dishonest', 'suspicion'],
+            'emotional_bond': ['dislike', 'hate', 'repulse', 'disgust', 'cold', 
+                              'reject', 'distant', 'avoid', 'loathe'],
+            'conflict': ['tension', 'argue', 'conflict', 'fight', 'hostile', 
+                        'disagree', 'clash', 'oppose', 'antagonize'],
+            'power_dynamic': ['defer', 'submit', 'follow', 'obey', 'yield', 
+                             'subordinate', 'comply', 'bow'],
+            'fear_anxiety': ['fear', 'terror', 'dread', 'intimidate', 'anxious',
+                            'threaten', 'scared', 'afraid', 'nervous']
+        }
+    
+    def analyze_conversation(self, messages: list, char_from: str, entity_to: str, 
+                       current_state: dict) -> dict:
+        """
+        Analyze conversation messages directly for relationship impacts.
+        Returns updated scores or None if no meaningful interaction detected.
+        """
+        if self.model is None:
+            print("WARNING: RelationshipAnalyzer model not loaded, skipping analysis")
+            return None
+        
+        import numpy as np
+        
+        # Build conversation text from recent messages
+        # Fix: Access Pydantic model attributes directly (m.speaker, m.role, m.content)
+        recent_text = "\n".join([
+            f"{m.speaker or m.role}: {m.content or ''}"
+            for m in messages[-10:]
+        ])
+        
+        text_lower = recent_text.lower()
+        
+        # Check if both entities were mentioned (relevance filter)
+        char_from_mentioned = char_from.lower() in text_lower
+        entity_to_mentioned = entity_to.lower() in text_lower
+        
+        if not (char_from_mentioned and entity_to_mentioned):
+            return None  # No interaction detected
+        
+        # Count interaction density
+        interaction_count = sum(
+            1 for m in messages[-10:]
+            if char_from.lower() in (m.content or '').lower()
+            and entity_to.lower() in (m.content or '').lower()
+        )
+        
+        if interaction_count == 0:
+            return None
+        
+        # Embed conversation once
+        conversation_embedding = self.model.encode(recent_text, convert_to_numpy=True)
+        
+        # Detect impacted dimensions via semantic similarity
+        dimension_impacts = {}
+        
+        for category, category_emb in self.category_embeddings.items():
+            if category_emb is None:
+                continue
+            
+            similarity = np.dot(conversation_embedding, category_emb) / (
+                np.linalg.norm(conversation_embedding) * np.linalg.norm(category_emb)
+            )
+            
+            if similarity > 0.35:  # Same threshold as world info
+                dimension_impacts[category] = similarity
+        
+        if not dimension_impacts:
+            return None  # No relationship impact detected
+        
+        # Calculate new scores
+        new_scores = {}
+        
+        for dimension in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']:
+            if dimension not in dimension_impacts:
+                new_scores[dimension] = current_state[dimension]
+                continue
+            
+            similarity = dimension_impacts[dimension]
+            
+            # Count polarity indicators
+            pos_count = sum(text_lower.count(word) for word in self.positive_indicators[dimension])
+            neg_count = sum(text_lower.count(word) for word in self.negative_indicators[dimension])
+            
+            # Skip if no polarity detected (avoid false positives)
+            if pos_count == 0 and neg_count == 0:
+                new_scores[dimension] = current_state[dimension]
+                continue
+            
+            # Calculate magnitude scaled by interaction density
+            magnitude_multiplier = min(2.0, 1.0 + (interaction_count / 10))
+            base_magnitude = int(similarity * 50 * magnitude_multiplier)
+            
+            # Determine direction and target
+            if pos_count > neg_count:
+                target = min(100, current_state[dimension] + base_magnitude)
+            elif neg_count > pos_count:
+                target = max(0, current_state[dimension] - base_magnitude)
+            else:
+                # Ambiguous - small adjustment toward neutral
+                target = int(current_state[dimension] * 0.9 + 50 * 0.1)
+            
+            # Weighted blend: 60% new target, 40% current (gradual change)
+            new_scores[dimension] = int(0.6 * target + 0.4 * current_state[dimension])
+            new_scores[dimension] = max(0, min(100, new_scores[dimension]))
+        
+        return new_scores
+
+
+# Initialize analyzer (do once at startup)
+relationship_analyzer = None
+
+
+# ============================================================================
+# RELATIONSHIP TEMPLATES
+# ============================================================================
+
+# Template definitions for natural language injection
+RELATIONSHIP_TEMPLATES = {
+    'trust': {
+        (0, 20): ["{from_} deeply distrusts {to}", "{from_} views {to} with complete suspicion"],
+        (21, 40): ["{from_} is wary of {to}", "{from_} has doubts about {to}'s intentions"],
+        (41, 60): [],  # Neutral - don't inject
+        (61, 80): ["{from_} trusts {to}", "{from_} has faith in {to}"],
+        (81, 100): ["{from_} trusts {to} completely", "{from_} would trust {to} with their life"]
+    },
+    'emotional_bond': {
+        (0, 20): ["{from_} is repulsed by {to}", "{from_} actively dislikes {to}"],
+        (21, 40): ["{from_} is indifferent to {to}", "{from_} feels little connection to {to}"],
+        (41, 60): [],  # Neutral - don't inject
+        (61, 80): ["{from_} cares deeply for {to}", "{from_} has strong feelings for {to}"],
+        (81, 100): ["{from_} is deeply in love with {to}", "{from_} adores {to}"]
+    },
+    'conflict': {
+        (0, 20): [],  # Low conflict - don't inject
+        (21, 40): ["{from_} has minor disagreements with {to}", "{from_} occasionally argues with {to}"],
+        (41, 60): ["{from_} has noticeable tension with {to}", "{from_} is in active conflict with {to}"],
+        (61, 80): ["{from_} is in active conflict with {to}", "{from_} openly opposes {to}"],
+        (81, 100): ["{from_} views {to} as an enemy", "intense hostility exists between {from_} and {to}"]
+    },
+    'power_dynamic': {
+        (0, 20): ["{from_} is completely submissive to {to}", "{from_} defers to {to} in all things"],
+        (21, 40): ["{from_} often defers to {to}", "{from_} follows {to}'s lead"],
+        (41, 60): [],  # Equal - don't inject
+        (61, 80): ["{from_} often leads {to}", "{to} tends to take charge in situations"],
+        (81, 100): ["{from_} completely dominates {to}", "{from_} commands {to} without question"]
+    },
+    'fear_anxiety': {
+        (0, 20): [],  # No fear - don't inject
+        (21, 40): ["{from_} is slightly nervous around {to}", "{from_} feels a bit uneasy near {to}"],
+        (41, 60): ["{from_} is noticeably anxious around {to}", "{from_} shows signs of nervousness with {to}"],
+        (61, 80): ["{from_} fears {to}", "{from_} is intimidated by {to}"],
+        (81, 100): ["{from_} is terrified of {to}", "{from_} is completely paralyzed by fear around {to}"]
+    }
+}
+
+
+def get_relationship_context(chat_id: str, characters: list, user_name: str, 
+                            recent_messages: list) -> str:
+    """
+    Generate compact relationship context for prompt injection.
+    Only includes non-neutral dimensions for active speakers.
+    Returns 0-75 tokens depending on active interactions.
+    
+    CRITICAL: characters list should already be extracted with get_character_name().
+    """
+    import random
+    
+    # Identify active speakers in last 5 messages
+    # Fix: Access Pydantic model attributes directly (m.speaker, m.role)
+    active_speakers = set(m.speaker or m.role for m in recent_messages[-5:])
+    active_characters = [c for c in characters if c in active_speakers]
+    user_is_active = any(
+        m.role == 'user' or m.speaker == user_name
+        for m in recent_messages[-5:]
+    )
+    
+    # Need at least 2 entities (char+char or char+user)
+    if not ((len(active_characters) >= 1 and user_is_active) or len(active_characters) >= 2):
+        return ""
+    
+    lines = []
+    
+    # For each active character, describe notable feelings
+    for char_from in active_characters:
+        # Check toward other characters
+        for char_to in active_characters:
+            if char_from == char_to:
+                continue
+            
+            # Get relationship state
+            state = db_get_relationship_state(chat_id, char_from, char_to)
+            if not state:
+                continue
+            
+            # Find dimensions far from neutral (50 ± 15)
+            notable = []
+            dimensions = ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']
+            
+            for dim in dimensions:
+                score = state[dim]
+                if abs(score - 50) > 15:
+                    notable.append((dim, score))
+            
+            # Sort by extremity, take top 2
+            notable.sort(key=lambda x: abs(x[1] - 50), reverse=True)
+            top_two = notable[:2]
+            
+            # Generate templates for top two dimensions
+            for dim, score in top_two:
+                for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
+                    if low <= score <= high:
+                        if templates:
+                            template = random.choice(templates)
+                            lines.append(template.format(from_=char_from, to=char_to))
+            
+            if lines:
+                lines.append(".")
+    
+    # Also check toward user if user is active
+    if user_is_active and active_characters:
+        user_name = user_name or "User"
+        
+        for char_from in active_characters:
+            state = db_get_relationship_state(chat_id, char_from, user_name)
+            if not state:
+                continue
+            
+            # Find dimensions far from neutral
+            notable = []
+            dimensions = ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']
+            
+            for dim in dimensions:
+                score = state[dim]
+                if abs(score - 50) > 15:
+                    notable.append((dim, score))
+            
+            # Sort by extremity, take top 2
+            notable.sort(key=lambda x: abs(x[1] - 50), reverse=True)
+            top_two = notable[:2]
+            
+            # Generate templates for top two dimensions
+            for dim, score in top_two:
+                for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
+                    if low <= score <= high:
+                        if templates:
+                            template = random.choice(templates)
+                            lines.append(template.format(from_=char_from, to=user_name))
+            
+            if lines:
+                lines.append(".")
+    
+    if lines:
+        return "### Relationship Context:\n" + "\n".join(lines)
+    
+    return ""
+
+
+# Global variable to store cleanup task
+cleanup_task = None
+
+
+async def analyze_and_update_relationships(chat_id: str, messages: list, 
+                                      characters: list, user_name: str = None):
+    """
+    Analyze relationships using direct semantic comparison.
+    Triggered at summarization boundary (every 10 messages).
+    
+    CRITICAL: characters list should already be extracted with get_character_name().
+    """
+    global relationship_analyzer
+    
+    if relationship_analyzer is None:
+        relationship_analyzer = RelationshipAnalyzer(semantic_search_engine)
+    
+    if len(characters) < 1:
+        return
+    
+    # Build entity list - characters are already extracted with get_character_name()
+    all_entities = characters.copy()
+    if user_name:
+        all_entities.append(user_name)
+    
+    # Get recent speakers for relevance filtering
+    recent_speakers = set(m.get('speaker') for m in messages[-10:])
+    
+    # Analyze each directional relationship
+    for char_from in characters:
+        if char_from not in recent_speakers:
+            continue  # Character wasn't active
+        
+        for entity_to in all_entities:
+            if char_from == entity_to:
+                continue
+            
+            if entity_to not in recent_speakers:
+                continue  # Target wasn't active
+            
+            # Get current state
+            current_state = db_get_relationship_state(chat_id, char_from, entity_to)
+            
+            if not current_state:
+                current_state = {
+                    'trust': 50, 'emotional_bond': 50, 'conflict': 50,
+                    'power_dynamic': 50, 'fear_anxiety': 50
+                }
+            
+            # Analyze conversation directly (no LLM generation)
+            new_scores = relationship_analyzer.analyze_conversation(
+                messages=messages,
+                char_from=char_from,
+                entity_to=entity_to,
+                current_state=current_state
+            )
+            
+            if new_scores is None:
+                continue  # No interaction detected
+            
+            # Check for meaningful change (threshold: 5 points)
+            if any(abs(new_scores[dim] - current_state[dim]) > 5 
+                   for dim in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']):
+                
+                db_update_relationship_state(
+                    chat_id=chat_id,
+                    character_from=char_from,
+                    character_to=entity_to,
+                    scores=new_scores,
+                    last_message_id=messages[-1].get('id', 0)
+                )
+                
+                print(f"[RELATIONSHIP] {char_from}→{entity_to}: "
+                      f"trust={new_scores['trust']}, bond={new_scores['emotional_bond']}, "
+                      f"conflict={new_scores['conflict']}")
+
+
+# Global variable to store cleanup task
 cleanup_task = None
 
 def store_image_metadata(filename: str, params: SDParams):
@@ -937,7 +1361,7 @@ async def periodic_cleanup():
 
 # Auto-import JSON files on startup
 def auto_import_json_files():
-    """Scan JSON folders and import any new files not already in the database."""
+    """Scan JSON folders and import any new files not already in database."""
     import_count = {"characters": 0, "worlds": 0, "chats": 0}
     
     # Import characters
@@ -965,6 +1389,13 @@ def auto_import_json_files():
         for f in os.listdir(wi_dir):
             if f.endswith(".json") and f != ".gitkeep":
                 name = f.replace(".json", "")
+                # Remove ALL SillyTavern suffixes: _plist, _worldinfo, _json
+                # This handles files like "exampleworld_plist_worldinfo.json" -> "exampleworld"
+                for suffix in ["_plist", "_worldinfo", "_json"]:
+                    if name.endswith(suffix):
+                        name = name[:-len(suffix)]
+                        # Only remove one suffix to handle files with multiple suffixes
+                        break
                 file_path = os.path.join(wi_dir, f)
                 try:
                     # Check if already in database
@@ -973,7 +1404,7 @@ def auto_import_json_files():
                         # Load and import
                         with open(file_path, "r", encoding="utf-8") as wf:
                             world_data = json.load(wf)
-                        # db_save_world expects entries dict, not the full object
+                        # db_save_world expects entries dict, not -> full object
                         entries = world_data.get("entries", world_data) if isinstance(world_data, dict) else {}
                         if entries and db_save_world(name, entries):
                             import_count["worlds"] += 1
@@ -1009,10 +1440,238 @@ def auto_import_json_files():
     
     return import_count
 
+# Separate import functions for targeted reimport
+def import_characters_json_files():
+    """Import only character JSON files not already in database."""
+    import_count = 0
+    
+    char_dir = os.path.join(DATA_DIR, "characters")
+    if os.path.exists(char_dir):
+        for f in os.listdir(char_dir):
+            if f.endswith(".json") and f != ".gitkeep":
+                file_path = os.path.join(char_dir, f)
+                try:
+                    # Check if already in database
+                    existing = db_get_character(f)
+                    if existing is None:
+                        # Load and import
+                        with open(file_path, "r", encoding="utf-8") as cf:
+                            char_data = json.load(cf)
+                        if db_save_character(char_data, f):
+                            import_count += 1
+                            print(f"Imported character: {f}")
+                except Exception as e:
+                    print(f"Failed to import character {f}: {e}")
+    
+    if import_count > 0:
+        print(f"Character import complete: {import_count} characters")
+    else:
+        print("Character import: No new JSON files to import")
+    
+    return import_count
+
+def sync_world_from_json(world_name):
+    """Intelligently merge a single JSON world with its database entries.
+    
+    Compares JSON entries vs database entries and merges them:
+    - New JSON entries: Add to database (they don't exist yet)
+    - Deleted database entries: Remove from result (gone from JSON)
+    - Existing entries: Keep whichever was modified more recently
+    
+    Returns:
+        dict with 'added' (int), 'removed' (int), 'merged' (int) counts
+    """
+    # Load JSON file
+    file_path = os.path.join(DATA_DIR, "worldinfo", f"{world_name}.json")
+    
+    if not os.path.exists(file_path):
+        print(f"World info JSON not found: {file_path}")
+        return {"added": 0, "removed": 0, "merged": 0}
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            json_data = json.load(f)
+            json_entries = json_data.get("entries", json_data) if isinstance(json_data, dict) else {}
+    except Exception as e:
+        print(f"Failed to load world info JSON {world_name}: {e}")
+        return {"added": 0, "removed": 0, "merged": 0}
+    
+    # Load database entries
+    db_world = db_get_world(world_name)
+    if db_world is None:
+        # No world in database - just import JSON
+        entries = json_entries
+        if db_save_world(world_name, entries):
+            print(f"Sync: Imported {len(entries)} entries from JSON (no existing DB world)")
+            return {"added": len(entries), "removed": 0, "merged": 0}
+        return {"added": 0, "removed": 0, "merged": 0}
+    
+    db_entries = db_world.get("entries", {})
+    
+    # Track modification times (JSON file modification time as fallback)
+    json_mtime = os.path.getmtime(file_path)
+    
+    # Perform intelligent merge
+    merged_entries = {}
+    added_count = 0
+    removed_count = 0
+    merged_count = 0
+    
+    # 1. Start with all database entries (they have modification times if edited)
+    for uid, db_entry in db_entries.items():
+        # Check if this entry still exists in JSON
+        if uid in json_entries:
+            json_entry = json_entries[uid]
+            # Entry exists in both - keep the more recently modified
+            # Use db_get_world_entry_hash to get hash for comparison
+            db_hash = db_get_world_entry_hash(world_name, uid)
+            
+            # If we have hash info and it matches, consider it same
+            if db_hash and json_entry.get("content") == db_entry.get("content"):
+                # Same content - keep DB version (user might have edited it)
+                merged_entries[uid] = db_entry
+                merged_count += 1
+            else:
+                # Different content - prefer JSON (more recent)
+                merged_entries[uid] = json_entry
+                merged_count += 1
+        else:
+            # Entry in DB but not in JSON - remove it
+            removed_count += 1
+            print(f"Sync: Removed entry '{uid}' (deleted from JSON)")
+    
+    # 2. Add new JSON entries (not in database)
+    for uid, json_entry in json_entries.items():
+        if uid not in db_entries:
+            merged_entries[uid] = json_entry
+            added_count += 1
+            print(f"Sync: Added new entry '{uid}' from JSON")
+    
+    # 3. Add entries that exist in both but JSON is newer
+    for uid, json_entry in json_entries.items():
+        if uid in db_entries:
+            db_entry = db_entries[uid]
+            # If content differs, use JSON version
+            db_hash = db_get_world_entry_hash(world_name, uid)
+            if not db_hash or json_entry.get("content") != db_entry.get("content"):
+                merged_entries[uid] = json_entry
+                merged_count += 1
+                print(f"Sync: Updated entry '{uid}' from JSON (newer version)")
+    
+    # Save merged result to database and JSON
+    if merged_entries:
+        if db_save_world(world_name, merged_entries):
+            # Update JSON file with merged result
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump({"entries": merged_entries}, f, indent=2, ensure_ascii=False)
+            print(f"Sync: Saved {len(merged_entries)} entries to DB and JSON")
+        else:
+            print(f"Sync: Failed to save merged world info to database")
+    else:
+        print(f"Sync: No changes to merge for world '{world_name}'")
+    
+    print(f"Sync Summary for '{world_name}': Added {added_count}, Removed {removed_count}, Merged {merged_count} entries")
+    return {"added": added_count, "removed": removed_count, "merged": merged_count}
+
+def import_world_info_json_files(force=False, smart_sync=True):
+    """Import world info JSON files with intelligent merging.
+    
+    Args:
+        force: If True, delete existing worlds before importing (useful for fixing corrupted entries)
+               DEPRECATED: Smart sync is now the default and recommended approach.
+        smart_sync: If True (default), performs intelligent merge of JSON and database entries.
+                    If False, uses legacy behavior (force parameter).
+    """
+    import_count = 0
+    
+    wi_dir = os.path.join(DATA_DIR, "worldinfo")
+    if os.path.exists(wi_dir):
+        for f in os.listdir(wi_dir):
+            if f.endswith(".json") and f != ".gitkeep":
+                name = f.replace(".json", "")
+                # Remove ALL SillyTavern suffixes: _plist, _worldinfo, _json
+                # This handles files like "exampleworld_plist_worldinfo.json" -> "exampleworld"
+                for suffix in ["_plist", "_worldinfo", "_json"]:
+                    if name.endswith(suffix):
+                        name = name[:-len(suffix)]
+                        # Only remove one suffix to handle files with multiple suffixes
+                        break
+                file_path = os.path.join(wi_dir, f)
+                
+                try:
+                    if force:
+                        # Force reimport mode (legacy behavior)
+                        db_delete_world(name)
+                        print(f"Force reimport: Deleted existing world '{name}'")
+                        
+                        # Load and import
+                        with open(file_path, "r", encoding="utf-8") as wf:
+                            world_data = json.load(wf)
+                        # db_save_world expects entries dict, not -> full object
+                        entries = world_data.get("entries", world_data) if isinstance(world_data, dict) else {}
+                        if entries and db_save_world(name, entries):
+                            import_count += 1
+                            print(f"Imported world info: {name}")
+                    elif smart_sync:
+                        # Smart sync mode (new default)
+                        result = sync_world_from_json(name)
+                        import_count += result.get("added", 0) + result.get("merged", 0)
+                    else:
+                        # Legacy mode: check if already in database
+                        existing = db_get_world(name)
+                        if existing is None:
+                            # Load and import
+                            with open(file_path, "r", encoding="utf-8") as wf:
+                                world_data = json.load(wf)
+                            # db_save_world expects entries dict, not -> full object
+                            entries = world_data.get("entries", world_data) if isinstance(world_data, dict) else {}
+                            if entries and db_save_world(name, entries):
+                                import_count += 1
+                                print(f"Imported world info: {name}")
+                except Exception as e:
+                    print(f"Failed to import world info {f}: {e}")
+    
+    if import_count > 0:
+        print(f"World info import complete: {import_count} worlds")
+    else:
+        print("World info import: No new JSON files to import")
+    
+    return import_count
+
+def import_chats_json_files():
+    """Import only chat JSON files not already in database."""
+    import_count = 0
+    
+    chat_dir = os.path.join(DATA_DIR, "chats")
+    if os.path.exists(chat_dir):
+        for f in os.listdir(chat_dir):
+            if f.endswith(".json") and f != ".gitkeep":
+                name = f.replace(".json", "")
+                file_path = os.path.join(chat_dir, f)
+                try:
+                    # Check if already in database
+                    existing = db_get_chat(name)
+                    if existing is None:
+                        # Load and import
+                        with open(file_path, "r", encoding="utf-8") as cf:
+                            chat_data = json.load(cf)
+                        if db_save_chat(name, chat_data):
+                            import_count += 1
+                            print(f"Imported chat: {name}")
+                except Exception as e:
+                    print(f"Failed to import chat {f}: {e}")
+    
+    if import_count > 0:
+        print(f"Chat import complete: {import_count} chats")
+    else:
+        print("Chat import: No new JSON files to import")
+    
+    return import_count
+
 # FastAPI startup and shutdown handlers
 @app.on_event("startup")
 async def startup_event():
-    """Initialize resources when the FastAPI app starts"""
+    """Initialize resources when FastAPI app starts"""
     global cleanup_task
     
     # Verify database integrity before proceeding
@@ -1024,12 +1683,16 @@ async def startup_event():
     print("Scanning for new JSON files to import...")
     auto_import_json_files()
     
+    # Populate FTS5 search index with existing messages (one-time migration)
+    print("Running FTS5 search index migration...")
+    migrate_populate_fts()
+    
     # Clean up old autosaved chats and empty chats on startup
     print("Running chat cleanup on startup...")
     old_chats = db_cleanup_old_autosaved_chats(days=7)
     empty_chats = db_cleanup_empty_chats()
     
-    # Start the periodic cleanup task when the app starts
+    # Start periodic cleanup task when app starts
     cleanup_task = asyncio.create_task(periodic_cleanup())
     print("Periodic cleanup task started")
 
@@ -1215,6 +1878,7 @@ def construct_prompt(request: PromptRequest):
     settings = request.settings
     system_prompt = settings.get("system_prompt", CONFIG["system_prompt"])
     user_persona = settings.get("user_persona", "")
+    user_name = settings.get("user_name", "")  # Get userName for relationships
     summary = request.summary or ""
     mode = request.mode or "narrator"
     
@@ -1224,10 +1888,11 @@ def construct_prompt(request: PromptRequest):
     is_narrator_mode = not request.characters
     
     # Collect active character names early for mode instruction
+    # ⚠️ CRITICAL: Always use get_character_name() for consistency with relationship tracking
+    # DO NOT: char['data']['name'] or name.split()[0] (first-name extraction breaks relationships)
     active_names = []
     for char_obj in request.characters:
-        data = char_obj.get("data", {})
-        active_names.append(data.get("name", "Unknown"))
+        active_names.append(get_character_name(char_obj))
     
     # === 1. SYSTEM PROMPT ===
     narrator_instruction = " Act as a Narrator. Describe the world and speak for any NPCs the user encounters. Do not speak for the {{user}}"
@@ -1285,7 +1950,7 @@ def construct_prompt(request: PromptRequest):
             # Use the standard 5-message window for subsequent turns
             recent_text = " ".join([m.content for m in request.messages[-5:]]).lower()
 
-        max_world_entries = settings.get("max_world_info_entries", 10)
+        max_world_entries = settings.get("max_world_info_entries", 3)
 
         # Use optimized semantic search with turn detection
         triggered_lore, canon_law_entries = get_cached_world_entries(
@@ -1296,8 +1961,18 @@ def construct_prompt(request: PromptRequest):
             is_initial_turn=is_initial_turn
         )
 
-        if triggered_lore:
-            full_prompt += "### World Knowledge:\n" + "\n".join(triggered_lore) + "\n"
+        # === 5.5. RELATIONSHIP CONTEXT (character-to-character and character-to-user dynamics) ===
+    # Only inject if there are characters to have relationships
+    if request.chat_id and (request.characters or user_name):
+        relationship_context = get_relationship_context(
+            chat_id=request.chat_id,
+            characters=active_names,  # Already extracted with get_character_name()
+            user_name=user_name,
+            recent_messages=request.messages[-10:]  # Last 10 messages for relevance filtering
+        )
+        
+        if relationship_context:
+            full_prompt += relationship_context + "\n"
 
     # === 6. CHARACTER PROFILES (characters exist in the world context) ===
     reinforcement_chunks = []
@@ -1323,8 +1998,8 @@ def construct_prompt(request: PromptRequest):
 
     # === 7. CHAT HISTORY (with reinforcement) ===
     full_prompt += "\n### Chat History:\n"
-    reinforce_freq = settings.get("reinforce_freq", 0)
-    world_reinforce_freq = settings.get("world_info_reinforce_freq", 5)  # Default to every 5 turns (optimized)
+    reinforce_freq = settings.get("reinforce_freq", 5)
+    world_reinforce_freq = settings.get("world_info_reinforce_freq", 4)  # Default to every 4 turns (optimized)
     
     # Track whether canon law was added in chat history to prevent duplication
     canon_added_in_history = False
@@ -1769,24 +2444,28 @@ async def edit_character_capsule_ai(req: CharacterEditFieldRequest):
 # World Info Generation Logic (Ported from world-gen-app)
 WORLD_PROMPTS = {
     "history": {
+        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory mentioned. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects)]\n\nRules:\n- One entry per line\n- Keep entries concise\n- Use parentheses for nested attributes\n- Output ONLY the PList entries, no explanations\n- Match the tone and maturity level of the provided context naturally",
         "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory mentioned in the chat. Use this exact format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects)]\n\nRules:\n- One entry per line\n- Keep entries concise\n- Use parentheses for nested attributes\n- Output ONLY the PList entries, no explanations",
         "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature/suggestive themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory. Include mature themes where appropriate. Use this format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects), intimate_aspects(relationships, desires, power dynamics)]\n\nRules:\n- One entry per line\n- Include suggestive details naturally\n- Output ONLY the PList entries",
         "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event or backstory. Include explicit adult themes naturally. Use this format:\n[EventName: type(event/era/myth), time(when), actors(who), result(what happened), legacy(effects), sexual_culture(attitudes, practices, taboos)]\n\nRules:\n- One entry per line\n- Include explicit adult content where relevant\n- Output ONLY the PList entries"
     },
     "locations": {
+        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each location, room, town, or area mentioned. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[LocationName(nickname if any): type(room/town/area), features(physical details), atmosphere(mood/feeling), purpose(what happens here), inhabitants(who is usually here)]\n\nRules:\n- One entry per line\n- Output ONLY the PList entries\n- Match the tone and maturity level of the provided context naturally",
         "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location, room, town, or area mentioned. Use this format:\n[LocationName(nickname if any): type(room/town/area), features(physical details), atmosphere(mood/feeling), purpose(what happens here), inhabitants(who is usually here)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
-        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location. Include suggestive atmosphere and uses. Use this format:\n[LocationName(nickname): type, features, atmosphere(mood), purpose(what happens), inhabitants(who), intimate_uses(private activities)]\n\nRules:\n- One entry per line- Output ONLY PList entries",
-        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location. Include explicit adult themes naturally. Format:\n[LocationName(nickname): type, features, atmosphere, purpose, inhabitants, sexual_activities(what happens), kinks_associated(themes)]\n\nRules:\n- One entry per line- Output ONLY PList entries"
+        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location. Include suggestive atmosphere and uses. Use this format:\n[LocationName(nickname): type, features, atmosphere(mood), purpose(what happens), inhabitants(who), intimate_uses(private activities)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
+        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location. Include explicit adult themes naturally. Format:\n[LocationName(nickname): type, features, atmosphere, purpose, inhabitants, sexual_activities(what happens), kinks_associated(themes)]\n\nRules:\n- One entry per line- Output ONLY the PList entries"
     },
     "creatures": {
-        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each creature, monster, or character archetype. Use this format:\n[CreatureName: type(creature/archetype), appearance(visual traits), behavior(typical actions), culture(social norms, beliefs), habitat(where found), attitude_toward_user(how they treat {{user}})]\n\nRules:\n- One entry per line- Output ONLY PList entries",
-        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries for creatures or archetypes. Include suggestive behavior and interactions. Format:\n[CreatureName: type, appearance, behavior, culture, habitat, attitude_toward_user, flirtation_style(how they seduce/interact)]\n\nRules:\n- One entry per line- Output ONLY PList entries",
-        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries including explicit adult content. Format:\n[CreatureName: type, appearance, behavior, culture, attitude_toward_user, sexual_behavior(explicit details), kinks(preferences), consent_culture(boundaries)]\n\nRules:\n- One entry per line- Output ONLY PList entries"
+        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each creature, monster, or character archetype. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[CreatureName: type(creature/archetype), appearance(visual traits), behavior(typical actions), culture(social norms, beliefs), habitat(where found), attitude_toward_user(how they treat {{user}})]\n\nRules:\n- One entry per line\n- Output ONLY the PList entries\n- Match the tone and maturity level of the provided context naturally",
+        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each creature, monster, or character archetype. Use this format:\n[CreatureName: type(creature/archetype), appearance(visual traits), behavior(typical actions), culture(social norms, beliefs), habitat(where found), attitude_toward_user(how they treat {{user}})]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
+        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries for creatures or archetypes. Include suggestive behavior and interactions. Format:\n[CreatureName: type, appearance, behavior, culture, habitat, attitude_toward_user, flirtation_style(how they seduce/interact)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
+        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries including explicit adult content. Format:\n[CreatureName: type, appearance, behavior, culture, attitude_toward_user, sexual_behavior(explicit details), kinks(preferences), consent_culture(boundaries)]\n\nRules:\n- One entry per line- Output ONLY the PList entries"
     },
     "factions": {
-        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each faction, group, or organization. Use this format:\n[FactionName: type(faction/guild/house/clique), members(who belongs), reputation(public image), goals(what they want), methods(how they operate), attitude_toward_user(how they treat {{user}}), rivals(opposing factions)]\n\nRules:\n- One entry per line- Output ONLY PList entries",
-        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries for factions. Include suggestive motivations and interactions. Format:\n[FactionName: type, members, reputation, goals, methods, attitude_toward_user, social_dynamics(power, romance, rivalries), intimate_culture(dating norms, boundaries)]\n\nRules:\n- One entry per line- Output ONLY PList entries",
-        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries including explicit adult content. Format:\n[FactionName: type, members, reputation, goals, methods, attitude_toward_user, sexual_culture(practices, rituals), kinks_favored(group preferences), initiation(how to join)]\n\nRules:\n- One entry per line- Output ONLY PList entries"
+        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each faction, group, or organization. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[FactionName: type(faction/guild/house/clique), members(who belongs), reputation(public image), goals(what they want), methods(how they operate), attitude_toward_user(how they treat {{user}}), rivals(opposing factions)]\n\nRules:\n- One entry per line\n- Output ONLY the PList entries\n- Match the tone and maturity level of the provided context naturally",
+        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each faction, group, or organization. Use this format:\n[FactionName: type(faction/guild/house/clique), members(who belongs), reputation(public image), goals(what they want), methods(how they operate), attitude_toward_user(how they treat {{user}}), rivals(opposing factions)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
+        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries for factions. Include suggestive motivations and interactions. Format:\n[FactionName: type, members, reputation, goals, methods, attitude_toward_user, social_dynamics(power, romance, rivalries), intimate_culture(dating norms, boundaries)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
+        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries including explicit adult content. Format:\n[FactionName: type, members, reputation, goals, methods, attitude_toward_user, sexual_culture(practices, rituals), kinks_favored(group preferences), initiation(how to join)]\n\nRules:\n- One entry per line- Output ONLY the PList entries"
     }
 }
 
@@ -2090,6 +2769,20 @@ async def chat(request: PromptRequest):
                 tokens = await get_token_count(prompt)
             except Exception as e:
                 print(f"Summarization failed: {e}")
+        
+        # === RELATIONSHIP ANALYSIS (Step 5 of relationship tracker) ===
+        # Trigger relationship analysis at summarization boundary
+        # Extract character names using get_character_name() for consistency
+        active_character_names = []
+        for char_obj in request.characters:
+            active_character_names.append(get_character_name(char_obj))
+        
+        await analyze_and_update_relationships(
+            chat_id=current_request.chat_id,
+            messages=current_request.messages,
+            characters=active_character_names,
+            user_name=user_name
+        )
 
     print(f"Generated Prompt ({tokens} tokens):\n{prompt}")
     
@@ -2338,6 +3031,102 @@ async def reimport_json_files():
         print(f"Re-import failed: {e}")
         return {"success": False, "error": str(e)}
 
+@app.post("/api/reimport/characters")
+async def reimport_characters():
+    """Manually trigger re-import of character JSON files only."""
+    try:
+        import_count = import_characters_json_files()
+        return {
+            "success": True,
+            "imported": {"characters": import_count},
+            "message": f"Imported {import_count} characters"
+        }
+    except Exception as e:
+        print(f"Character re-import failed: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/reimport/worldinfo")
+async def reimport_world_info(request: dict = None):
+    """Manually trigger re-import or smart sync of world info JSON files.
+    
+    Request body:
+        smart_sync: If True (default), performs intelligent merge (preserves user changes)
+                   If False, performs force reimport (deletes database entries first)
+    """
+    try:
+        # Default to smart sync (True) if not specified
+        smart_sync = True
+        force = False
+        
+        if request:
+            if "smart_sync" in request:
+                smart_sync = bool(request["smart_sync"])
+            if "force" in request:
+                force = bool(request["force"])
+        
+        # Smart sync mode: intelligent merge
+        if smart_sync and not force:
+            wi_dir = os.path.join(DATA_DIR, "worldinfo")
+            if os.path.exists(wi_dir):
+                total_added = 0
+                total_removed = 0
+                total_merged = 0
+                
+                for f in os.listdir(wi_dir):
+                    if f.endswith(".json") and f != ".gitkeep":
+                        name = f.replace(".json", "")
+                        # Remove ALL SillyTavern suffixes: _plist, _worldinfo, _json
+                        for suffix in ["_plist", "_worldinfo", "_json"]:
+                            if name.endswith(suffix):
+                                name = name[:-len(suffix)]
+                                break
+                        
+                        result = sync_world_from_json(name)
+                        total_added += result.get("added", 0)
+                        total_removed += result.get("removed", 0)
+                        total_merged += result.get("merged", 0)
+                
+                message = f"Synced: {total_added} added, {total_removed} removed, {total_merged} merged entries from JSON files"
+                return {
+                    "success": True,
+                    "synced": {
+                        "added": total_added,
+                        "removed": total_removed,
+                        "merged": total_merged,
+                        "total": total_added + total_removed + total_merged
+                    },
+                    "message": message
+                }
+        # Force reimport mode (legacy behavior)
+        import_count = import_world_info_json_files(force=force)
+        
+        message = f"Imported {import_count} world info files"
+        if force and import_count > 0:
+            message += " (force reimport - deleted existing entries first)"
+        
+        return {
+            "success": True,
+            "imported": {"worlds": import_count},
+            "message": message
+        }
+    except Exception as e:
+        print(f"World info re-import failed: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/reimport/chats")
+async def reimport_chats():
+    """Manually trigger re-import of chat JSON files only."""
+    try:
+        import_count = import_chats_json_files()
+        return {
+            "success": True,
+            "imported": {"chats": import_count},
+            "message": f"Imported {import_count} chat files"
+        }
+    except Exception as e:
+        print(f"Chat re-import failed: {e}")
+        return {"success": False, "error": str(e)}
+
 @app.get("/api/characters")
 async def list_characters():
     """Get all characters from database."""
@@ -2434,13 +3223,13 @@ async def save_world_info(request: dict):
     except Exception as e:
         print(f"Error saving world info to database: {e}")
     
-    # Clear the in-memory embeddings cache to force recomputation
+    # Clear in-memory embeddings cache to force recomputation
     # The semantic search engine will recompute embeddings on next search
-    # since the world info content hash will have changed
+    # since world info content hash will have changed
     semantic_search_engine.embeddings_cache.clear()
     print(f"Cleared semantic search embeddings cache for world info update: {name}")
     
-    # Also clear the world info search results cache
+    # Also clear world info search results cache
     WORLD_INFO_CACHE.clear()
     
     # Also export to JSON for backward compatibility
@@ -2450,6 +3239,35 @@ async def save_world_info(request: dict):
     
     print(f"World info saved to DB and exported to JSON: {name}")
     return {"success": True}
+
+@app.delete("/api/world-info/{world_name}")
+async def delete_world_info_endpoint(world_name: str):
+    """Delete a world info from database and JSON file with change logging."""
+    if not world_name:
+        return {"error": "No world name provided"}
+    
+    try:
+        # Get world data before deletion for change logging
+        old_world = db_get_world(world_name)
+        
+        # Delete from database
+        if not db_delete_world(world_name):
+            return {"error": "Failed to delete world"}
+        
+        # Also delete JSON file
+        file_path = os.path.join(DATA_DIR, "worldinfo", f"{world_name}.json")
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        # Refresh world info list in memory
+        # (Frontend will fetch updated list from API)
+        
+        print(f"World info deleted: {world_name}")
+        return {"success": True, "name": world_name}
+        
+    except Exception as e:
+        print(f"Error deleting world info: {e}")
+        return {"error": str(e)}
 
 # Chat session management
 @app.get("/api/chats")
@@ -2482,19 +3300,24 @@ async def list_chats():
         return chats
 
 @app.get("/api/chats/{name}")
-async def load_chat(name: str):
-    """Load chat from database."""
+async def load_chat(name: str, include_summarized: bool = False):
+    """Load chat from database with optional archived messages.
+    
+    Query parameter:
+        include_summarized: If True, include archived/summarized messages.
+                          If False (default), only return active messages.
+    """
     try:
-        chat_data = db_get_chat(name)
+        chat_data = db_get_chat(name, include_summarized=include_summarized)
         if chat_data:
-            # Ensure id is always set (chat name is the id)
+            # Ensure id is always set (chat name is -> id)
             if 'id' not in chat_data:
                 chat_data['id'] = name
             return chat_data
     except Exception as e:
         print(f"Error loading chat from database: {e}")
     
-    # Fall back to JSON file
+    # Fall back to JSON file (doesn't support include_summarized)
     file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
     if os.path.exists(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
@@ -2621,6 +3444,17 @@ async def fork_chat(request: ForkRequest):
         db_save_chat(base_name, branch_data, autosaved=True)
     except Exception as e:
         print(f"Error saving fork to database: {e}")
+    
+    # === RELATIONSHIP TRACKER (Step 6): Copy relationship states for branch ===
+    # Copy relationship states from origin chat to new branch
+    try:
+        db_copy_relationship_states_for_branch(
+            origin_chat_id=origin_chat_name,
+            new_chat_id=base_name
+        )
+        print(f"[RELATIONSHIP] Copied states from {origin_chat_name} to {base_name}")
+    except Exception as e:
+        print(f"[RELATIONSHIP] Failed to copy relationship states: {e}")
     
     # Also export to JSON for backward compatibility
     branch_file_path = os.path.join(DATA_DIR, "chats", f"{base_name}.json")
@@ -2824,7 +3658,7 @@ async def edit_world_entry(req: WorldEditRequest):
 
 @app.post("/api/world-info/edit-entry-ai")
 async def edit_world_entry_ai(req: WorldEditEntryRequest):
-    """Use AI to generate or improve a world info entry."""
+    """Use AI to generate or improve a world info entry. For new entries (entry_uid is null), only generates content without updating an existing entry."""
     try:
         file_path = os.path.join(DATA_DIR, "worldinfo", f"{req.world_name}.json")
         if not os.path.exists(file_path):
@@ -2833,8 +3667,9 @@ async def edit_world_entry_ai(req: WorldEditEntryRequest):
         with open(file_path, "r", encoding="utf-8") as f:
             world_data = json.load(f)
         
-        # Validate entry exists
-        if req.entry_uid not in world_data.get("entries", {}):
+        # For new entries (entry_uid is null), just generate content without validation
+        # For existing entries, validate that entry_uid exists
+        if req.entry_uid is not None and req.entry_uid not in world_data.get("entries", {}):
             return {"success": False, "error": "Entry not found"}
         
         # Use existing generation logic with context
@@ -2850,12 +3685,18 @@ async def edit_world_entry_ai(req: WorldEditEntryRequest):
         result = await generate_world_entries(world_req)
         
         if result["success"]:
+            # For new entries (entry_uid is null), just return the generated text
+            # The frontend will use this to populate the content field
+            if req.entry_uid is None:
+                return {"success": True, "text": result["text"]}
+            
+            # For existing entries, update with generated content
             # Parse the generated entries and update the specific entry
             lines = result["text"].split('\n')
             for line in lines:
                 parsed = parse_plist_line(line)
                 if parsed:
-                    # Update the specific entry with the new content
+                    # Update the specific entry with new content
                     if req.entry_uid in world_data["entries"]:
                         world_data["entries"][req.entry_uid]["content"] = parsed["content"]
                         world_data["entries"][req.entry_uid]["key"] = parsed["keys"]
@@ -3089,9 +3930,9 @@ async def get_world_info_reinforcement_config():
     return {
         "success": True,
         "config": {
-            "world_info_reinforce_freq": 3,  # Default value
-            "description": "Frequency (in turns) for reinforcing canon law entries. 1 = every turn, 3 = every 3 turns, etc.",
-            "default": 3,
+            "world_info_reinforce_freq": 4,  # Default value
+            "description": "Frequency (in turns) for reinforcing canon law entries. 1 = every turn, 4 = every 4 turns, etc.",
+            "default": 4,
             "min": 1,
             "max": 100
         }
@@ -3119,6 +3960,115 @@ async def set_world_info_reinforcement_config(request: dict):
         
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+# ============================================================================
+# SEARCH API ENDPOINTS (FTS5 Full-Text Search)
+# ============================================================================
+
+# Search Request Models
+class SearchRequest(BaseModel):
+    query: str
+    chat_id: Optional[str] = None
+    speaker: Optional[str] = None
+    start_date: Optional[str] = None  # ISO format: "2026-01-01"
+    end_date: Optional[str] = None
+    limit: Optional[int] = 50
+
+
+@app.post("/api/search/messages")
+async def search_messages(request: SearchRequest):
+    """
+    Search across chat messages with filters.
+    
+    FTS5 query syntax:
+    - Simple: "flame sword"
+    - Phrase: '"flame sword"' (exact phrase)
+    - Boolean: "flame AND sword", "flame OR sword"
+    - Exclude: "flame NOT ice"
+    """
+    try:
+        # Convert ISO dates to Unix timestamps if provided
+        start_ts = None
+        end_ts = None
+        
+        if request.start_date:
+            from datetime import datetime
+            start_ts = int(datetime.fromisoformat(request.start_date).timestamp())
+        
+        if request.end_date:
+            from datetime import datetime
+            end_ts = int(datetime.fromisoformat(request.end_date).timestamp())
+        
+        results = db_search_messages(
+            query=request.query,
+            chat_id=request.chat_id,
+            speaker=request.speaker,
+            start_timestamp=start_ts,
+            end_timestamp=end_ts,
+            limit=request.limit
+        )
+        
+        return {
+            "success": True,
+            "query": request.query,
+            "filters": {
+                "chat_id": request.chat_id,
+                "speaker": request.speaker,
+                "date_range": f"{request.start_date or 'all'} to {request.end_date or 'all'}"
+            },
+            "results": results,
+            "count": len(results)
+        }
+    
+    except Exception as e:
+        print(f"Search error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/search/messages/{message_id}/context")
+async def get_message_context_endpoint(message_id: int, context_size: int = 1):
+    """
+    Get a message with surrounding context for "jump to message" feature.
+    """
+    try:
+        context = db_get_message_context(message_id, context_size)
+        
+        if not context:
+            return {"success": False, "error": "Message not found"}
+        
+        return {
+            "success": True,
+            "context": context
+        }
+    
+    except Exception as e:
+        print(f"Error getting message context: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/search/filters")
+async def get_search_filters():
+    """
+    Get available filter options for search UI.
+    """
+    try:
+        speakers = db_get_available_speakers()
+        
+        # Get available chats
+        chats = db_get_all_chats()
+        
+        return {
+            "success": True,
+            "filters": {
+                "speakers": speakers,
+                "chats": [{"id": c['id'], "name": c.get('branch_name') or c['id']} for c in chats]
+            }
+        }
+    
+    except Exception as e:
+        print(f"Error getting search filters: {e}")
+        return {"success": False, "error": str(e)}
+
 
 @app.get("/api/world-info/reinforcement/status")
 async def get_world_info_reinforcement_status():
@@ -3205,6 +4155,75 @@ async def get_entity_last_change(entity_type: str, entity_id: str):
         return {"success": False, "error": str(e)}
 
 
+@app.post("/api/undo/last")
+async def undo_last_delete_endpoint(request: dict):
+    """Undo the last DELETE operation for an entity.
+    
+    Request body:
+    {
+        "entity_type": "character" | "world_info" | "chat",
+        "entity_id": "alice.json" | "FantasyWorld" | "chat_id"
+    }
+    
+    Returns:
+    {
+        "success": true,
+        "restored_entity": {...}
+    }
+    """
+    try:
+        entity_type = request.get("entity_type")
+        entity_id = request.get("entity_id")
+        
+        if not entity_type or not entity_id:
+            return {"success": False, "error": "entity_type and entity_id are required"}
+        
+        if entity_type not in ["character", "world_info", "chat"]:
+            return {"success": False, "error": "Invalid entity_type. Must be 'character', 'world_info', or 'chat'"}
+        
+        # Call database undo function
+        result = undo_last_delete(entity_type, entity_id)
+        return result
+    except Exception as e:
+        print(f"Error in undo_last_delete: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/changes/restore")
+async def restore_version(request: dict):
+    """Restore an entity to a specific change version.
+    
+    Request body:
+    {
+        "change_id": 123
+    }
+    
+    Returns:
+    {
+        "success": true,
+        "restored_entity": {...}
+    }
+    """
+    try:
+        change_id = request.get("change_id")
+        
+        if not change_id:
+            return {"success": False, "error": "change_id is required"}
+        
+        # Validate change_id is an integer
+        try:
+            change_id = int(change_id)
+        except (ValueError, TypeError):
+            return {"success": False, "error": "change_id must be a valid integer"}
+        
+        # Call database restore function
+        result = restore_version(change_id)
+        return result
+    except Exception as e:
+        print(f"Error in restore_version: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @app.post("/api/changes/cleanup")
 async def cleanup_old_changes(request: dict = None):
     """Manually trigger cleanup of old change log entries.
@@ -3266,6 +4285,53 @@ async def get_change_log_stats():
         return {
             "success": True,
             "stats": stats
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ============================================================================
+# SOFT DELETE MANAGEMENT ENDPOINTS (v1.5.3)
+# ============================================================================
+
+@app.get("/api/chats/summarized/stats")
+async def get_summarized_stats():
+    """Get statistics about summarized (archived) messages."""
+    try:
+        from app.database import db_get_summarized_message_count
+        count = db_get_summarized_message_count()
+        return {
+            "success": True,
+            "stats": {
+                "summarized_message_count": count,
+                "description": "Messages marked as summarized (archived but not deleted)"
+            }
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/chats/cleanup-old-summarized")
+async def cleanup_old_summarized(request: dict = None):
+    """Permanently delete summarized messages older than specified days.
+    
+    Optional: Pass {"days": N} to specify cleanup window (default: 90 days).
+    This is optional cleanup for users who want to reclaim disk space.
+    """
+    try:
+        days = 90
+        if request and "days" in request:
+            days = int(request["days"])
+            if days < 1 or days > 365:
+                return {"success": False, "error": "Days must be between 1 and 365"}
+        
+        from app.database import db_cleanup_old_summarized_messages
+        deleted_count = db_cleanup_old_summarized_messages(days)
+        
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "message": f"Cleaned up {deleted_count} old summarized messages (older than {days} days)"
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

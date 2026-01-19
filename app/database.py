@@ -8,6 +8,7 @@ import json
 import time
 import threading
 import os
+import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 from contextlib import contextmanager
 import numpy as np
@@ -112,9 +113,17 @@ def init_db():
                 speaker TEXT,
                 image_url TEXT,
                 timestamp INTEGER,
+                summarized INTEGER DEFAULT 0,
                 FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
             )
         """)
+        
+        # Add summarized column if it doesn't exist (for older databases)
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN summarized INTEGER DEFAULT 0")
+            print("Added summarized column to messages table")
+        except:
+            pass  # Column already exists
         
         # Image metadata table
         cursor.execute("""
@@ -165,7 +174,8 @@ def init_db():
                 operation TEXT NOT NULL,
                 old_data TEXT,
                 new_data TEXT,
-                timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+                timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                undo_state TEXT DEFAULT 'active'
             )
         """)
         
@@ -177,6 +187,43 @@ def init_db():
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_change_log_time 
             ON change_log(timestamp DESC)
+        """)
+        
+        # Relationship state tracking table (for relationship tracking feature)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS relationship_states (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                character_from TEXT NOT NULL,
+                character_to TEXT NOT NULL,
+                
+                -- Five core dimensions (0-100 scale)
+                trust INTEGER DEFAULT 50,
+                emotional_bond INTEGER DEFAULT 50,
+                conflict INTEGER DEFAULT 50,
+                power_dynamic INTEGER DEFAULT 50,
+                fear_anxiety INTEGER DEFAULT 50,
+                
+                -- Metadata
+                last_updated INTEGER,
+                last_analyzed_message_id INTEGER,
+                interaction_count INTEGER DEFAULT 0,
+                history TEXT,
+                
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE,
+                UNIQUE(chat_id, character_from, character_to)
+            )
+        """)
+        
+        # Performance indexes for relationship_states
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_relationship_states_chat
+            ON relationship_states(chat_id)
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_relationship_states_chars
+            ON relationship_states(character_from, character_to)
         """)
         
         conn.commit()
@@ -587,8 +634,16 @@ def db_get_all_chats() -> List[Dict[str, Any]]:
         return chats
 
 
-def db_get_chat(chat_id: str) -> Optional[Dict[str, Any]]:
-    """Get a specific chat with all its messages."""
+def db_get_chat(chat_id: str, include_summarized: bool = False) -> Optional[Dict[str, Any]]:
+    """Get a specific chat with all its messages.
+    
+    Args:
+        chat_id: Unique identifier for the chat
+        include_summarized: If True, include archived/summarized messages. Default False.
+    
+    Returns:
+        Chat data with messages, summary, and metadata, or None if not found
+    """
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -601,13 +656,23 @@ def db_get_chat(chat_id: str) -> Optional[Dict[str, Any]]:
         if not row:
             return None
         
-        # Get messages
-        cursor.execute("""
-            SELECT id, role, content, speaker, image_url, timestamp
-            FROM messages
-            WHERE chat_id = ?
-            ORDER BY timestamp ASC
-        """, (chat_id,))
+        # Get messages - only active unless include_summarized is True
+        if include_summarized:
+            # Get all messages (both active and summarized)
+            cursor.execute("""
+                SELECT id, role, content, speaker, image_url, timestamp, summarized
+                FROM messages
+                WHERE chat_id = ?
+                ORDER BY timestamp ASC
+            """, (chat_id,))
+        else:
+            # Get only active (non-summarized) messages for normal use
+            cursor.execute("""
+                SELECT id, role, content, speaker, image_url, timestamp, summarized
+                FROM messages
+                WHERE chat_id = ? AND summarized = 0
+                ORDER BY timestamp ASC
+            """, (chat_id,))
         
         messages = []
         for msg_row in cursor.fetchall():
@@ -616,7 +681,8 @@ def db_get_chat(chat_id: str) -> Optional[Dict[str, Any]]:
                 'role': msg_row['role'],
                 'content': msg_row['content'],
                 'speaker': msg_row['speaker'],
-                'image': msg_row['image_url']
+                'image': msg_row['image_url'],
+                'summarized': msg_row['summarized']
             })
         
         metadata = json.loads(row['metadata']) if row['metadata'] else {}
@@ -632,7 +698,11 @@ def db_get_chat(chat_id: str) -> Optional[Dict[str, Any]]:
 
 
 def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> bool:
-    """Save or update a chat session with all messages.
+    """Save or update a chat session with all messages using soft delete.
+    
+    Uses soft delete for archived messages: when messages are not included in the
+    current save (e.g., after summarization), they are marked as summarized=1
+    instead of being deleted. This preserves message history for search and analysis.
     
     Args:
         chat_id: Unique identifier for the chat
@@ -666,28 +736,73 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (chat_id, branch_name, summary, metadata_json, timestamp, autosaved))
             
-            # Delete existing messages
-            cursor.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+            # Get all existing message IDs in database for this chat
+            cursor.execute("""
+                SELECT id, summarized FROM messages 
+                WHERE chat_id = ?
+            """, (chat_id,))
             
-            # Insert messages
-            for msg in data.get('messages', []):
+            existing_messages = {row['id']: row['summarized'] for row in cursor.fetchall()}
+            
+            # Get IDs from current save
+            messages_to_save = data.get('messages', [])
+            current_ids = set(m.get('id') for m in messages_to_save if m.get('id'))
+            
+            # Soft delete: Mark messages not in current save as summarized
+            # This preserves history instead of deleting
+            messages_to_archive = existing_messages.keys() - current_ids
+            
+            for msg_id in messages_to_archive:
                 cursor.execute("""
-                    INSERT INTO messages 
-                    (chat_id, role, content, speaker, image_url, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (
-                    chat_id,
-                    msg.get('role', 'user'),
-                    msg.get('content', ''),
-                    msg.get('speaker'),
-                    msg.get('image'),
-                    msg.get('timestamp', int(time.time()))
-                ))
+                    UPDATE messages SET summarized = 1 WHERE id = ?
+                """, (msg_id,))
+            
+            # Insert or update messages in current save
+            for msg in messages_to_save:
+                msg_id = msg.get('id')
+                
+                if msg_id:
+                    # Message has an existing ID - use INSERT OR REPLACE to preserve it
+                    # Also ensure summarized=0 for active messages
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO messages 
+                        (id, chat_id, role, content, speaker, image_url, timestamp, summarized)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        msg_id,
+                        chat_id,
+                        msg.get('role', 'user'),
+                        msg.get('content', ''),
+                        msg.get('speaker'),
+                        msg.get('image'),
+                        msg.get('timestamp', int(time.time())),
+                        0  # Active messages are not summarized
+                    ))
+                else:
+                    # New message without ID - let database auto-generate
+                    cursor.execute("""
+                        INSERT INTO messages 
+                        (chat_id, role, content, speaker, image_url, timestamp, summarized)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        chat_id,
+                        msg.get('role', 'user'),
+                        msg.get('content', ''),
+                        msg.get('speaker'),
+                        msg.get('image'),
+                        msg.get('timestamp', int(time.time())),
+                        0  # Active messages are not summarized
+                    ))
             
             conn.commit()
+            
+            # Log if any messages were archived
+            if messages_to_archive:
+                print(f"Archived {len(messages_to_archive)} messages for chat {chat_id} (soft delete)")
+            
             return True
     except Exception as e:
-        print(f"Error saving chat to database: {e}")
+        print(f"Error saving chat to database (soft delete): {e}")
         return False
 
 
@@ -1317,6 +1432,198 @@ def db_cleanup_old_changes(days: int = 30) -> bool:
         return False
 
 
+def mark_change_undone(change_id: int) -> bool:
+    """Mark a change log entry as undone to prevent re-undo.
+    
+    Args:
+        change_id: ID of the change to mark as undone
+    
+    Returns:
+        True if marked successfully, False otherwise
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE change_log
+                SET undo_state = 'undone'
+                WHERE id = ?
+            """, (change_id,))
+            conn.commit()
+            marked = cursor.rowcount > 0
+            if marked:
+                print(f"Marked change {change_id} as undone")
+            return marked
+    except Exception as e:
+        print(f"Error marking change as undone: {e}")
+        return False
+
+
+def undo_last_delete(entity_type: str, entity_id: str) -> Optional[Dict[str, Any]]:
+    """Undo the last DELETE operation for an entity.
+    
+    Finds the most recent DELETE operation for the specified entity and restores
+    it from the old_data snapshot.
+    
+    Args:
+        entity_type: Type of entity ('character', 'world_info', or 'chat')
+        entity_id: ID of the entity (filename, name, or chat_id)
+    
+    Returns:
+        Dictionary with restoration details or None if no DELETE found
+    """
+    try:
+        # Find most recent DELETE operation that hasn't been undone
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, old_data, timestamp
+                FROM change_log
+                WHERE entity_type = ? 
+                  AND entity_id = ? 
+                  AND operation = 'DELETE' 
+                  AND undo_state = 'active'
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (entity_type, entity_id))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
+            
+            change_id = row['id']
+            old_data = json.loads(row['old_data']) if row['old_data'] else None
+            
+            if not old_data:
+                return None
+            
+            # Restore based on entity type
+            if entity_type == 'character':
+                # Restore character from old_data
+                filename = entity_id
+                if db_save_character(old_data, filename):
+                    mark_change_undone(change_id)
+                    return {
+                        'success': True,
+                        'entity_type': entity_type,
+                        'entity_id': entity_id,
+                        'restored_name': old_data.get('data', {}).get('name', 'Unknown'),
+                        'change_id': change_id
+                    }
+            
+            elif entity_type == 'world_info':
+                # Restore world info from old_data
+                world_name = entity_id
+                entries = old_data.get('entries', {})
+                if db_save_world(world_name, entries):
+                    mark_change_undone(change_id)
+                    return {
+                        'success': True,
+                        'entity_type': entity_type,
+                        'entity_id': entity_id,
+                        'restored_name': world_name,
+                        'change_id': change_id
+                    }
+            
+            elif entity_type == 'chat':
+                # Restore chat from old_data
+                chat_id = entity_id
+                if db_save_chat(chat_id, old_data):
+                    mark_change_undone(change_id)
+                    return {
+                        'success': True,
+                        'entity_type': entity_type,
+                        'entity_id': entity_id,
+                        'restored_name': chat_id,
+                        'change_id': change_id
+                    }
+            
+            return None
+            
+    except Exception as e:
+        print(f"Error undoing last delete: {e}")
+        return None
+
+
+def restore_version(change_id: int) -> Optional[Dict[str, Any]]:
+    """Restore an entity to the state it was in at a specific change.
+    
+    Args:
+        change_id: ID of the change to restore to
+    
+    Returns:
+        Dictionary with restoration details or None if change not found
+    """
+    try:
+        # Get the change record
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT entity_type, entity_id, operation, old_data, new_data, timestamp
+                FROM change_log
+                WHERE id = ?
+            """, (change_id,))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
+            
+            entity_type = row['entity_type']
+            entity_id = row['entity_id']
+            operation = row['operation']
+            restore_data = json.loads(row['old_data']) if row['old_data'] else None
+            
+            if not restore_data:
+                return None
+            
+            # Restore based on entity type and operation
+            if entity_type == 'character':
+                filename = entity_id
+                if db_save_character(restore_data, filename):
+                    # Log new change
+                    log_change('character', filename, 'RESTORE', None, restore_data)
+                    return {
+                        'success': True,
+                        'entity_type': entity_type,
+                        'entity_id': entity_id,
+                        'restored_name': restore_data.get('data', {}).get('name', 'Unknown'),
+                        'change_id': change_id
+                    }
+            
+            elif entity_type == 'world_info':
+                world_name = entity_id
+                entries = restore_data.get('entries', {})
+                if db_save_world(world_name, entries):
+                    # Log new change
+                    log_change('world_info', world_name, 'RESTORE', None, restore_data)
+                    return {
+                        'success': True,
+                        'entity_type': entity_type,
+                        'entity_id': entity_id,
+                        'restored_name': world_name,
+                        'change_id': change_id
+                    }
+            
+            elif entity_type == 'chat':
+                chat_id = entity_id
+                if db_save_chat(chat_id, restore_data):
+                    # Log new change
+                    log_change('chat', chat_id, 'RESTORE', None, restore_data)
+                    return {
+                        'success': True,
+                        'entity_type': entity_type,
+                        'entity_id': entity_id,
+                        'restored_name': chat_id,
+                        'change_id': change_id
+                    }
+            
+            return None
+            
+    except Exception as e:
+        print(f"Error restoring version: {e}")
+        return None
+
+
 # ============================================================================
 # WORLD INFO HASH OPERATIONS
 # ============================================================================
@@ -1411,6 +1718,416 @@ def db_get_world_content_hash(world_name: str) -> str:
 
 
 # ============================================================================
+# SOFT DELETE HELPER FUNCTIONS
+# ============================================================================
+
+def db_cleanup_old_summarized_messages(days: int = 90) -> int:
+    """Permanently delete summarized messages older than specified days.
+    
+    This is optional cleanup for users who want to reclaim disk space.
+    
+    Args:
+        days: Number of days before a summarized message is deleted
+    
+    Returns:
+        Number of messages deleted
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff_time = int(time.time()) - (days * 24 * 60 * 60)
+            
+            cursor.execute("""
+                DELETE FROM messages 
+                WHERE summarized = 1 AND timestamp < ?
+            """, (cutoff_time,))
+            
+            conn.commit()
+            deleted_count = cursor.rowcount
+            
+            if deleted_count > 0:
+                print(f"Cleaned up {deleted_count} old summarized messages (older than {days} days)")
+            
+            return deleted_count
+    except Exception as e:
+        print(f"Error cleaning up old summarized messages: {e}")
+        return 0
+
+
+def db_get_summarized_message_count() -> int:
+    """Get count of summarized messages in database.
+    
+    Returns:
+        Number of summarized messages
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM messages WHERE summarized = 1")
+            row = cursor.fetchone()
+            return row['count'] if row else 0
+    except Exception as e:
+        print(f"Error counting summarized messages: {e}")
+        return 0
+
+
+def db_search_messages_with_summarized(query: str, chat_id: Optional[str] = None,
+                                    speaker: Optional[str] = None,
+                                    include_summarized: bool = True,
+                                    limit: int = 50) -> List[Dict[str, Any]]:
+    """Search messages across active and optionally summarized messages.
+    
+    Args:
+        query: Search query string
+        chat_id: Optional filter by specific chat
+        speaker: Optional filter by speaker name
+        include_summarized: If True, include summarized messages in search
+        limit: Maximum number of results to return
+    
+    Returns:
+        List of message dictionaries with match metadata
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Build WHERE clause
+            conditions = []
+            params = []
+            
+            # Include summarized or not
+            if include_summarized:
+                # Search all messages (active + summarized)
+                conditions.append("1=1")  # Always true
+            else:
+                # Search only active messages
+                conditions.append("summarized = 0")
+            
+            if chat_id:
+                conditions.append("chat_id = ?")
+                params.append(chat_id)
+            
+            if speaker:
+                conditions.append("speaker = ?")
+                params.append(speaker)
+            
+            where_clause = " AND ".join(conditions)
+            params.append(f"%{query}%")
+            params.append(limit)
+            
+            cursor.execute(f"""
+                SELECT m.id, m.chat_id, m.role, m.content, m.speaker, 
+                       m.timestamp, m.summarized, c.branch_name
+                FROM messages m
+                LEFT JOIN chats c ON m.chat_id = c.id
+                WHERE {where_clause} AND m.content LIKE ?
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+            """, params)
+            
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    'id': row['id'],
+                    'chat_id': row['chat_id'],
+                    'role': row['role'],
+                    'content': row['content'],
+                    'speaker': row['speaker'],
+                    'timestamp': row['timestamp'],
+                    'summarized': row['summarized'],
+                    'branch_name': row['branch_name']
+                })
+            
+            return results
+    except Exception as e:
+        print(f"Error searching messages (soft delete): {e}")
+        return []
+
+
+# ============================================================================
+# FTS5 FULL-TEXT SEARCH OPERATIONS
+# ============================================================================
+
+def init_fts_table() -> bool:
+    """Initialize FTS5 virtual table for message search."""
+    try:
+        with get_connection() as conn:
+            # Create FTS5 virtual table for messages
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                    message_id UNINDEXED,
+                    chat_id UNINDEXED,
+                    content,
+                    speaker,
+                    role,
+                    timestamp UNINDEXED,
+                    tokenize='porter unicode61'
+                )
+            """)
+            
+            # Create triggers to keep FTS5 in sync with messages table
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages
+                BEGIN
+                    INSERT INTO messages_fts (message_id, chat_id, content, speaker, role, timestamp)
+                    VALUES (NEW.id, NEW.chat_id, NEW.content, NEW.speaker, NEW.role, NEW.timestamp)
+                END
+            """)
+            
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages
+                BEGIN
+                    DELETE FROM messages_fts WHERE message_id = OLD.id
+                END
+            """)
+            
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
+                BEGIN
+                    DELETE FROM messages_fts WHERE message_id = OLD.id
+                    INSERT INTO messages_fts (message_id, chat_id, content, speaker, role, timestamp)
+                    VALUES (NEW.id, NEW.chat_id, NEW.content, NEW.speaker, NEW.role, NEW.timestamp)
+                END
+            """)
+            
+            conn.commit()
+            print("FTS5 search table initialized successfully")
+            return True
+    except Exception as e:
+        print(f"Error initializing FTS5 table: {e}")
+        return False
+
+
+def migrate_populate_fts() -> None:
+    """One-time migration to populate FTS5 index with existing messages.
+    
+    Should be called on startup if FTS5 table is empty.
+    """
+    try:
+        with get_connection() as conn:
+            # Check if FTS5 table has any data
+            cursor = conn.execute("SELECT COUNT(*) as count FROM messages_fts").fetchone()
+            if cursor['count'] > 0:
+                print("FTS5 table already populated, skipping migration")
+                return
+            
+            # Populate FTS5 with all existing messages
+            cursor.execute("""
+                INSERT INTO messages_fts (message_id, chat_id, content, speaker, role, timestamp)
+                SELECT id, chat_id, content, speaker, role, timestamp
+                FROM messages
+            """)
+            conn.commit()
+            
+            # Get count of migrated messages
+            migrated_count = conn.execute("SELECT COUNT(*) as count FROM messages_fts").fetchone()['count']
+            print(f"FTS5 migration complete: {migrated_count} messages indexed")
+    except Exception as e:
+        print(f"Error populating FTS5 index: {e}")
+
+
+def db_search_messages(query: str, chat_id: Optional[str] = None,
+                       speaker: Optional[str] = None,
+                       start_timestamp: Optional[int] = None,
+                       end_timestamp: Optional[int] = None,
+                       limit: int = 50) -> List[Dict[str, Any]]:
+    """Search messages using FTS5 full-text search.
+    
+    Args:
+        query: Search query string (FTS5 syntax supported)
+        chat_id: Optional filter by specific chat
+        speaker: Optional filter by speaker name
+        start_timestamp: Optional filter by date range (Unix timestamp)
+        end_timestamp: Optional filter by date range (Unix timestamp)
+        limit: Maximum number of results to return (default: 50)
+    
+    Returns:
+        List of message dictionaries with search rank
+    
+    FTS5 query syntax:
+    - Simple: "flame sword" (contains both words)
+    - Phrase: '"flame sword"' (exact phrase match)
+    - Boolean: "flame AND sword", "flame OR sword"
+    - Exclude: "flame NOT ice"
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Build WHERE clause with optional filters
+            conditions = ["messages_fts MATCH ?"]
+            params = [query]
+            
+            if chat_id:
+                conditions.append("chat_id = ?")
+                params.append(chat_id)
+            
+            if speaker:
+                conditions.append("speaker = ?")
+                params.append(speaker)
+            
+            if start_timestamp:
+                conditions.append("timestamp >= ?")
+                params.append(start_timestamp)
+            
+            if end_timestamp:
+                conditions.append("timestamp <= ?")
+                params.append(end_timestamp)
+            
+            where_clause = " AND ".join(conditions)
+            params.append(limit)
+            
+            # Execute search with rank for relevance ordering
+            cursor.execute(f"""
+                SELECT m.id, m.chat_id, m.role, m.content, m.speaker, 
+                       m.timestamp, m.summarized, c.branch_name, fts.rank
+                FROM messages_fts fts
+                JOIN messages m ON fts.message_id = m.id
+                LEFT JOIN chats c ON m.chat_id = c.id
+                WHERE {where_clause}
+                ORDER BY fts.rank, m.timestamp DESC
+                LIMIT ?
+            """, params)
+            
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    'id': row['id'],
+                    'chat_id': row['chat_id'],
+                    'role': row['role'],
+                    'content': row['content'],
+                    'speaker': row['speaker'],
+                    'timestamp': row['timestamp'],
+                    'summarized': row['summarized'],
+                    'branch_name': row['branch_name'],
+                    'rank': row['rank']  # FTS5 relevance score
+                })
+            
+            return results
+    except Exception as e:
+        print(f"Error searching messages with FTS5: {e}")
+        return []
+
+
+def db_get_message_context(message_id: int, context_size: int = 2) -> Optional[Dict[str, Any]]:
+    """Get a message with surrounding context.
+    
+    Args:
+        message_id: ID of target message
+        context_size: Number of messages before and after (default: 2)
+    
+    Returns:
+        Dictionary with:
+        - 'target': Target message
+        - 'before': List of messages before target
+        - 'after': List of messages after target
+        - 'chat_id': Chat ID for navigation
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get target message info first
+            cursor.execute("""
+                SELECT id, chat_id, role, content, speaker, timestamp, summarized
+                FROM messages
+                WHERE id = ?
+            """, (message_id,))
+            
+            target = cursor.fetchone()
+            if not target:
+                return None
+            
+            # Get chat_id for context query
+            chat_id = target['chat_id']
+            
+            # Get messages before target (exclude target)
+            cursor.execute("""
+                SELECT id, role, content, speaker, timestamp, summarized
+                FROM messages
+                WHERE chat_id = ? AND id < ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (chat_id, message_id, context_size))
+            
+            before_messages = []
+            for row in cursor.fetchall():
+                before_messages.append({
+                    'id': row['id'],
+                    'role': row['role'],
+                    'content': row['content'],
+                    'speaker': row['speaker'],
+                    'timestamp': row['timestamp'],
+                    'summarized': row['summarized']
+                })
+            
+            # Reverse to chronological order (oldest first)
+            before_messages.reverse()
+            
+            # Get messages after target (exclude target)
+            cursor.execute("""
+                SELECT id, role, content, speaker, timestamp, summarized
+                FROM messages
+                WHERE chat_id = ? AND id > ?
+                ORDER BY timestamp ASC
+                LIMIT ?
+            """, (chat_id, message_id, context_size))
+            
+            after_messages = []
+            for row in cursor.fetchall():
+                after_messages.append({
+                    'id': row['id'],
+                    'role': row['role'],
+                    'content': row['content'],
+                    'speaker': row['speaker'],
+                    'timestamp': row['timestamp'],
+                    'summarized': row['summarized']
+                })
+            
+            return {
+                'target': {
+                    'id': target['id'],
+                    'role': target['role'],
+                    'content': target['content'],
+                    'speaker': target['speaker'],
+                    'timestamp': target['timestamp'],
+                    'summarized': target['summarized']
+                },
+                'before': before_messages,
+                'after': after_messages,
+                'chat_id': chat_id
+            }
+    except Exception as e:
+        print(f"Error getting message context: {e}")
+        return None
+
+
+def db_get_available_speakers() -> List[str]:
+    """Get all unique speaker names from all messages.
+    
+    Returns:
+        List of unique speaker names sorted alphabetically
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get all unique, non-null speakers
+            cursor.execute("""
+                SELECT DISTINCT speaker
+                FROM messages
+                WHERE speaker IS NOT NULL AND speaker != ''
+                ORDER BY speaker ASC
+            """)
+            
+            speakers = [row['speaker'] for row in cursor.fetchall()]
+            return speakers
+    except Exception as e:
+        print(f"Error getting available speakers: {e}")
+        return []
+
+
+# ============================================================================
 # DATABASE HEALTH CHECK
 # ============================================================================
 
@@ -1445,6 +2162,167 @@ def verify_database_health() -> bool:
     except Exception as e:
         print(f"⚠️  Database health check failed: {e}")
         return False
+
+
+# ============================================================================
+# RELATIONSHIP STATE OPERATIONS
+# ============================================================================
+
+def db_get_relationship_state(chat_id: str, character_from: str, character_to: str) -> Optional[Dict[str, Any]]:
+    """Get relationship state for a specific directional pair."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM relationship_states
+            WHERE chat_id = ? AND character_from = ? AND character_to = ?
+        ''', (chat_id, character_from, character_to))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def db_get_all_relationship_states(chat_id: str) -> List[Dict[str, Any]]:
+    """Get all relationship states for a chat."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM relationship_states WHERE chat_id = ?
+            ORDER BY last_updated DESC
+        ''', (chat_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def db_update_relationship_state(chat_id: str, character_from: str, character_to: str, 
+                             scores: dict, last_message_id: int) -> bool:
+    """Update or insert relationship state with history tracking."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            existing = db_get_relationship_state(chat_id, character_from, character_to)
+            
+            # Update history (keep last 20 snapshots)
+            history = []
+            if existing and existing.get('history'):
+                history = json.loads(existing['history'])
+            
+            history.append({
+                'message_id': last_message_id,
+                'timestamp': time.time(),
+                'trust': scores['trust'],
+                'emotional_bond': scores['emotional_bond'],
+                'conflict': scores['conflict'],
+                'power_dynamic': scores['power_dynamic'],
+                'fear_anxiety': scores['fear_anxiety']
+            })
+            history = history[-20:]  # Keep only last 20
+            
+            if existing:
+                cursor.execute('''
+                    UPDATE relationship_states
+                    SET trust = ?, emotional_bond = ?, conflict = ?, 
+                        power_dynamic = ?, fear_anxiety = ?,
+                        last_updated = ?, last_analyzed_message_id = ?,
+                        interaction_count = interaction_count + 1,
+                        history = ?
+                    WHERE chat_id = ? AND character_from = ? AND character_to = ?
+                ''', (
+                    scores['trust'], scores['emotional_bond'], scores['conflict'],
+                    scores['power_dynamic'], scores['fear_anxiety'],
+                    time.time(), last_message_id, json.dumps(history),
+                    chat_id, character_from, character_to
+                ))
+            else:
+                cursor.execute('''
+                    INSERT INTO relationship_states
+                    (chat_id, character_from, character_to, trust, emotional_bond, 
+                     conflict, power_dynamic, fear_anxiety, last_updated, 
+                     last_analyzed_message_id, interaction_count, history)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                ''', (
+                    chat_id, character_from, character_to,
+                    scores['trust'], scores['emotional_bond'], scores['conflict'],
+                    scores['power_dynamic'], scores['fear_anxiety'],
+                    time.time(), last_message_id, json.dumps(history)
+                ))
+            
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error updating relationship state: {e}")
+        return False
+
+
+def db_copy_relationship_states_for_branch(origin_chat_id: str, branch_chat_id: str, 
+                                       fork_message_id: int) -> int:
+    """Copy relationship states to branch at fork-point state."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT character_from, character_to, 
+                       trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
+                       history
+                FROM relationship_states
+                WHERE chat_id = ?
+            ''', (origin_chat_id,))
+            
+            origin_states = cursor.fetchall()
+            copied_count = 0
+            
+            for state in origin_states:
+                history = json.loads(state['history']) if state['history'] else []
+                
+                # Find snapshot at or before fork point
+                fork_point_state = None
+                for snapshot in history:
+                    if snapshot.get('message_id', 0) <= fork_message_id:
+                        fork_point_state = snapshot
+                    else:
+                        break
+                
+                # Use fork point state or current state
+                if fork_point_state:
+                    values = (
+                        fork_point_state['trust'],
+                        fork_point_state['emotional_bond'],
+                        fork_point_state['conflict'],
+                        fork_point_state['power_dynamic'],
+                        fork_point_state['fear_anxiety']
+                    )
+                else:
+                    values = (
+                        state['trust'], state['emotional_bond'], state['conflict'],
+                        state['power_dynamic'], state['fear_anxiety']
+                    )
+                
+                new_history = [{
+                    'message_id': fork_message_id,
+                    'timestamp': time.time(),
+                    'trust': values[0],
+                    'emotional_bond': values[1],
+                    'conflict': values[2],
+                    'power_dynamic': values[3],
+                    'fear_anxiety': values[4],
+                    'note': 'Branch point'
+                }]
+                
+                cursor.execute('''
+                    INSERT INTO relationship_states
+                    (chat_id, character_from, character_to, 
+                     trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
+                     last_updated, last_analyzed_message_id, interaction_count, history)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                ''', (
+                    branch_chat_id, state['character_from'], state['character_to'],
+                    *values, time.time(), fork_message_id, json.dumps(new_history)
+                ))
+                copied_count += 1
+            
+            conn.commit()
+            print(f"[RELATIONSHIP] Copied {copied_count} relationship states to branch {branch_chat_id}")
+            return copied_count
+    except Exception as e:
+        print(f"Error copying relationship states for branch: {e}")
+        return 0
 
 
 # Initialize database on module import

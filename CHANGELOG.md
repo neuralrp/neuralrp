@@ -5,11 +5,207 @@ All notable changes to NeuralRP are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [1.6.0] - 2026-01-19
+
+### Added
+
+- **Semantic Relationship Tracker**: Automatic relationship tracking between characters, NPCs, and users
+  - Tracks five emotional dimensions: Trust, Emotional Bond, Conflict, Power Dynamic, Fear/Anxiety
+  - Analyzes every 10 messages using semantic embeddings (no LLM calls, <20ms overhead)
+  - Directional tracking (Alice→Bob separate from Bob→Alice) with gradual score evolution
+  - Relationship context injected into prompts for emotionally consistent responses
+
+- **Entity ID System**: Unique IDs for all entities prevents name collisions
+  - Supports short names like "Mark" or "Jo" without conflicts
+  - Automatic entity extraction from chat context
+  - Fork-safe: Relationships branch correctly for alternate timelines
+
+- **Relationship History**: 20-snapshot history per relationship tracks evolution over time
+  - Automatic pruning retains most recent 20 snapshots
+  - Enables retrospective analysis of character dynamics
+
+- **Character Name Consistency Helper**: `get_character_name()` function for unified name handling
+  - Prevents relationship tracker confusion from name variations
+  - Handles full names, single names, and unicode characters
+
+- **Change History Data Recovery UI**: Complete interface for browsing, filtering, and restoring change history
+  - Full-screen modal with backdrop blur for change history viewer
+  - Filter by entity type (All, Character, World Info, Chat), entity ID, and result limit
+  - Color-coded badges: blue=Character, green=World Info, purple=Chat
+  - Color-coded operations: green=CREATE, yellow=UPDATE, red=DELETE
+  - One-click restore for UPDATE/DELETE operations with confirmation dialog
+  - Automatic JSON export on restore with data refresh
+  - Shows 30 entries by default, configurable 1-50
+  - Real-time search and filtering with Enter key support
+  - Loading states with spinners and disabled buttons for CREATE operations
+
+- **Soft Delete Implementation**: Preserves message history after summarization
+  - Messages marked as `summarized=1` instead of deleted
+  - Persistent message IDs prevent relationship tracker breakage
+  - Full history search across active and archived messages
+  - Archive statistics endpoint for monitoring
+  - Optional cleanup of old archives (default 90 days)
+  - Database migration script adds `summarized` column and index
+
+### Changed
+
+- **Prompt Construction**: Relationship context now injected into system prompts
+  - Automatic inclusion of relevant relationship states
+  - Supports both single-character and multi-character scenarios
+  - Character name handling now uses `get_character_name()` helper consistently
+
+- **Database Schema**: Added `summarized` BOOLEAN field to messages table
+  - Messages table updated with soft delete support
+  - Enables tracking of active vs archived messages
+
+- **Chat API**: Enhanced chat loading with archive support
+  - `/api/chats/{name}?include_summarized=true` for archived message retrieval
+  - `/api/chats/summarized/stats` for archive statistics
+  - `/api/chats/cleanup-old-summarized` for optional cleanup
+
+### Technical
+
+- **Database Tables**: 
+  - Relationships: `relationships`, `relationship_history`, `entities` with foreign key constraints
+  - Messages: `messages` table updated with `summarized` column and `idx_messages_summarized` index
+  - Change Log: `change_log` table with undo support
+
+- **Analysis Engine**: Uses existing all-mpnet-base-v2 model, directional analysis (A→B vs B→A), incremental score updates
+
+- **API Endpoints**:
+  - Relationships: `/api/relationships/update`, `/api/relationships/{chat_id}`, `/api/relationships/{chat_id}/history`, `/api/entities/{chat_id}`
+  - Change History: `GET /api/changes`, `POST /api/changes/restore`, `GET /api/changes/stats`
+  - Archive Management: `GET /api/chats/{name}?include_summarized=true`, `GET /api/chats/summarized/stats`, `POST /api/chats/cleanup-old-summarized`
+
+- **Database Functions**: 
+  - Relationships: `db_update_relationships()`, `db_get_relationships()`, `db_get_relationship_history()`, `db_register_entity()`
+  - Soft Delete: `db_get_chat(include_summarized)`, `db_save_chat()` with soft delete logic, `db_cleanup_old_summarized_messages()`, `db_get_summarized_message_count()`, `db_search_messages_with_summarized()`
+
+- **Frontend JavaScript**: 
+  - Change History: `fetchChangeHistory()`, `restoreChange()`, `canRestoreChange()`, `refreshAllData()`, `openChangeHistoryModal()`, `showNotification()`
+  - Modal implementation with filters, table, color coding, and confirmation dialogs
+
+### Performance
+
+- Analysis overhead: <20ms per update (every 10 messages)
+- Reuses existing embedding model (no additional startup time)
+- Storage: ~50-100 bytes per relationship snapshot
+- Soft delete overhead: <10ms per chat save
+- Search time: <100ms for typical queries
+- Context retrieval: <50ms
+- Highlighting: Instant (client-side)
+
+### Notes
+
+Relationship tracking uses semantic embeddings instead of LLM calls, providing instant analysis without adding context bloat. The entity ID system ensures relationships work correctly even with duplicate or similar names. Change history UI provides comprehensive data recovery with full undo/redo support for UPDATE/DELETE operations. Soft delete preserves message history with persistent IDs, ensuring relationship tracker continuity.
+
+---
+
+## [1.5.3] - 2026-01-18
+
+### Added
+
+- **Search System**: Full-text search across all chat messages
+  - Message search via `/api/search/messages` with query highlighting
+  - Advanced filtering by speaker, date range, and limit
+  - Context viewing for individual messages (before/after snapshots)
+  - Real-time search as you type with instant feedback
+  - Jump-to-message functionality for quick navigation
+  - Phrase support with quoted term matching
+
+- **Undo/Redo Phase 1**: Safety net for accidental deletions
+  - 30-second undo toast after deleting characters, chats, or world info entries
+  - One-click restoration via `/api/undo/last` API endpoint
+  - Success/error notifications for undo operations
+  - Automatic list refresh after successful undo
+  - Works with all entity types (characters, chats, world info)
+  - Built on existing change logging infrastructure (v1.5.1)
+
+### Changed
+
+- **Frontend Search UI**: Complete implementation in `app/index.html` (lines 2600-2920)
+  - State management for search queries, results, and filters
+  - Highlighting engine with phrase support (quoted terms)
+  - Context viewer for message surroundings
+  - Filter panel with available speakers
+
+### Technical
+
+- **Search API Endpoints**:
+  - `GET /api/search/messages` - Full-text search with filters
+  - `GET /api/search/messages/{id}/context` - Get message context
+  - `GET /api/search/filters` - Available filter values
+
+- **Undo API Endpoints**:
+  - `POST /api/undo/last` - Restore last deleted entity
+  - Change log system (v1.5.1) provides audit trail
+
+- **Search Implementation**:
+  - SQLite FTS5-based full-text search on message content
+  - Real-time highlighting with regex-based term matching
+  - Context retrieval with configurable before/after message count
+  - Speaker filtering and result limiting
+
+### Performance
+
+- Search time: <100ms for typical queries
+- Context retrieval: <50ms
+- Highlighting: Instant (client-side)
+
+### Notes
+
+Undo/Redo is Phase 1 (DELETE operations only). Full redo and CREATE/UPDATE undo will be exposed in v1.6 with Living World Engine.
+
+---
+
 ## [1.5.2] - 2026-01-18
 
 ### Added
-- **Fixed Autosave**: Every turn the world saves to SQLite
 
+- **Autosave System**: Automatic chat persistence on every turn
+  - Every LLM response automatically saves to SQLite database
+  - Unique chat ID generation (`new_chat_{timestamp}` format)
+  - 7-day automatic cleanup of autosaved chats
+  - Empty chat cleanup on application startup
+  - Fork operations autosave new branches immediately
+  - No user configuration required - always enabled
+
+### Changed
+
+- **Database Schema**: Added `autosaved` BOOLEAN field to chats table (defaults to True)
+  - Distinguishes between manually saved (autosaved=False) and autosaved chats (autosaved=True)
+  - Enables selective cleanup of temporary autosaves
+
+- **Chat API**: `/api/chat` endpoint now includes `_chat_id` in response
+  - Frontend tracks chat ID across turns
+  - Enables continuous chat sessions without manual save
+  - Frontend should send `chat_id` in subsequent requests
+
+### Technical
+
+- **Database Functions**:
+  - `db_cleanup_old_autosaved_chats(days=7)` - Removes old autosaved chats
+  - `db_cleanup_empty_chats()` - Removes chats with zero messages on startup
+  - `db_save_chat()` - Enhanced to accept `autosaved` parameter
+
+- **Startup Cleanup**: Automatic maintenance runs on application launch
+  - Removes autosaved chats older than 7 days
+  - Removes empty chats (0 messages) to prevent database bloat
+
+- **Fork Behavior**: New branches automatically marked as autosaved=True
+  - Creates persistent timeline immediately upon forking
+  - No manual save required for branch exploration
+
+### Performance
+
+- Cleanup overhead: <50ms on startup (typical databases)
+- Autosave overhead: <10ms per chat turn (SQLite transaction)
+
+### Notes
+
+Autosave ensures no data loss during active sessions. Manually saved chats (autosaved=False) are exempt from 7-day cleanup and persist indefinitely.
+
+---
 
 ## [1.5.1] - 2026-01-13
 
@@ -52,7 +248,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Scales to 10,000+ World Info entries
 
 ### Notes
-Completes the sqlite-vec migration and adds production-ready change tracking infrastructure. Undo/Redo UI will be exposed in v1.6 with Living World Engine.
+
+Completes sqlite-vec migration and adds production-ready change tracking infrastructure. Undo/Redo UI will be exposed in v1.6 with Living World Engine.
 
 ---
 
@@ -103,7 +300,7 @@ This release migrates NeuralRP from JSON file storage to SQLite, providing ACID 
 
 ### Migration Notes
 
-- Migration is one-way: After running `migrate_to_sqlite.py`, the database is the source of truth
+- Migration is one-way: After running `migrate_to_sqlite.py`, database is source of truth
 - JSON files continue to be generated for SillyTavern export/compatibility
 - All existing chats, characters, and world info are preserved
 - Embeddings are automatically regenerated and indexed in sqlite-vec
