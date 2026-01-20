@@ -1,6 +1,6 @@
 # NeuralRP
 
-**The only roleplay tool that runs LLM + Stable Diffusion together on a 12GB GPU.**
+**The only roleplay tool that is optimized to natively run LLM + Stable Diffusion together on a 12GB GPU.**
 
 NeuralRP combines text generation and image synthesis in one optimized package. While other tools make you choose between visual richness and memory overhead, NeuralRP does both—with automatic VRAM management that keeps everything responsive.
 
