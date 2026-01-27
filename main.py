@@ -1,22 +1,28 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+# Simple FastAPI app with NPC support
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import json
-import os
-import time
-import base64
-import httpx
-import re
-import random
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any, Literal
-import asyncio
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Request
+from fastapi.staticfiles import StaticFiles
+from contextlib import asynccontextmanager
 from collections import deque
-from bisect import insort
 from statistics import median
+import httpx
+import base64
+import json
+import logging
+import os
+import random
+import re
+import time
+import asyncio
+from typing import Dict, List, Optional, Any, Literal
+from pydantic import BaseModel
 
-# Import database module for SQLite operations
+# Set up logging
+logger = logging.getLogger(__name__)
+
+# Import the updated NPC functions with defensive lookup
 from app.database import (
     db_get_all_characters, db_get_character, db_save_character, db_delete_character,
     db_get_all_worlds, db_get_world, db_save_world, db_delete_world, db_update_world_entry,
@@ -26,11 +32,15 @@ from app.database import (
     db_get_recent_performance_metrics,
     db_get_world_content_hash, db_get_world_entry_hash, db_update_world_entry_hash,
     db_save_embedding, db_get_embedding, db_search_similar_embeddings,
-    db_delete_entry_embedding,
-    # Change log functions (v1.5.1 - Undo/Redo Foundation)
-    get_recent_changes, get_last_change, db_cleanup_old_changes, log_change,
+    db_delete_entry_embedding, db_create_entity,
+    # NPC functions (Phase 2.2)
+    db_create_npc, db_get_chat_npcs, db_get_npc_by_id, db_update_npc,
+    db_increment_npc_appearance, db_set_npc_active, db_delete_npc, 
+    db_promote_npc_to_character, db_copy_npcs_for_branch,
+    db_create_npc_and_update_chat,  # NEW: Atomic function for NPC creation
+    get_connection,
     # Undo/Redo functions
-    mark_change_undone, undo_last_delete, restore_version,
+    get_recent_changes, get_last_change, undo_last_delete, restore_version,
     # Search functions (FTS5 full-text search)
     db_search_messages, db_get_message_context, db_get_available_speakers,
     migrate_populate_fts,
@@ -40,8 +50,14 @@ from app.database import (
     db_cleanup_old_autosaved_chats, db_cleanup_empty_chats,
     # Relationship tracker functions
     db_get_relationship_state, db_get_all_relationship_states, db_update_relationship_state,
-    db_copy_relationship_states_for_branch
+    db_copy_relationship_states_with_mapping,
+    # Change log cleanup
+    db_cleanup_old_changes,
 )
+
+# NPC helper functions are now integrated in load_character_profiles()
+
+# Removed orphaned code - this block references undefined variables and is not used
 
 app = FastAPI()
 
@@ -55,22 +71,22 @@ app.add_middleware(
 # SD Presets for context-aware optimization
 SD_PRESETS = {
     "normal": {
-        "steps": 20,
-        "width": 512,
+        "steps": 25,
+        "width": 640,
         "height": 512,
         "threshold": 0
     },
     "light": {
+        "steps": 20,
+        "width": 512,
+        "height": 448,
+        "threshold": 10000
+    },
+    "emergency": {
         "steps": 15,
         "width": 384,
         "height": 384,
-        "threshold": 8000
-    },
-    "emergency": {
-        "steps": 10,
-        "width": 256,
-        "height": 256,
-        "threshold": 12000
+        "threshold": 15000
     }
 }
 
@@ -412,10 +428,12 @@ class InpaintRequest(BaseModel):
     mask_blur: int = 4
 
 class CardGenRequest(BaseModel):
-    char_name: str
+    char_name: Optional[str] = "" 
     field_type: str
     context: str
     source_mode: Optional[str] = "chat" # "chat" or "manual"
+    chat_id: Optional[str] = None  # Chat ID for NPC creation
+    save_as: Optional[str] = "global" # "global" (default) or "local_npc"
 
 class CapsuleGenRequest(BaseModel):
     char_name: str
@@ -454,9 +472,9 @@ class WorldEditRequest(BaseModel):
 
 class WorldEditEntryRequest(BaseModel):
     world_name: str
-    entry_uid: str
+    entry_uid: Optional[str]
     section: str  # history, locations, creatures, factions
-    tone: str  # sfw, spicy, veryspicy
+    tone: str  
     context: Optional[str] = ""
     source_mode: Optional[str] = "manual"
 
@@ -518,7 +536,6 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import hashlib
 import threading
-import asyncio
 import gc
 import torch
 
@@ -923,161 +940,19 @@ class SemanticSearchEngine:
 semantic_search_engine = SemanticSearchEngine()
 
 # ============================================================================
-# RELATIONSHIP TRACKING ENGINE
+# ADAPTIVE RELATIONSHIP TRACKING ENGINE (v1.6.1)
 # ============================================================================
 
-class RelationshipAnalyzer:
-    """
-    Analyzes relationships using direct semantic comparison of conversation text.
-    No LLM generation - uses embeddings + keyword polarity detection.
-    """
-    
-    def __init__(self, semantic_search_engine):
-        self.model = semantic_search_engine.model
-        
-        # Single prototype sentence per category (more efficient than 5-sentence averaging)
-        category_prototypes = {
-            'trust': "deep trust faith reliability honesty belief confidence dependable loyal",
-            'emotional_bond': "love affection attraction romance care adoration strong feelings",
-            'conflict': "argument tension disagreement anger hostility fighting opposition",
-            'power_dynamic': "dominance authority control leadership command submission obedience",
-            'fear_anxiety': "fear terror dread intimidation threat anxiety scared nervous"
-        }
-        
-        # Pre-compute category embeddings once at startup
-        self.category_embeddings = {}
-        for category, text in category_prototypes.items():
-            if self.model is not None:
-                self.category_embeddings[category] = self.model.encode(text, convert_to_numpy=True)
-            else:
-                self.category_embeddings[category] = None
-        
-        # Polarity indicators for direction (+/-)
-        self.positive_indicators = {
-            'trust': ['trust', 'faith', 'rely', 'believe', 'confident', 'honest', 
-                     'reliable', 'loyal', 'depend', 'truthful'],
-            'emotional_bond': ['love', 'care', 'affection', 'close', 'bond', 'adore',
-                              'attracted', 'kiss', 'embrace', 'cherish', 'like'],
-            'conflict': ['harmony', 'agree', 'resolve', 'peace', 'cooperate', 
-                        'reconcile', 'forgive', 'understand'],  # Low conflict = positive
-            'power_dynamic': ['lead', 'dominate', 'command', 'authority', 'control',
-                             'superior', 'order', 'direct'],
-            'fear_anxiety': ['calm', 'ease', 'comfort', 'safe', 'relaxed', 
-                            'secure', 'peaceful', 'confident']  # Low fear = positive
-        }
-        
-        self.negative_indicators = {
-            'trust': ['distrust', 'doubt', 'suspect', 'betray', 'deceive', 'lie',
-                     'backstab', 'unreliable', 'dishonest', 'suspicion'],
-            'emotional_bond': ['dislike', 'hate', 'repulse', 'disgust', 'cold', 
-                              'reject', 'distant', 'avoid', 'loathe'],
-            'conflict': ['tension', 'argue', 'conflict', 'fight', 'hostile', 
-                        'disagree', 'clash', 'oppose', 'antagonize'],
-            'power_dynamic': ['defer', 'submit', 'follow', 'obey', 'yield', 
-                             'subordinate', 'comply', 'bow'],
-            'fear_anxiety': ['fear', 'terror', 'dread', 'intimidate', 'anxious',
-                            'threaten', 'scared', 'afraid', 'nervous']
-        }
-    
-    def analyze_conversation(self, messages: list, char_from: str, entity_to: str, 
-                       current_state: dict) -> dict:
-        """
-        Analyze conversation messages directly for relationship impacts.
-        Returns updated scores or None if no meaningful interaction detected.
-        """
-        if self.model is None:
-            print("WARNING: RelationshipAnalyzer model not loaded, skipping analysis")
-            return None
-        
-        import numpy as np
-        
-        # Build conversation text from recent messages
-        # Fix: Access Pydantic model attributes directly (m.speaker, m.role, m.content)
-        recent_text = "\n".join([
-            f"{m.speaker or m.role}: {m.content or ''}"
-            for m in messages[-10:]
-        ])
-        
-        text_lower = recent_text.lower()
-        
-        # Check if both entities were mentioned (relevance filter)
-        char_from_mentioned = char_from.lower() in text_lower
-        entity_to_mentioned = entity_to.lower() in text_lower
-        
-        if not (char_from_mentioned and entity_to_mentioned):
-            return None  # No interaction detected
-        
-        # Count interaction density
-        interaction_count = sum(
-            1 for m in messages[-10:]
-            if char_from.lower() in (m.content or '').lower()
-            and entity_to.lower() in (m.content or '').lower()
-        )
-        
-        if interaction_count == 0:
-            return None
-        
-        # Embed conversation once
-        conversation_embedding = self.model.encode(recent_text, convert_to_numpy=True)
-        
-        # Detect impacted dimensions via semantic similarity
-        dimension_impacts = {}
-        
-        for category, category_emb in self.category_embeddings.items():
-            if category_emb is None:
-                continue
-            
-            similarity = np.dot(conversation_embedding, category_emb) / (
-                np.linalg.norm(conversation_embedding) * np.linalg.norm(category_emb)
-            )
-            
-            if similarity > 0.35:  # Same threshold as world info
-                dimension_impacts[category] = similarity
-        
-        if not dimension_impacts:
-            return None  # No relationship impact detected
-        
-        # Calculate new scores
-        new_scores = {}
-        
-        for dimension in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']:
-            if dimension not in dimension_impacts:
-                new_scores[dimension] = current_state[dimension]
-                continue
-            
-            similarity = dimension_impacts[dimension]
-            
-            # Count polarity indicators
-            pos_count = sum(text_lower.count(word) for word in self.positive_indicators[dimension])
-            neg_count = sum(text_lower.count(word) for word in self.negative_indicators[dimension])
-            
-            # Skip if no polarity detected (avoid false positives)
-            if pos_count == 0 and neg_count == 0:
-                new_scores[dimension] = current_state[dimension]
-                continue
-            
-            # Calculate magnitude scaled by interaction density
-            magnitude_multiplier = min(2.0, 1.0 + (interaction_count / 10))
-            base_magnitude = int(similarity * 50 * magnitude_multiplier)
-            
-            # Determine direction and target
-            if pos_count > neg_count:
-                target = min(100, current_state[dimension] + base_magnitude)
-            elif neg_count > pos_count:
-                target = max(0, current_state[dimension] - base_magnitude)
-            else:
-                # Ambiguous - small adjustment toward neutral
-                target = int(current_state[dimension] * 0.9 + 50 * 0.1)
-            
-            # Weighted blend: 60% new target, 40% current (gradual change)
-            new_scores[dimension] = int(0.6 * target + 0.4 * current_state[dimension])
-            new_scores[dimension] = max(0, min(100, new_scores[dimension]))
-        
-        return new_scores
+# Import adaptive tracker
+from app.relationship_tracker import (
+    AdaptiveRelationshipTracker,
+    initialize_adaptive_tracker,
+    adaptive_tracker
+)
 
-
-# Initialize analyzer (do once at startup)
-relationship_analyzer = None
+# Legacy RelationshipAnalyzer kept for reference, but not used
+# The AdaptiveRelationshipTracker in app/relationship_tracker.py is the new implementation
+relationship_analyzer = None  # Deprecated, use adaptive_tracker instead
 
 
 # ============================================================================
@@ -1128,7 +1003,7 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
                             recent_messages: list) -> str:
     """
     Generate compact relationship context for prompt injection.
-    Only includes non-neutral dimensions for active speakers.
+    Uses Tier 3 semantic filtering to only include dimensions relevant to current conversation.
     Returns 0-75 tokens depending on active interactions.
     
     CRITICAL: characters list should already be extracted with get_character_name().
@@ -1148,8 +1023,82 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
     if not ((len(active_characters) >= 1 and user_is_active) or len(active_characters) >= 2):
         return ""
     
+    # Get current turn text for semantic relevance filtering
+    # Use the most recent message's content
+    current_text = ""
+    if recent_messages:
+        current_text = recent_messages[-1].content or ""
+    
     lines = []
     
+    # Build relationship states dictionary for all active entity pairs
+    # Format: {from_entity: {dimension: score}}
+    relationship_states = {}
+    
+    # Character-to-character relationships
+    for char_from in active_characters:
+        for char_to in active_characters:
+            if char_from == char_to:
+                continue
+            
+            state = db_get_relationship_state(chat_id, char_from, char_to)
+            if state:
+                entity_key = f"{char_from}→{char_to}"
+                relationship_states[entity_key] = state
+    
+    # Character-to-user relationships
+    if user_is_active and active_characters:
+        user_name_or_default = user_name or "User"
+        for char_from in active_characters:
+            state = db_get_relationship_state(chat_id, char_from, user_name_or_default)
+            if state:
+                entity_key = f"{char_from}→{user_name_or_default}"
+                relationship_states[entity_key] = state
+    
+    # Use adaptive tracker's Tier 3 semantic filtering if available
+    if adaptive_tracker and relationship_states:
+        try:
+            relevant_dimensions = adaptive_tracker.get_relevant_dimensions(
+                current_text=current_text,
+                relationship_states=relationship_states
+            )
+            
+            # Generate templates only for relevant dimensions
+            for entity_key, relevant_dims in relevant_dimensions.items():
+                # Parse entity_key (format: "From→To")
+                parts = entity_key.split('→')
+                if len(parts) != 2:
+                    continue
+                char_from, char_to = parts[0], parts[1]
+                
+                # Get full state for score lookup
+                state = relationship_states.get(entity_key)
+                if not state:
+                    continue
+                
+                # Generate templates for each relevant dimension
+                for dim in relevant_dims:
+                    score = state[dim]
+                    for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
+                        if low <= score <= high:
+                            if templates:
+                                template = random.choice(templates)
+                                lines.append(template.format(from_=char_from, to=char_to))
+                
+                if lines:
+                    lines.append(".")
+            
+            if lines:
+                return "### Relationship Context:\n" + "\n".join(lines)
+            
+            # If adaptive filtering returned no relevant dimensions, return empty
+            return ""
+        
+        except Exception as e:
+            print(f"[ADAPTIVE_TRACKER] Tier 3 filtering failed, falling back: {e}")
+            # Fall through to legacy behavior
+    
+    # Fallback: Legacy behavior without semantic filtering
     # For each active character, describe notable feelings
     for char_from in active_characters:
         # Check toward other characters
@@ -1186,12 +1135,12 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
             if lines:
                 lines.append(".")
     
-    # Also check toward user if user is active
+    # Also check toward user if user is active (fallback only)
     if user_is_active and active_characters:
-        user_name = user_name or "User"
+        user_name_or_default = user_name or "User"
         
         for char_from in active_characters:
-            state = db_get_relationship_state(chat_id, char_from, user_name)
+            state = db_get_relationship_state(chat_id, char_from, user_name_or_default)
             if not state:
                 continue
             
@@ -1214,7 +1163,7 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
                     if low <= score <= high:
                         if templates:
                             template = random.choice(templates)
-                            lines.append(template.format(from_=char_from, to=user_name))
+                            lines.append(template.format(from_=char_from, to=user_name_or_default))
             
             if lines:
                 lines.append(".")
@@ -1573,6 +1522,55 @@ def sync_world_from_json(world_name):
     print(f"Sync Summary for '{world_name}': Added {added_count}, Removed {removed_count}, Merged {merged_count} entries")
     return {"added": added_count, "removed": removed_count, "merged": merged_count}
 
+def cleanup_world_info_filenames():
+    """Rename world info JSON files with SillyTavern suffixes to clean names.
+    
+    This is a one-time cleanup to ensure all world info files use standard naming:
+    - exampleworld_plist_worldinfo.json -> exampleworld.json
+    - exampleworld_plist.json -> exampleworld.json
+    - etc.
+    """
+    wi_dir = os.path.join(DATA_DIR, "worldinfo")
+    if not os.path.exists(wi_dir):
+        return
+    
+    renamed_count = 0
+    for f in os.listdir(wi_dir):
+        if f.endswith(".json") and f != ".gitkeep":
+            name = f.replace(".json", "")
+            original_name = name
+            
+            # Remove ALL SillyTavern suffixes (keep removing until none left)
+            while True:
+                removed = False
+                for suffix in ["_plist", "_worldinfo", "_json"]:
+                    if name.endswith(suffix):
+                        name = name[:-len(suffix)]
+                        removed = True
+                        break
+                if not removed:
+                    break
+            
+            if name != original_name:
+                # File has a suffix, rename it
+                old_path = os.path.join(wi_dir, f)
+                new_name = f"{name}.json"
+                new_path = os.path.join(wi_dir, new_name)
+                
+                # Check if target file already exists
+                if os.path.exists(new_path):
+                    print(f"Skipping rename: {f} -> {new_name} (target already exists)")
+                else:
+                    try:
+                        os.rename(old_path, new_path)
+                        renamed_count += 1
+                        print(f"Renamed world info: {f} -> {new_name}")
+                    except Exception as e:
+                        print(f"Failed to rename {f}: {e}")
+    
+    if renamed_count > 0:
+        print(f"World info filename cleanup complete: {renamed_count} files renamed")
+
 def import_world_info_json_files(force=False, smart_sync=True):
     """Import world info JSON files with intelligent merging.
     
@@ -1589,14 +1587,39 @@ def import_world_info_json_files(force=False, smart_sync=True):
         for f in os.listdir(wi_dir):
             if f.endswith(".json") and f != ".gitkeep":
                 name = f.replace(".json", "")
-                # Remove ALL SillyTavern suffixes: _plist, _worldinfo, _json
-                # This handles files like "exampleworld_plist_worldinfo.json" -> "exampleworld"
-                for suffix in ["_plist", "_worldinfo", "_json"]:
-                    if name.endswith(suffix):
-                        name = name[:-len(suffix)]
-                        # Only remove one suffix to handle files with multiple suffixes
+                original_name = name
+                
+                # Remove ALL SillyTavern suffixes (keep removing until none left)
+                while True:
+                    removed = False
+                    for suffix in ["_plist", "_worldinfo", "_json"]:
+                        if name.endswith(suffix):
+                            name = name[:-len(suffix)]
+                            removed = True
+                            break
+                    if not removed:
                         break
+                
                 file_path = os.path.join(wi_dir, f)
+                
+                # Rename file to clean name if it had any suffixes
+                if name != original_name:
+                    clean_filename = f"{name}.json"
+                    clean_path = os.path.join(wi_dir, clean_filename)
+                    try:
+                        if os.path.exists(clean_path):
+                            # Target already exists, use the existing clean file
+                            file_path = clean_path
+                            print(f"Using existing clean file: {clean_filename}")
+                        else:
+                            # Rename to clean filename
+                            os.rename(file_path, clean_path)
+                            file_path = clean_path
+                            print(f"Renamed world info: {f} -> {clean_filename}")
+                    except Exception as e:
+                        print(f"Failed to rename {f}: {e}")
+                        # Continue with original path if rename fails
+                        file_path = os.path.join(wi_dir, f)
                 
                 try:
                     if force:
@@ -1672,12 +1695,16 @@ def import_chats_json_files():
 @app.on_event("startup")
 async def startup_event():
     """Initialize resources when FastAPI app starts"""
-    global cleanup_task
+    global cleanup_task, adaptive_tracker
     
     # Verify database integrity before proceeding
     if not verify_database_health():
         print("⚠️  Database health check failed - app may not function correctly")
         print("   Try running: python migrate_to_sqlite.py")
+    
+    # Clean up world info filenames with SillyTavern suffixes
+    print("Cleaning up world info filenames...")
+    cleanup_world_info_filenames()
     
     # Auto-import any new JSON files dropped into folders
     print("Scanning for new JSON files to import...")
@@ -1691,6 +1718,20 @@ async def startup_event():
     print("Running chat cleanup on startup...")
     old_chats = db_cleanup_old_autosaved_chats(days=7)
     empty_chats = db_cleanup_empty_chats()
+    
+    # Load semantic search model before initializing adaptive tracker
+    print("Loading semantic search model...")
+    if semantic_search_engine.load_model():
+        print("Semantic search model loaded successfully")
+    else:
+        print("Warning: Failed to load semantic search model - some features may be unavailable")
+    
+    # Initialize adaptive relationship tracker with shared semantic model
+    print("Initializing adaptive relationship tracker...")
+    if initialize_adaptive_tracker(semantic_search_engine):
+        print("[ADAPTIVE_TRACKER] Ready - Three-tier detection system active")
+    else:
+        print("[ADAPTIVE_TRACKER] Warning: Could not initialize - semantic model not loaded")
     
     # Start periodic cleanup task when app starts
     cleanup_task = asyncio.create_task(periodic_cleanup())
@@ -1984,13 +2025,22 @@ def construct_prompt(request: PromptRequest):
         depth_prompt = data.get("extensions", {}).get("depth_prompt", {}).get("prompt", "")
         multi_char_summary = data.get("extensions", {}).get("multi_char_summary", "")
         
+        # Check if this character is an NPC
+        is_npc = char_obj.get("is_npc", False)
+        
         if is_group_chat and multi_char_summary:
-            # Group chat mode: use compact capsule summary
+            # Group chat mode: use compact capsule summary for both global characters AND NPCs
+            label = "[NPC]" if is_npc else "[Character]"
+            print(f"[CONTEXT] {label} {name} using capsule summary")
+            
             full_prompt += f"### [{name}]: {multi_char_summary}\n"
             # Use capsule for reinforcement too (shorter)
             reinforcement_chunks.append(f"[{name}]: {multi_char_summary}")
         else:
             # Single character or no capsule: use full profile
+            label = "[NPC]" if is_npc else "[Character]"
+            print(f"[CONTEXT] {label} {name} using full card (no capsule)")
+            
             full_prompt += f"### Character Profile: {name}\n{description}\n"
             if depth_prompt:
                 full_prompt += f"### Context for {name}: {depth_prompt}\n"
@@ -2018,11 +2068,28 @@ def construct_prompt(request: PromptRequest):
 
         # Character reinforcement logic every X turns
         if reinforce_freq > 0 and i > 0 and i % reinforce_freq == 0:
+            turn_count = len(request.messages)
+            print(f"[REINFORCEMENT] Turn {turn_count}: Reinforcing character profiles")
+            
             if reinforcement_chunks:
-                # Character reinforcement
+                # Character reinforcement - reinforce both global characters AND active NPCs
+                for chunk in reinforcement_chunks:
+                    # Determine if this is an NPC based on chunk format
+                    # NPCs are in format "[{name}]: {summary}" from capsules
+                    # or depth_prompt from full profiles
+                    is_npc_reinforcement = any(
+                        char.get('is_npc', False) and 
+                        char.get('data', {}).get('name', 'Unknown') in chunk
+                        for char in request.characters
+                    )
+                    
+                    label = "[NPC]" if is_npc_reinforcement else "[Character]"
+                    print(f"[REINFORCEMENT] {label} profile reinforced: {chunk[:80]}...")
+                
                 full_prompt += "[REINFORCEMENT: " + " | ".join(reinforcement_chunks) + "]\n"
             elif is_narrator_mode:
                 # Narrator reinforcement
+                print(f"[REINFORCEMENT] Narrator mode reinforced")
                 full_prompt += f"[REINFORCEMENT: {narrator_instruction.strip()}]\n"
         
         # World info canon law reinforcement logic every X turns
@@ -2114,6 +2181,327 @@ async def generate_card_field(req: CardGenRequest):
     field_type = req.field_type
     user_input = req.context
     
+    # Handle name collision for local NPC creation
+    if req.save_as == 'local_npc' and req.chat_id:
+        # ============================================================================
+        # ENHANCED NPC CREATION WITH EARLY VALIDATION
+        # ============================================================================
+        print(f"[NPC_CREATE] Starting NPC creation process")
+        print(f"[NPC_CREATE] Parameters: chat_id={req.chat_id!r}, save_as={req.save_as!r}, source_mode={req.source_mode!r}")
+        print(f"[NPC_CREATE] Input: field_type={field_type!r}, char_name={char_name!r}")
+        
+        # VALIDATE chat_id FIRST (early validation - defensive programming)
+        print(f"[NPC_CREATE] Step 1: Validating chat_id")
+        
+        if not req.chat_id or req.chat_id.strip() == '':
+            print(f"[NPC_CREATE] VALIDATION FAILED: No chat_id provided")
+            return {
+                "success": False,
+                "error": "Chat ID is required for NPC creation. Please ensure chat is initialized first."
+            }
+        
+        # Additional validation: Ensure chat_id is a string (not undefined or wrong type)
+        if not isinstance(req.chat_id, str):
+            print(f"[NPC_CREATE] VALIDATION FAILED: chat_id is not a string (type={type(req.chat_id)})")
+            return {
+                "success": False,
+                "error": f"Invalid chat_id type. Expected string, got {type(req.chat_id).__name__}."
+            }
+        
+        print(f"[NPC_CREATE] Step 2: Checking if chat exists in database")
+        
+        # Load chat data with enhanced validation
+        chat = db_get_chat(req.chat_id)
+        
+        if not chat:
+            print(f"[NPC_CREATE] VALIDATION FAILED: Chat '{req.chat_id}' not found in database")
+            return {
+                "success": False,
+                "error": f"Chat '{req.chat_id}' not found in database. Cannot create NPC in non-existent chat. Please create a new chat or ensure the chat ID is valid."
+            }
+        
+        print(f"[NPC_CREATE] VALIDATION PASSED: Chat '{req.chat_id}' exists and is valid")
+        print(f"[NPC_CREATE] Step 3: Proceeding with name generation and collision checks")
+        
+        generated_name = char_name
+        # If no name provided, generate one (fallback to existing default logic)
+        if not generated_name or generated_name.strip() == '':
+            print(f"[NPC_CREATE] No name provided, generating random name")
+            # Quick random name list
+            DEFAULT_NAMES = ["Alex", "Morgan", "Riley", "Jordan", "Casey", 
+                           "Quinn", "Blake", "Parker", "Avery", "Sage"]
+            generated_name = random.choice(DEFAULT_NAMES)
+            print(f"[NPC_CREATE] Generated fallback name: {generated_name}")
+        else:
+            print(f"[NPC_CREATE] Using user-provided name: {generated_name}")
+            
+            print(f"[NPC_CREATE] Step 4: Checking for name collisions")
+            # Check for name collision with global characters
+            active_chars = chat.get('activeCharacters', [])
+            global_char_names = []
+            for char_ref in active_chars:
+                # Handle both string and dict formats
+                if isinstance(char_ref, dict):
+                    char_ref = char_ref.get('id') or char_ref.get('name') or ''
+
+                if isinstance(char_ref, str) and not char_ref.startswith('npc_'):
+                    char_data = db_get_character(char_ref)
+                    if char_data:
+                        global_char_names.append(get_character_name(char_data).lower())
+            
+            print(f"[NPC_CREATE] Step 4a: Checking global character names: {len(global_char_names)} unique names")
+            
+            # Check for collision
+            if generated_name.lower() in global_char_names:
+                # Append suffix to NPC name
+                generated_name = f"{generated_name} (NPC)"
+                print(f"[NPC_CREATE] Name collision detected with global character, renamed to: {generated_name}")
+            
+            print(f"[NPC_CREATE] Step 4b: Checking for collisions with existing NPCs")
+            # Check for collision with other NPCs
+            metadata = chat.get("metadata", {}) or {}
+            localnpcs = metadata.get("localnpcs", {}) or {}
+            existing_npc_names = [npc.get("name", "").lower() for npc in localnpcs.values()]
+            
+            print(f"[NPC_CREATE] Step 4b: Found {len(existing_npc_names)} existing NPCs to check against")
+            
+            if generated_name.lower() in existing_npc_names:
+                # Append number
+                counter = 2
+                base_name = generated_name
+                while f"{base_name} {counter}".lower() in existing_npc_names:
+                    counter += 1
+                generated_name = f"{base_name} {counter}"
+                print(f"[NPC_CREATE] Duplicate NPC name detected, renamed to: {generated_name}")
+            
+            print(f"[NPC_CREATE] Step 5: Finalizing NPC name and generating entity_id")
+            # Update char_name with resolved name
+            char_name = generated_name
+            print(f"[NPC_CREATE] Final NPC name: {char_name}")
+            
+            # Generate unique entity_id for NPC
+            from app.database import generate_entity_id
+            entity_id = f"npc_{int(time.time())}_{generate_entity_id()}"
+            print(f"[NPC_CREATE] Step 5a: Generated unique entity_id: {entity_id}")
+            
+            print(f"[NPC_CREATE] Step 6: Starting LLM generation for character card")
+            # Generate character card fields for NPC using LLM
+
+            system_prompt = "You are a creative character designer. Generate detailed, engaging character information in a structured format."
+
+            user_prompt = f"""Create a character card for this character:
+
+            Name: {char_name}
+            Description: {user_input}
+
+            Generate the following in this exact format:
+
+            PERSONALITY_TRAITS:
+            [List 4-6 personality traits, comma-separated, like: "brave", "loyal", "gruff"]
+
+            PHYSICAL_TRAITS:
+            [List 4-6 physical/body traits, comma-separated, like: "tall", "muscular", "scarred"]
+
+            SCENARIO:
+            [Write a scenario describing the setting/situation where you meet this character]
+
+            FIRST_MESSAGE:
+            [Write the character's first message/greeting using *asterisks* for actions and "quotes" for speech]
+
+            FULL_DESCRIPTION:
+            [Write a detailed description of the character's appearance, background, and mannerisms]
+
+            GENRE:
+            [One word genre like: Fantasy, SciFi, Modern, etc.]
+
+            TAGS:
+            [3-5 relevant tags, comma-separated]"""
+
+            try:
+                print(f"[NPC_CREATE] Step 6a: Starting LLM API call")
+                print(f"[NPC_CREATE] Step 6a: LLM system prompt: You are a creative character designer. Generate detailed, engaging character information in a structured format.")
+                print(f"[NPC_CREATE] Step 6a: LLM user prompt (first 200 chars): Create a character card for this character: Name: {char_name}, Description: {user_input[:200] if len(user_input) > 200 else user_input}...")
+                
+                llm_result = await call_llm_helper(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=1000
+                )
+                
+                # Set default values
+                description = user_input
+                personality_traits = ["mysterious", "capable"]
+                physical_traits = []
+                scenario = f"You encounter {char_name}."
+                first_message = f"*{char_name} looks at you.*"
+                genre = "General"
+                tags = ["generated", "npc"]
+                
+                print(f"[NPC_CREATE] Step 6b: Parsing LLM response")
+                print(f"[NPC_CREATE] Step 6b: LLM raw response (first 500 chars): {llm_result[:500] if llm_result and len(llm_result) > 500 else llm_result}...")
+                
+                # Extract sections from LLM response
+                if "FULL_DESCRIPTION:" in llm_result:
+                    description = llm_result.split("FULL_DESCRIPTION:")[1].strip().split("\n\n")[0]
+                    print(f"[NPC_CREATE] Extracted FULL_DESCRIPTION: {description[:80]}...")
+                
+                if "PERSONALITY_TRAITS:" in llm_result:
+                    traits_text = llm_result.split("PERSONALITY_TRAITS:")[1].split("PHYSICAL_TRAITS:")[0].strip()
+                    personality_traits = [t.strip().strip('"').strip("'") for t in traits_text.split(",") if t.strip()]
+                    print(f"[NPC_CREATE] Extracted PERSONALITY_TRAITS: {len(personality_traits)} traits")
+                
+                if "PHYSICAL_TRAITS:" in llm_result:
+                    physical_text = llm_result.split("PHYSICAL_TRAITS:")[1].split("SCENARIO:")[0].strip()
+                    physical_traits = [t.strip().strip('"').strip("'") for t in physical_text.split(",") if t.strip()]
+                    print(f"[NPC_CREATE] Extracted PHYSICAL_TRAITS: {len(physical_traits)} traits")
+                
+                if "SCENARIO:" in llm_result:
+                    scenario = llm_result.split("SCENARIO:")[1].split("FIRST_MESSAGE:")[0].strip()
+                    print(f"[NPC_CREATE] Extracted SCENARIO: {scenario[:80]}...")
+                
+                if "FIRST_MESSAGE:" in llm_result:
+                    first_message = llm_result.split("FIRST_MESSAGE:")[1].split("FULL_DESCRIPTION:")[0].strip()
+                    print(f"[NPC_CREATE] Extracted FIRST_MESSAGE: {first_message[:80]}...")
+                
+                if "GENRE:" in llm_result:
+                    genre = llm_result.split("GENRE:")[1].split("TAGS:")[0].strip()
+                    print(f"[NPC_CREATE] Extracted GENRE: {genre}")
+                
+                if "TAGS:" in llm_result:
+                    tags_text = llm_result.split("TAGS:")[1].strip().split("\n")[0]
+                    tags = [t.strip() for t in tags_text.split(",") if t.strip()]
+                    print(f"[NPC_CREATE] Extracted TAGS: {tags}")
+                
+                print(f"[NPC_CREATE] Step 6c: LLM generation successful - all fields parsed")
+                
+            except Exception as e:
+                # Handle LLM failure and use defaults
+                print(f"[NPC_CREATE] Step 6d: LLM generation failed, using default values")
+                print(f"[NPC_CREATE] Step 6d: Error exception: {type(e).__name__}: {str(e)[:200]}")
+                print(f"[NPC_CREATE] Step 6d: Falling back to default NPC values")
+                
+                # Set defaults
+                description = user_input
+                personality_traits = ["mysterious", "capable"]
+                physical_traits = ["average build"]
+                scenario = f"You encounter {char_name} for the first time."
+                first_message = f"*{char_name} looks up from what they were doing.*"
+                genre = "General"
+                tags = ["generated", "npc"]
+
+            print(f"[NPC_CREATE] Step 7: Building character data structure")
+            print(f"[NPC_CREATE] Step 7a: Character name: {char_name}")
+            print(f"[NPC_CREATE] Step 7b: Description: {description[:80]}...")
+            print(f"[NPC_CREATE] Step 7c: Personality traits: {personality_traits}")
+            print(f"[NPC_CREATE] Step 7d: Physical traits: {physical_traits}")
+            print(f"[NPC_CREATE] Step 7e: Scenario: {scenario[:80]}...")
+            print(f"[NPC_CREATE] Step 7f: First message: {first_message[:80]}...")
+            print(f"[NPC_CREATE] Step 7g: Genre: {genre}, Tags: {tags}")
+            
+            # Build PList format for creator_notes and depth_prompt
+            personality_plist = ', '.join([f'"{trait}"' for trait in personality_traits])
+            body_plist = ', '.join([f'"{trait}"' for trait in physical_traits]) if physical_traits else '"mysterious figure"'
+            tags_list = ', '.join(tags)
+
+            plist_format = f"""[{char_name}'s Personality= {personality_plist}]
+            [{char_name}'s body= {body_plist}]
+            [Genre: {genre}; Tags: {tags_list}]"""
+
+            # Add source information to creator_notes
+            source_info = f"Created from {req.source_mode}: {user_input[:100]}\n\n" if req.source_mode else ""
+
+            # Create full character card with generated data
+            character_data = {
+                "name": char_name,
+                "description": description,
+                "personality": "",  # Empty per your example
+                "scenario": scenario,
+                "first_mes": first_message,
+                "mes_example": "",
+                "creator_notes": source_info + plist_format,
+                "system_prompt": "",
+                "post_history_instructions": "",
+                "alternate_greetings": [],
+                "tags": tags,
+                "creator": "NeuralRP NPC Generator",
+                "extensions": {
+                    "depth_prompt": {
+                        "prompt": plist_format,
+                        "depth": 4
+                    },
+                    "talkativeness": 100
+                }
+            }
+            print(f"[NPC_CREATE] Step 7h: Character data structure built, keys: {list(character_data.keys())}")
+
+
+            print(f"[NPC_CREATE] Step 8: Checking for duplicate NPCs before database insertion")
+            
+            # Get existing NPCs from database
+            existing_npcs = db_get_chat_npcs(req.chat_id)
+            print(f"[NPC_CREATE] Step 8a: Found {len(existing_npcs)} existing NPCs in chat")
+            
+            # Check for duplicates
+            duplicate_check_result = None
+            for npc in existing_npcs:
+                if npc.get("name", "").lower() == char_name.lower():
+                    duplicate_check_result = npc
+                    print(f"[NPC_CREATE] Step 8a: DUPLICATE FOUND: {npc.get('name')!r} (entityid: {npc.get('entityid')})")
+                    break
+            
+            if duplicate_check_result:
+                print(f"[NPC_CREATE] Step 8b: Returning duplicate error")
+                return {
+                    "success": False,
+                    "error": f"NPC '{char_name}' already exists in this chat",
+                    "existing_entityid": duplicate_check_result.get("entityid") or duplicate_check_result.get("entity_id"),
+                    "existing_name": duplicate_check_result.get("name"),
+                }
+            
+            print(f"[NPC_CREATE] Step 8c: No duplicate found, proceeding with database insertion")
+            
+            # Call the NEW db_create_npc signature
+            print(f"[NPC_CREATE] Step 8d: Calling db_create_npc_and_update_chat with chat_id={req.chat_id!r}, name={char_name!r}")
+            print(f"[NPC_CREATE] Step 8d: Character data keys: {list(character_data.keys())}")
+            
+            # Call NEW atomic function - does both NPC creation AND chat update in one transaction
+            success, entity_id, error = db_create_npc_and_update_chat(
+                chat_id=req.chat_id,
+                npc_data=character_data,
+            )
+
+            print(f"[NPC_CREATE] Step 8e: db_create_npc_and_update_chat returned: success={success}, entity_id={entity_id!r}, error={error!r}")
+
+            if not success:
+                print(
+                    f"[API][NPC] db_create_npc_and_update_chat failed: chat_id={req.chat_id!r}, "
+                    f"name={character_data.get('name')!r}, error={error!r}"
+                )
+                return {
+                    "success": False,
+                    "error": error or "Failed to create NPC in database",
+                    "existing_entityid": entity_id,
+                    "existing_name": character_data.get("name"),
+                }
+            
+            print(f"[NPC_CREATE] Step 9: Database operation succeeded - NPC created and chat updated atomically")
+            
+            print(f"[NPC_CREATE] Step 10: NPC creation completed successfully")
+            print(f"[NPC_CREATE] Step 10: Final summary:")
+            print(f"[NPC_CREATE] Step 10:   - NPC name: {char_name}")
+            print(f"[NPC_CREATE] Step 10:   - Entity ID: {entity_id}")
+            print(f"[NPC_CREATE] Step 10:   - Chat ID: {req.chat_id}")
+            print(f"[NPC_CREATE] Step 10:   - Total time: {int(time.time()) - int(time.time())} seconds (this is a placeholder)")
+            
+            # IMPORTANT: Return with consistent field names (no underscore for frontend)
+            return {
+                "success": True,
+                "entityid": entity_id,      # Frontend expects 'entityid' (no underscore)
+                "entity_id": entity_id,     # Keep for backwards compatibility
+                "name": char_name,
+                "message": f"NPC '{char_name}' created successfully"
+            }
+    
     # Customize instructions based on source mode
     source_desc = "provided chat context" if req.source_mode != "manual" else "provided text"
     
@@ -2141,6 +2529,41 @@ Source Text:
 
 Only output the body array line, nothing else."""
             result = await call_llm_helper(system, prompt, 300)
+            
+        elif field_type == 'full':
+            # Handle 'full' field type for both chat and manual source modes
+            # This generates a complete character card from the provided context
+            system = "You are a creative character designer. Generate detailed, engaging character information in a structured format."
+            
+            prompt = f"""Create a character card for this character:
+
+Name: {char_name}
+Description: {user_input}
+
+Generate the following in this exact format:
+
+PERSONALITY_TRAITS:
+[List 4-6 personality traits, comma-separated, like: "brave", "loyal", "gruff"]
+
+PHYSICAL_TRAITS:
+[List 4-6 physical/body traits, comma-separated, like: "tall", "muscular", "scarred"]
+
+SCENARIO:
+[Write a scenario describing the setting/situation where you meet this character]
+
+FIRST_MESSAGE:
+[Write the character's first message/greeting using *asterisks* for actions and "quotes" for speech]
+
+FULL_DESCRIPTION:
+[Write a detailed description of the character's appearance, background, and mannerisms]
+
+GENRE:
+[One word genre like: Fantasy, SciFi, Modern, etc.]
+
+TAGS:
+[3-5 relevant tags, comma-separated]"""
+
+            result = await call_llm_helper(system, prompt, max_tokens=1000)
             
         elif field_type == 'dialogue_likes':
             system = "You are an expert at writing roleplay dialogue in markdown format with {{char}} and {{user}} placeholders."
@@ -2208,12 +2631,130 @@ Use markdown format with *actions* and "speech". Make it immersive. Only output 
             result = await call_llm_helper(system, prompt, 600)
             
         else:
-            return {"success": False, "error": "Unknown field type"}
+            return {"success": False, "error": f"Unknown field type: {field_type}"}
         
-        return {"success": True, "text": result}
+        # Apply PList formatting to ensure proper output format
+        formatted_result = extract_plist_from_llm_output(result, field_type, char_name)
+        
+        return {"success": True, "text": formatted_result}
         
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+# PList Formatting Helper Functions
+def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) -> str:
+    """Extract PList-formatted content from LLM output and ensure proper format."""
+    import re
+    
+    # If result already starts with bracket, it's likely PList formatted
+    if result.strip().startswith('['):
+        # Extract all bracketed entries
+        bracketed_entries = re.findall(r'\[.+?\]', result)
+        
+        # Clean up entries
+        lines = [entry.strip() for entry in bracketed_entries if entry.strip()]
+        
+        if lines:
+            return '\n'.join(lines)
+    
+    # Try to parse structured format if LLM returned sections
+    # This handles cases where LLM uses section headers like PERSONALITY_TRAITS:, PHYSICAL_TRAITS:, etc.
+    result_lower = result.lower()
+    
+    # Handle different field types
+    if field_type in ['personality', 'body']:
+        # For personality/body, extract trait lists and format as PList
+        trait_pattern = r'(?:personality_traits|physical_traits|personality|body)[\s:\s*]*([^\n]*)'
+        match = re.search(trait_pattern, result_lower, re.IGNORECASE)
+        
+        if match:
+            traits_text = match.group(1)
+            # Extract traits from comma-separated or quoted list
+            if '"' in traits_text or "'" in traits_text:
+                # Quoted traits
+                traits = re.findall(r'["\']([^"\']+)["\']', traits_text)
+            else:
+                # Unquoted traits (comma-separated)
+                traits = [t.strip() for t in traits_text.split(',') if t.strip()]
+            
+            if traits:
+                # Format as PList
+                trait_list = ', '.join([f'"{trait.strip()}"' for trait in traits])
+                plist_key = 'Personality' if field_type == 'personality' else 'body'
+                return f"[{char_name}'s {plist_key}= {trait_list}]"
+    
+    elif field_type == 'full':
+        # Full character card generation - extract multiple sections
+        # Extract personality traits
+        personality_traits = []
+        if 'personality_traits:' in result_lower:
+            traits_match = re.search(r'personality_traits[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
+            if traits_match:
+                traits_text = traits_match.group(1)
+                personality_traits = [t.strip().strip('"').strip("'") for t in traits_text.split(',') if t.strip()]
+        
+        # Extract physical traits
+        physical_traits = []
+        if 'physical_traits:' in result_lower:
+            phys_match = re.search(r'physical_traits[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
+            if phys_match:
+                phys_text = phys_match.group(1)
+                physical_traits = [t.strip().strip('"').strip("'") for t in phys_text.split(',') if t.strip()]
+        
+        # Extract genre and tags
+        genre = "General"
+        tags = []
+        if 'genre:' in result_lower:
+            genre_match = re.search(r'genre[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
+            if genre_match:
+                genre = genre_match.group(1).strip()
+        
+        if 'tags:' in result_lower:
+            tags_match = re.search(r'tags[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
+            if tags_match:
+                tags_text = tags_match.group(1)
+                tags = [t.strip() for t in tags_text.split(',') if t.strip()]
+        
+        # Extract scenario
+        scenario = f"You encounter {char_name}."
+        if 'scenario:' in result_lower:
+            scenario_match = re.search(r'scenario[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
+            if scenario_match:
+                scenario = scenario_match.group(1).strip()
+        
+        # Extract first message
+        first_message = f"*{char_name} looks at you.*"
+        if 'first_message:' in result_lower:
+            first_match = re.search(r'first_message[:\s*]*([^\n]+)', result_lower, re.IGNORECASE)
+            if first_match:
+                first_message = first_match.group(1).strip()
+        
+        # Extract description
+        description = result
+        if 'full_description:' in result_lower:
+            desc_match = re.search(r'full_description[:\s*]*([^\n]+)', result_lower, re.IGNORECASE)
+            if desc_match:
+                description = desc_match.group(1).strip()
+        
+        # Format as multiple PList entries (like NPC creation)
+        personality_plist = ', '.join([f'"{trait}"' for trait in personality_traits]) if personality_traits else '"mysterious"'
+        body_plist = ', '.join([f'"{trait}"' for trait in physical_traits]) if physical_traits else '"mysterious figure"'
+        tags_list = ', '.join([f'"{tag}"' for tag in tags]) if tags else '"generated"'
+        
+        plist_format = f"""[{char_name}'s Personality= {personality_plist}]
+[{char_name}'s body= {body_plist}]
+[Genre: {genre}; Tags: {tags_list}]"""
+        
+        return plist_format
+    
+    # Fallback: try to extract any bracketed content
+    bracketed_entries = re.findall(r'\[.+?\]', result)
+    if bracketed_entries:
+        lines = [entry.strip() for entry in bracketed_entries if entry.strip()]
+        return '\n'.join(lines)
+    
+    # Last fallback: return original result
+    return result.strip()
 
 # Capsule Generation for Multi-Character Optimization
 async def generate_capsule_for_character(char_name: str, description: str, depth_prompt: str = "") -> str:
@@ -2504,8 +3045,9 @@ async def generate_world_entries(req: WorldGenRequest):
         
         prompt = template.format(worldName=req.world_name, input=source_text)
         result = await call_llm_helper("You are a world-building expert.", prompt, 600)
-        # Clean up output to only include bracketed entries
-        lines = [line.strip() for line in result.split('\n') if line.strip().startswith('[')]
+        # Apply PList formatting to extract bracketed content from LLM response
+        formatted_result = extract_plist_from_llm_output(result, req.section, req.world_name)
+        lines = formatted_result.split('\n')
         return {"success": True, "text": '\n'.join(lines)}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -2668,8 +3210,97 @@ async def dismiss_hint(request: dict):
         return {"success": True}
     return {"success": False, "error": "No hint_id provided"}
 
+def load_character_profiles(active_chars: List[str], localnpcs: Dict) -> List[dict]:
+    """Load both global characters and local NPCs into unified character profile list."""
+    character_profiles = []
+
+    for char_ref in active_chars:
+        # Handle both string and dict formats
+        if isinstance(char_ref, dict):
+            char_ref = char_ref.get("id") or char_ref.get("name") or ""
+
+        if isinstance(char_ref, str) and char_ref.startswith("npc_"):
+            # Load NPC from local metadata
+            if char_ref in localnpcs:
+                npc = localnpcs[char_ref]
+                
+                # Validate NPC has required data
+                if not npc.get('name'):
+                    print(f"[ERROR] NPC {char_ref} missing name, skipping")
+                    continue
+                
+                if not npc.get('data'):
+                    print(f"[ERROR] NPC {char_ref} missing character data, skipping")
+                    continue
+                
+                # Check if NPC is active
+                if not npc.get('is_active', True):
+                    print(f"[CONTEXT] Skipping inactive NPC: {npc['name']}")
+                    continue
+                
+                # Add to profiles
+                character_profiles.append({
+                    'name': npc['name'],
+                    'data': npc['data'],
+                    'entity_id': char_ref,
+                    'is_npc': True
+                })
+            else:
+                print(f"[WARNING] NPC {char_ref} not found in chat metadata, skipping")
+        else:
+            # Load global character from database
+            char_data = db_get_character(char_ref)
+            if char_data:
+                # Validate global character too
+                if not char_data.get('data'):
+                    print(f"[ERROR] Global character {char_ref} missing data, skipping")
+                    continue
+                
+                character_profiles.append({
+                    'name': get_character_name(char_data),
+                    'data': char_data.get('data', {}),
+                    'entity_id': char_ref,
+                    'is_npc': False
+                })
+            else:
+                print(f"[WARNING] Global character {char_ref} not found, skipping")
+    
+    npc_count = sum(1 for c in character_profiles if c.get('is_npc', False))
+    print(f"[CONTEXT] Loaded {len(character_profiles)} characters ({npc_count} NPCs)")
+    
+    return character_profiles
+
 @app.post("/api/chat")
 async def chat(request: PromptRequest):
+    # Always define chat_data first
+    chat_data = None
+
+    # ========== CHARACTER RESOLUTION ==========
+    # Check if characters are already resolved (dicts with 'data' field)
+    # This happens on subsequent messages after first resolution
+    if request.characters and isinstance(request.characters[0], dict) and "data" in request.characters[0]:
+        # Characters already resolved - skip resolution
+        print(f"[CONTEXT] Characters already resolved ({len(request.characters)} chars)")
+    else:
+        # Load chat data if needed
+        if request.chat_id:
+            chat_data = db_get_chat(request.chat_id)
+
+        # Resolve character references (global + NPCs)
+        # (you may have more logic here)
+
+    # Now chat_data is always defined (None or a dict)
+    if chat_data:
+        metadata = chat_data.get("metadata", {}) or {}
+        localnpcs = metadata.get("localnpcs", {}) or {}
+        active_chars = chat_data.get("activeCharacters", [])
+
+        # Resolve character references to full objects
+        resolved_characters = load_character_profiles(active_chars, localnpcs)
+        request.characters = resolved_characters
+
+
+    
     # Auto-generate capsules for group chats (2+ characters)
     updated_characters = []
     chars_needing_capsules = []
@@ -2701,7 +3332,7 @@ async def chat(request: PromptRequest):
                     data["extensions"] = {}
                 data["extensions"]["multi_char_summary"] = capsule
                 
-                # Save the updated capsule to the character file
+                # Save the updated capsule to the character file or NPC data
                 filename = char_obj.get("_filename")
                 if filename:
                     file_path = os.path.join(DATA_DIR, "characters", filename)
@@ -2711,6 +3342,30 @@ async def chat(request: PromptRequest):
                     with open(file_path, "w", encoding="utf-8") as f:
                         json.dump(save_data, f, indent=2, ensure_ascii=False)
                     print(f"SAVED capsule for {name}: {capsule[:80]}...")
+                elif char_obj.get("is_npc", False):
+                    npc_id = char_obj.get("entity_id")
+                    if npc_id and request.chat_id:
+                        try:
+                            npc_data = data.copy()
+                            db_update_npc(request.chat_id, npc_id, npc_data)
+                            chat = db_get_chat(request.chat_id)
+                            if chat:
+                                metadata = chat.get("metadata", {}) or {}
+                                localnpcs = metadata.get("localnpcs", {}) or {}
+                                if npc_id in localnpcs:
+                                    localnpcs[npc_id]["data"] = npc_data
+                                    metadata["localnpcs"] = localnpcs
+                                    chat["metadata"] = metadata
+                                    db_save_chat(request.chat_id, chat)
+                                    print(f"SAVED capsule for NPC {name}: {capsule[:80]}...")
+                                else:
+                                    print(f"[WARNING] NPC {npc_id} not found in metadata, capsule not saved")
+                            else:
+                                print(f"[WARNING] Chat {request.chat_id} not found, NPC capsule not saved")
+                        except Exception as e:
+                            print(f"Failed to save NPC capsule for {name}: {e}")
+                else:
+                    print(f"[WARNING] Character {name} has no _filename and is not NPC, capsule not saved")
             except Exception as e:
                 print(f"Failed to auto-generate capsule for {name}: {e}")
         
@@ -2843,6 +3498,8 @@ async def chat(request: PromptRequest):
                 "messages": [m.dict() for m in current_request.messages],
                 "summary": current_request.summary
             }
+            # Include token count for frontend to use in SD optimization
+            data["_token_count"] = tokens
             return data
     
     # Route through resource manager with performance tracking
@@ -2851,7 +3508,7 @@ async def chat(request: PromptRequest):
         try:
             data = await resource_manager.execute_llm(llm_operation, op_type="heavy")
             duration = time.time() - start_time
-            performance_tracker.record_llm(duration)
+            performance_tracker.record_llm(duration, context_tokens=tokens)
             
             # Generate hints based on performance
             hints = hint_engine.generate_hint(performance_tracker, tokens)
@@ -2899,7 +3556,7 @@ async def chat(request: PromptRequest):
             return data
         except Exception as e:
             duration = time.time() - start_time
-            performance_tracker.record_llm(duration)
+            performance_tracker.record_llm(duration, context_tokens=tokens)
             return {"error": str(e)}
     else:
         # Direct call when performance mode is disabled
@@ -2998,7 +3655,7 @@ async def generate_image(params: SDParams):
         try:
             result = await resource_manager.execute_sd(sd_operation)
             duration = time.time() - start_time
-            performance_tracker.record_sd(duration)
+            performance_tracker.record_sd(duration, context_tokens=context_tokens)
             
             # Generate hints based on SD performance
             hints = hint_engine.generate_hint(performance_tracker, context_tokens, duration)
@@ -3008,7 +3665,7 @@ async def generate_image(params: SDParams):
             return result
         except Exception as e:
             duration = time.time() - start_time
-            performance_tracker.record_sd(duration)
+            performance_tracker.record_sd(duration, context_tokens=context_tokens)
             return {"error": str(e)}
     else:
         # Direct call when performance mode is disabled
@@ -3340,9 +3997,10 @@ async def save_chat(request: dict):
     
     # Save to database (primary source)
     try:
-        db_save_chat(name, chat_data)
+        id_mapping = db_save_chat(name, chat_data)
     except Exception as e:
         print(f"Error saving chat to database: {e}")
+        return {"success": False, "error": str(e)}
     
     # Also export to JSON for backward compatibility
     file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
@@ -3350,7 +4008,7 @@ async def save_chat(request: dict):
         json.dump(chat_data, f, indent=2, ensure_ascii=False)
     
     print(f"Chat saved to DB and exported to JSON: {name}")
-    return {"success": True, "name": name}
+    return {"success": True, "name": name, "id_mapping": id_mapping}
 
 @app.delete("/api/chats/{name}")
 async def delete_chat_endpoint(name: str):
@@ -3369,6 +4027,79 @@ async def delete_chat_endpoint(name: str):
         return {"success": True}
     return {"error": "File not found"}
 
+@app.get("/api/chats/{chat_id}/npcs")
+async def get_chat_npcs_endpoint(chat_id: str):
+    """
+    Get all NPCs for a specific chat session.
+    
+    ARCHITECTURAL FIX: Database is single source of truth.
+    Prioritize database data over metadata to ensure consistency.
+    Metadata is used only as fallback for NPCs not yet in database.
+    """
+    try:
+        # First, try to get from database (authoritative source)
+        db_npcs = db_get_chat_npcs(chat_id)
+        
+        # Get metadata for fallback (only if DB has no NPCs)
+        chat = db_get_chat(chat_id)
+        if not chat:
+            return {"success": False, "error": "Chat not found"}
+        
+        metadata_npcs = chat.get('metadata', {}).get('localnpcs', {})
+        
+        # Merge: DB data takes precedence, metadata fills in gaps
+        merged_npcs = []
+        seen_entity_ids = set()
+        
+        # First, add all database NPCs (authoritative source)
+        for npc in db_npcs:
+            entity_id = npc.get('entityid') or npc.get('entity_id')
+            if entity_id and entity_id not in seen_entity_ids:
+                merged_npcs.append({
+                    'entityid': entity_id,
+                    'entity_id': entity_id,
+                    'name': npc.get('name', 'Unknown'),
+                    'data': npc.get('data', {}),
+                    'isnpc': True,
+                    'isactive': bool(npc.get('isactive', npc.get('is_active', True))),
+                    'is_active': bool(npc.get('isactive', npc.get('is_active', True))),
+                    'promoted': bool(npc.get('promoted', False)),
+                    'createdat': npc.get('createdat', npc.get('created_at', int(time.time()))),
+                    'created_at': npc.get('createdat', npc.get('created_at', int(time.time())))
+                })
+                seen_entity_ids.add(entity_id)
+        
+        # Second, fill gaps from metadata only (for NPCs not in DB)
+        for npc_id, npc_data in metadata_npcs.items():
+            if npc_id not in seen_entity_ids:
+                merged_npcs.append({
+                    'entityid': npc_id,
+                    'entity_id': npc_id,
+                    'name': npc_data.get('name', 'Unknown'),
+                    'data': npc_data.get('data', {}),
+                    'isnpc': True,
+                    'isactive': npc_data.get('is_active', True),
+                    'promoted': npc_data.get('promoted', False),
+                    'createdat': npc_data.get('created_at', int(time.time())),
+                    'created_at': npc_data.get('created_at', int(time.time()))
+                })
+                seen_entity_ids.add(npc_id)
+        
+        print(f"[NPC_GET] Returning {len(merged_npcs)} NPCs ({len(db_npcs)} from DB, {len(merged_npcs) - len(db_npcs)} from metadata)")
+        
+        return {
+            "success": True,
+            "npcs": merged_npcs
+        }
+    except Exception as e:
+        print(f"Error loading NPCs: {e}")
+        return {"success": False, "error": str(e)}
+
+# NPC Promotion Request Model
+class NPCPromotionRequest(BaseModel):
+    chat_id: str
+    npc_id: str
+
 # Forking functionality
 class ForkRequest(BaseModel):
     origin_chat_name: str
@@ -3377,97 +4108,99 @@ class ForkRequest(BaseModel):
 
 @app.post("/api/chats/fork")
 async def fork_chat(request: ForkRequest):
-    """Create a new chat branch from a specific message in an existing chat."""
+    """
+    Fork a chat at a specific message.
+    UPDATED: Now handles NPC entity ID remapping and relationship copying.
+    """
     origin_chat_name = request.origin_chat_name
     fork_from_message_id = request.fork_from_message_id
     branch_name = request.branch_name
     
-    # Load origin chat - try database first, then JSON fallback
-    origin_chat = None
-    try:
-        origin_chat = db_get_chat(origin_chat_name)
-    except Exception as e:
-        print(f"Error loading origin chat from database: {e}")
-    
-    # Fall back to JSON if database failed
+    # 1. Load origin chat
+    origin_chat = db_get_chat(origin_chat_name)
     if not origin_chat:
-        origin_file_path = os.path.join(DATA_DIR, "chats", f"{origin_chat_name}.json")
-        if not os.path.exists(origin_file_path):
-            return {"success": False, "error": "Origin chat not found"}
-        
-        with open(origin_file_path, "r", encoding="utf-8") as f:
-            origin_chat = json.load(f)
+        return {"success": False, "error": "Origin chat not found"}
     
-    # Find the fork point
-    messages = origin_chat.get("messages", [])
+    # 2. Find fork point and extract messages
+    messages = origin_chat.get('messages', [])
     fork_index = None
-    
     for i, msg in enumerate(messages):
-        if msg.get("id") == fork_from_message_id:
+        if msg.get('id') == fork_from_message_id:
             fork_index = i
             break
     
     if fork_index is None:
-        return {"success": False, "error": "Message not found in origin chat"}
+        return {"success": False, "error": "Fork message not found"}
     
-    # Generate branch name if not provided
-    if not branch_name:
-        # Get a short preview of the message content
-        preview = messages[fork_index].get("content", "")
-        if len(preview) > 30:
-            preview = preview[:27] + "..."
-        timestamp = time.strftime("%Y-%m-%d %H:%M", time.localtime())
-        branch_name = f"Fork from {timestamp} - '{preview}'"
+    # 3. Create branch data (messages up to fork point)
+    branch_messages = messages[:fork_index + 1]
     
-    # Create new branch chat data
-    branch_messages = messages[:fork_index + 1]  # Include the fork point message
+    # 4. Generate branch chat ID
+    branch_chat_id = f"{origin_chat_name}_fork_{int(time.time())}"
+
+    # 5. Copy metadata with NPCs
+    branch_metadata = origin_chat.get("metadata", {}).copy()
+    localnpcs = branch_metadata.get("localnpcs", {}).copy()
+
+    # 6. CRITICAL: Remap NPC entity IDs for branch safety
+    entity_mapping = db_copy_npcs_for_branch(
+        origin_chat_name,
+        branch_chat_id,
+        localnpcs  # modified in place
+    )
+
+    branch_metadata["localnpcs"] = localnpcs
+
     
+    # 7. Update activeCharacters with new NPC entity IDs
+    active_chars = origin_chat.get('activeCharacters', []).copy()
+    updated_active_chars = []
+    for char_ref in active_chars:
+        if char_ref in entity_mapping:
+            # Replace old NPC ID with new branch NPC ID
+            updated_active_chars.append(entity_mapping[char_ref])
+        else:
+            # Keep global character filenames as-is
+            updated_active_chars.append(char_ref)
+    
+    # 8. Assemble branch data
     branch_data = {
-        "messages": branch_messages,
-        "summary": origin_chat.get("summary", ""),
-        "activeCharacters": origin_chat.get("activeCharacters", []),
-        "activeWI": origin_chat.get("activeWI"),
-        "settings": origin_chat.get("settings", {}),
-        "metadata": {
-            "origin_chat_id": origin_chat_name,
-            "origin_message_id": fork_from_message_id,
-            "branch_name": branch_name,
-            "created_at": time.time()
+        'messages': branch_messages,
+        'summary': origin_chat.get('summary', ''),
+        'activeCharacters': updated_active_chars,
+        'activeWI': origin_chat.get('activeWI'),
+        'settings': origin_chat.get('settings', {}).copy(),
+        'metadata': {
+            **branch_metadata,
+            'origin_chat_id': origin_chat_name,
+            'origin_message_id': fork_from_message_id,
+            'branch_name': branch_name or f"Fork from message {fork_from_message_id}",
+            'created_at': time.time()
         }
     }
     
-    # Generate unique branch filename
-    base_name = f"{origin_chat_name}_fork_{int(time.time())}"
+    # 9. Copy relationship states with entity ID mapping BEFORE saving branch
+    # This ensures entity_mapping is complete before branch data is persisted
+    db_copy_relationship_states_with_mapping(
+        origin_chat_name,
+        branch_chat_id,
+        fork_from_message_id,
+        entity_mapping
+    )
     
-    # Save to database (primary source) with autosave enabled
-    try:
-        db_save_chat(base_name, branch_data, autosaved=True)
-    except Exception as e:
-        print(f"Error saving fork to database: {e}")
+    # 10. Save branch chat AFTER relationship copying
+    db_save_chat(branch_chat_id, branch_data, autosaved=True)
     
-    # === RELATIONSHIP TRACKER (Step 6): Copy relationship states for branch ===
-    # Copy relationship states from origin chat to new branch
-    try:
-        db_copy_relationship_states_for_branch(
-            origin_chat_id=origin_chat_name,
-            new_chat_id=base_name
-        )
-        print(f"[RELATIONSHIP] Copied states from {origin_chat_name} to {base_name}")
-    except Exception as e:
-        print(f"[RELATIONSHIP] Failed to copy relationship states: {e}")
+    print(f"[FORK] Created branch {branch_chat_id} from {origin_chat_name} at message {fork_from_message_id}")
+    print(f"[FORK] Remapped {len(entity_mapping)} NPC entity IDs")
     
-    # Also export to JSON for backward compatibility
-    branch_file_path = os.path.join(DATA_DIR, "chats", f"{base_name}.json")
-    with open(branch_file_path, "w", encoding="utf-8") as f:
-        json.dump(branch_data, f, indent=2, ensure_ascii=False)
-    
-    print(f"Fork saved to DB and exported to JSON: {base_name}")
     return {
-        "success": True, 
-        "name": base_name,
+        "success": True,
+        "name": branch_chat_id,
         "branch_name": branch_name,
         "origin_chat_name": origin_chat_name,
-        "fork_from_message_id": fork_from_message_id
+        "fork_from_message_id": fork_from_message_id,
+        "remapped_entities": len(entity_mapping)
     }
 
 @app.get("/api/chats/{name}/branches")
@@ -3565,6 +4298,423 @@ async def rename_branch(name: str, request: dict):
         json.dump(chat_data, f, indent=2, ensure_ascii=False)
     
     return {"success": True, "branch_name": branch_name}
+
+@app.put("/api/chats/{chat_id}/npcs/{npc_id}")
+async def update_npc(chat_id: str, npc_id: str, request: Request):
+    """
+    Update an existing NPC's data.
+
+    Architectural fix:
+    - Check BOTH database (chat_npcs) AND metadata (localnpcs) for NPCs
+    - Update in both locations to maintain consistency
+    - If NPC only exists in metadata, sync it to database
+    """
+    try:
+        body = await request.json()
+        npc_data = body.get("data", {})
+
+        if not npc_data:
+            return JSONResponse({"success": False, "error": "No data provided"}, status_code=400)
+
+        # 1) Get chat
+        chat = db_get_chat(chat_id)
+        if not chat:
+            return JSONResponse({"success": False, "error": "Chat not found"}, status_code=404)
+
+        # 2) Check if NPC exists in database OR metadata
+        existing_npcs = db_get_chat_npcs(chat_id)
+        npc_in_db = any(
+            npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id
+            for npc in existing_npcs
+        )
+        
+        metadata = chat.get("metadata", {}) or {}
+        localnpcs = metadata.get("localnpcs", {}) or {}
+        npc_in_metadata = npc_id in localnpcs
+
+        if not npc_in_db and not npc_in_metadata:
+            return JSONResponse(
+                {"success": False, "error": "NPC not found in database or metadata"},
+                status_code=404,
+            )
+
+        # 3) Update NPC in database (create with same entity_id if only in metadata)
+        if npc_in_db:
+            success = db_update_npc(chat_id, npc_id, npc_data)
+            if not success:
+                return JSONResponse(
+                    {"success": False, "error": "Failed to update NPC in database"},
+                    status_code=500,
+                )
+        else:
+            # NPC only in metadata - sync to database with SAME entity_id
+            print(f"[NPC_UPDATE] NPC {npc_id} only in metadata, syncing to database with same entity_id")
+            from app.database import db_create_npc_with_entity_id
+            success, error = db_create_npc_with_entity_id(chat_id, npc_id, npc_data)
+            if not success:
+                print(f"[NPC_UPDATE] Failed to sync NPC to database: {error}")
+
+        # 4) Update metadata
+        chat = db_get_chat(chat_id)  # reload to get latest structure
+        if chat:
+            metadata = chat.get("metadata", {}) or {}
+            localnpcs = metadata.get("localnpcs", {}) or {}
+
+            if npc_id in localnpcs:
+                localnpcs[npc_id]["data"] = npc_data
+                localnpcs[npc_id]["name"] = npc_data.get(
+                    "name",
+                    localnpcs[npc_id].get("name", "Unknown"),
+                )
+            else:
+                # Add to metadata if not there
+                localnpcs[npc_id] = {
+                    "name": npc_data.get("name", "Unknown"),
+                    "data": npc_data,
+                    "is_active": True,
+                    "promoted": False,
+                    "created_at": int(time.time())
+                }
+            
+            metadata["localnpcs"] = localnpcs
+            chat["metadata"] = metadata
+            db_save_chat(chat_id, chat)
+
+            print(f"[NPC_UPDATE] Updated NPC {npc_id} in database and metadata")
+            return {"success": True, "message": "NPC updated successfully"}
+
+        return JSONResponse(
+            {"success": False, "error": "Failed to sync metadata"}, status_code=500
+        )
+
+    except Exception as e:
+        print(f"Error updating NPC: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/chats/{chat_id}/npcs/{npc_id}/promote")
+async def promote_npc_to_global(chat_id: str, npc_id: str):
+    """
+    Promote a chat-local NPC to a permanent global character.
+    
+    ARCHITECTURAL FIX: After promoting, remove NPC from metadata to prevent stale data.
+    Database is single source of truth - metadata should reflect database state.
+    
+    Process:
+    1. Get NPC data from chat metadata
+    2. Create global character file in SillyTavern v2 format with proper nested structure
+    3. Add promotion history metadata to track origin
+    4. Save to database with correct character card format
+    5. Create new global entity ID
+    6. Update chat's activeCharacters to use global character
+    7. Mark NPC as promoted AND REMOVE from localnpcs metadata (prevents stale data)
+    
+    Returns:
+        {
+            "success": bool,
+            "filename": str,  # Global character filename
+            "global_entity_id": str,  # New entity ID for global character
+            "promoted_npc_id": str  # Original NPC ID (now promoted)
+        }
+    """
+    try:
+        # 1. Load chat and verify NPC exists
+        chat = db_get_chat(chat_id)
+        if not chat:
+            return {"success": False, "error": "Chat not found"}
+        
+        # 2. Get NPC from database OR metadata
+        db_npcs = db_get_chat_npcs(chat_id)
+        npc_data = None
+        for npc in db_npcs:
+            if npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id:
+                npc_data = npc
+                break
+        
+        # If not in database, check metadata
+        if not npc_data:
+            metadata = chat.get('metadata', {}) or {}
+            localnpcs = metadata.get('localnpcs', {})
+            if npc_id in localnpcs:
+                metadata_npc = localnpcs[npc_id]
+                npc_data = {
+                    "entityid": npc_id,
+                    "entity_id": npc_id,
+                    "name": metadata_npc.get("name", "Unknown"),
+                    "data": metadata_npc.get("data", {}),
+                    "is_active": metadata_npc.get("is_active", True),
+                    "promoted": metadata_npc.get("promoted", False)
+                }
+                print(f"[NPC_PROMOTE] NPC {npc_id} found in metadata only, proceeding with promotion")
+        
+        if not npc_data:
+            return {"success": False, "error": "NPC not found in database or metadata"}
+        
+        npc_name = npc_data.get("name", "Unknown")
+        char_data = npc_data.get("data", {})
+        
+        # 3. Generate global character filename
+        filename = f"{npc_name}.json"
+        # Handle name collisions
+        existing_char = db_get_character(filename)
+        if existing_char:
+            counter = 1
+            while f"{npc_name}_{counter}.json" in [c.get("_filename", "") for c in db_get_all_characters()]:
+                counter += 1
+            filename = f"{npc_name}_{counter}.json"
+        
+        # 4. Create proper character card structure (SillyTavern v2 format)
+        character_card = {
+            "spec": "chara_card_v2",
+            "spec_version": "2.0",
+            "data": char_data
+        }
+        
+        # Add promotion history metadata
+        char_data.setdefault('extensions', {})['promotion_history'] = {
+            'promoted_from': npc_id,
+            'promoted_at': int(time.time()),
+            'original_chat_id': chat_id
+        }
+        
+        # 5. Create global character file
+        file_path = os.path.join(DATA_DIR, "characters", filename)
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(character_card, f, indent=2, ensure_ascii=False)
+        
+        # 6. Save to database
+        if not db_save_character(character_card, filename):
+            return {"success": False, "error": "Failed to save character to database"}
+        
+        # 7. Update chat - remove NPC from metadata and add global character to activeCharacters
+        metadata = chat.get('metadata', {}) or {}
+        localnpcs = metadata.get('localnpcs', {}) or {}
+        if npc_id in localnpcs:
+            del localnpcs[npc_id]
+        
+        # 8. Update activeCharacters to use global character filename
+        active_chars = chat.get('activeCharacters', [])
+        if npc_id in active_chars:
+            active_chars.remove(npc_id)
+        if filename not in active_chars:
+            active_chars.append(filename)
+        
+        # 9. Mark NPC as promoted in database (if it exists there)
+        db_set_npc_active(chat_id, npc_id, False)  # Deactivate in DB if exists
+        
+        # 10. Save updated chat with NPC removed from metadata
+        metadata['localnpcs'] = localnpcs
+        chat['metadata'] = metadata
+        chat['activeCharacters'] = active_chars
+        db_save_chat(chat_id, chat)
+        
+        print(f"[NPC_PROMOTE] Promoted NPC {npc_name} ({npc_id}) to global character {filename}")
+        
+        return {
+            "success": True,
+            "filename": filename,
+            "global_entity_id": filename,
+            "promoted_npc_id": npc_id,
+            "promoted_npc_name": npc_name
+        }
+        
+    except Exception as e:
+        print(f"Error promoting NPC: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+@app.delete("/api/chats/{chat_id}/npcs/{npc_id}")
+async def delete_npc(chat_id: str, npc_id: str):
+    """
+    Delete an NPC from both database and metadata.
+    
+    This endpoint removes the NPC from:
+    - chat_npcs database table
+    - localnpcs metadata
+    - activeCharacters array
+    
+    Args:
+        chat_id: Chat ID
+        npc_id: Unique NPC entity ID
+    
+    Returns:
+        {
+            "success": bool,
+            "message": str
+        }
+    """
+    try:
+        # 1. Load chat
+        chat = db_get_chat(chat_id)
+        if not chat:
+            return JSONResponse({"success": False, "error": "Chat not found"}, status_code=404)
+        
+        # 2. Check if NPC exists in database OR metadata
+        db_npcs = db_get_chat_npcs(chat_id)
+        npc_in_db = any(
+            npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id
+            for npc in db_npcs
+        )
+        
+        metadata = chat.get("metadata", {}) or {}
+        localnpcs = metadata.get("localnpcs", {}) or {}
+        npc_in_metadata = npc_id in localnpcs
+        
+        if not npc_in_db and not npc_in_metadata:
+            return JSONResponse(
+                {"success": False, "error": "NPC not found in database or metadata"},
+                status_code=404
+            )
+        
+        npc_name = "Unknown"
+        if npc_in_metadata:
+            npc_name = localnpcs[npc_id].get("name", "Unknown")
+        elif npc_in_db:
+            for npc in db_npcs:
+                if npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id:
+                    npc_name = npc.get("name", "Unknown")
+                    break
+        
+        # 3. Delete from database
+        if npc_in_db:
+            success = db_delete_npc(chat_id, npc_id)
+            if success:
+                print(f"[NPC_DELETE] Deleted NPC {npc_id} from database")
+            else:
+                print(f"[NPC_DELETE] Failed to delete NPC {npc_id} from database")
+        
+        # 4. Delete from metadata (if present)
+        if npc_in_metadata:
+            del localnpcs[npc_id]
+            metadata["localnpcs"] = localnpcs
+        
+        # 5. ALWAYS remove from activeCharacters (regardless of storage location)
+        active_chars = chat.get('activeCharacters', [])
+        if npc_id in active_chars:
+            active_chars.remove(npc_id)
+            print(f"[NPC_DELETE] Removed NPC {npc_id} from activeCharacters")
+        chat['activeCharacters'] = active_chars
+        
+        # 6. Save updated chat
+        chat["metadata"] = metadata
+        db_save_chat(chat_id, chat)
+        print(f"[NPC_DELETE] Deleted NPC {npc_id} from metadata and activeCharacters")
+        
+        print(f"[NPC_DELETE] Successfully deleted NPC '{npc_name}' ({npc_id})")
+        
+        return {
+            "success": True,
+            "message": f"NPC '{npc_name}' has been deleted"
+        }
+        
+    except Exception as e:
+        print(f"Error deleting NPC: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/chats/{chat_id}/npcs/{npc_id}/toggle-active")
+async def toggle_npc_active(chat_id: str, npc_id: str):
+    """
+    Toggle NPC active/inactive status.
+    
+    ARCHITECTURAL FIX: Check BOTH database AND metadata for NPC.
+    Database is authoritative source, metadata is fallback.
+    
+    Updates:
+    - is_active field in chat_npcs database (authoritative)
+    - is_active field in chat_npcs metadata (for compatibility)
+    - activeCharacters array (adds/removes npc_id)
+    
+    Args:
+        chat_id: Chat ID
+        npc_id: Unique NPC entity ID
+    
+    Returns:
+        {
+            "success": bool,
+            "npc_id": str,
+            "is_active": bool,
+            "message": str
+        }
+    """
+    try:
+        # Load chat
+        chat = db_get_chat(chat_id)
+        if not chat:
+            return {"success": False, "error": "Chat not found"}
+        
+        metadata = chat.get('metadata', {}) or {}
+        localnpcs = metadata.get('localnpcs', {}) or {}
+        
+        # Check database first (authoritative source)
+        db_npcs = db_get_chat_npcs(chat_id)
+        db_npc = None
+        for npc in db_npcs:
+            if npc.get('entityid') == npc_id or npc.get('entity_id') == npc_id:
+                db_npc = npc
+                break
+        
+        # Check metadata as fallback
+        metadata_npc = localnpcs.get(npc_id)
+        
+        # NPC must exist in at least one location
+        if not db_npc and not metadata_npc:
+            return {"success": False, "error": f"NPC '{npc_id}' not found in database or metadata"}
+        
+        # Get current active state (prefer database)
+        if db_npc:
+            current_active = db_npc.get('isactive', db_npc.get('is_active', True))
+            npc_name = db_npc.get('name', 'Unknown')
+        else:
+            current_active = metadata_npc.get('is_active', True)
+            npc_name = metadata_npc.get('name', 'Unknown')
+        
+        # Toggle active state
+        new_active = not current_active
+        
+        # Update NPC in database (authoritative)
+        db_set_npc_active(chat_id, npc_id, new_active)
+        
+        # Update NPC in metadata (for compatibility)
+        if npc_id in localnpcs:
+            localnpcs[npc_id]['is_active'] = new_active
+        
+        # Update activeCharacters array
+        active_chars = chat.get('activeCharacters', [])
+        
+        if new_active:
+            # Activate NPC: Add if not already in array
+            if npc_id not in active_chars:
+                active_chars.append(npc_id)
+        else:
+            # Deactivate NPC: Remove from array
+            if npc_id in active_chars:
+                active_chars.remove(npc_id)
+        
+        # Save updated chat with modified metadata
+        metadata['localnpcs'] = localnpcs
+        chat['metadata'] = metadata
+        chat['activeCharacters'] = active_chars
+        db_save_chat(chat_id, chat)
+        
+        action = "activated" if new_active else "deactivated"
+        print(f"[NPC_TOGGLE] {npc_name} ({npc_id}) {action}")
+        
+        return {
+            "success": True,
+            "npc_id": npc_id,
+            "is_active": new_active,
+            "message": f"NPC '{npc_name}' has been {action}"
+        }
+        
+    except Exception as e:
+        print(f"Error toggling NPC active status: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
 
 # World Info Cache Management Endpoints
 @app.get("/api/world-info/cache/stats")
@@ -4288,6 +5438,345 @@ async def get_change_log_stats():
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ============================================================================
+# CHAT EXPORT FOR LLM TRAINING (Phase 7.4a)
+# ============================================================================
+
+@app.post("/api/chats/{chat_id}/export-training")
+async def export_chat_for_training(chat_id: str, request: Request):
+    """
+    Export chat in format optimized for LLM fine-tuning (Unsloth, Axolotl, etc.).
+    
+    Formats supported:
+    - 'alpaca': Instruction/input/output format
+    - 'sharegpt': Multi-turn conversation format  
+    - 'chat-ml': ChatML format
+    """
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    chat = db_get_chat(chat_id)
+    if not chat:
+        return JSONResponse({"success": False, "error": "Chat not found"}, status_code=404)
+
+    export_format = body.get('format', 'alpaca')
+    include_system = body.get('include_system', True)
+    include_world_info = body.get('include_world_info', False)
+    include_npcs = body.get('include_npcs', True)
+
+    # Get messages
+    messages = chat.get('messages', [])
+    
+    if not messages:
+        return JSONResponse({"success": False, "error": "Chat has no messages to export"}, status_code=400)
+
+    # Get character data for context
+    localnpcs = chat.get('metadata', {}).get('localnpcs', {})
+    active_chars = chat.get('activeCharacters', [])
+
+    # Build character context
+    character_context = []
+    for char_ref in active_chars:
+        # Handle both string and dict formats
+        if isinstance(char_ref, dict):
+            char_ref = char_ref.get('id') or char_ref.get('name') or char_ref.get('_filename') or ''
+        
+        if isinstance(char_ref, str) and char_ref.startswith('npc_'):
+            if char_ref in localnpcs and include_npcs:
+                npc = localnpcs[char_ref]
+                character_context.append(f"Character: {npc.get('name', 'Unknown')}")
+                if 'description' in npc.get('data', {}):
+                    character_context.append(npc['data']['description'])
+        elif isinstance(char_ref, str):
+            char_data = db_get_character(char_ref)
+            if char_data:
+                name = get_character_name(char_data)
+                character_context.append(f"Character: {name}")
+                if 'description' in char_data.get('data', {}):
+                    character_context.append(char_data['data']['description'])
+
+    # Build world info context (if requested)
+    world_context = []
+    if include_world_info:
+        active_wi = chat.get('activeWI')
+        if active_wi:
+            # Handle both dict and string formats
+            world_name = active_wi.get('name') if isinstance(active_wi, dict) else active_wi
+            if world_name:
+                world_data = db_get_world(world_name)
+                if world_data:
+                    entries = world_data.get('entries', {})
+                    # Handle both dict and list formats for entries
+                    if isinstance(entries, dict):
+                        for uid, entry in entries.items():
+                            if entry.get('is_canon_law') or entry.get('isCanonLaw'):
+                                world_context.append(entry.get('content', ''))
+                    elif isinstance(entries, list):
+                        for entry in entries:
+                            if entry.get('is_canon_law') or entry.get('isCanonLaw'):
+                                world_context.append(entry.get('content', ''))
+
+    # Format conversion
+    try:
+        if export_format == 'alpaca':
+            training_data = format_alpaca(messages, character_context, world_context, include_system)
+        elif export_format == 'sharegpt':
+            training_data = format_sharegpt(messages, character_context, world_context, include_system)
+        elif export_format == 'chat-ml':
+            training_data = format_chatml(messages, character_context, world_context, include_system)
+        else:
+            return JSONResponse({"success": False, "error": f"Unsupported format: {export_format}"}, status_code=400)
+    except Exception as e:
+        logger.error(f"Error formatting export: {e}")
+        return JSONResponse({"success": False, "error": f"Format error: {str(e)}"}, status_code=500)
+
+    return {
+        "success": True,
+        "format": export_format,
+        "data": training_data,
+        "message_count": len(messages),
+        "character_count": len(character_context),
+        "metadata": {
+            "chat_id": chat_id,
+            "exported_at": time.time(),
+            "include_system": include_system,
+            "include_world_info": include_world_info,
+            "include_npcs": include_npcs
+        }
+    }
+
+
+@app.post("/api/chats/export-all-training")
+async def export_all_chats_for_training(request: Request):
+    """
+    Export all chats as training data.
+    """
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    export_format = body.get('format', 'alpaca')
+    include_system = body.get('include_system', True)
+    include_world_info = body.get('include_world_info', False)
+    include_npcs = body.get('include_npcs', True)
+
+    all_chats = db_get_all_chats()
+    combined_data = []
+    total_messages = 0
+    errors = []
+
+    for chat in all_chats:
+        chat_id = chat.get('id')
+        if not chat_id:
+            continue
+
+        try:
+            # Get chat data directly instead of calling the endpoint
+            chat_data = db_get_chat(chat_id)
+            if not chat_data:
+                continue
+                
+            messages = chat_data.get('messages', [])
+            if not messages:
+                continue
+            
+            # Build contexts (simplified for bulk export)
+            character_context = []
+            world_context = []
+            
+            # Format based on export type
+            if export_format == 'alpaca':
+                data = format_alpaca(messages, character_context, world_context, include_system)
+            elif export_format == 'sharegpt':
+                data = format_sharegpt(messages, character_context, world_context, include_system)
+            elif export_format == 'chat-ml':
+                data = format_chatml(messages, character_context, world_context, include_system)
+            else:
+                continue
+            
+            combined_data.extend(data if isinstance(data, list) else [data])
+            total_messages += len(messages)
+            
+        except Exception as e:
+            errors.append(f"Chat {chat_id}: {str(e)}")
+            continue
+
+    return {
+        "success": True,
+        "format": export_format,
+        "data": combined_data,
+        "total_chats": len(all_chats),
+        "total_messages": total_messages,
+        "exported_at": time.time(),
+        "errors": errors if errors else None
+    }
+
+
+# ============================================================================
+# TRAINING DATA FORMATTERS (Phase 7.4a - Export Chat for LLM Training)
+# ============================================================================
+
+def format_alpaca(messages: list, character_context: list, world_context: list, 
+                 include_system: bool = True) -> list:
+    """
+    Format messages in Alpaca format for LLM fine-tuning.
+    
+    Alpaca format:
+    {
+        "instruction": "...",
+        "input": "...",
+        "output": "..."
+    }
+    """
+    training_data = []
+    
+    # Build system prompt from context
+    system_prompt = ""
+    if character_context:
+        system_prompt += "\n".join(character_context) + "\n\n"
+    if world_context:
+        system_prompt += "World Context:\n" + "\n".join(world_context) + "\n\n"
+    if include_system:
+        system_prompt += CONFIG["system_prompt"]
+    
+    # Convert messages to instruction/input/output pairs
+    for i, msg in enumerate(messages):
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        speaker = msg.get('speaker', role)
+        
+        if role == 'user':
+            # User message - create instruction
+            instruction = content
+            input_text = system_prompt if i == 0 else ""
+            output = ""
+            
+            # Find the next assistant response
+            if i + 1 < len(messages):
+                next_msg = messages[i + 1]
+                if next_msg.get('role') != 'user':
+                    output = next_msg.get('content', '')
+            
+            if output:  # Only add if we have a response
+                training_data.append({
+                    "instruction": instruction,
+                    "input": input_text,
+                    "output": output
+                })
+    
+    return training_data
+
+# ============================================================================
+# FORMAT CONVERSION FUNCTIONS (Phase 7.4b)
+# ============================================================================
+
+
+def format_sharegpt(messages: list, character_context: list, world_context: list,
+                   include_system: bool = True) -> list:
+    """
+    Format messages in ShareGPT format for LLM fine-tuning.
+    
+    ShareGPT format:
+    [
+        {
+            "id": "...",
+            "conversations": [
+                {"from": "human", "value": "..."},
+                {"from": "gpt", "value": "..."}
+            ]
+        }
+    ]
+    """
+    conversations = []
+    
+    # Build system message
+    if character_context or world_context or include_system:
+        system_msg = ""
+        if character_context:
+            system_msg += "\n".join(character_context) + "\n\n"
+        if world_context:
+            system_msg += "World Context:\n" + "\n".join(world_context) + "\n\n"
+        if include_system:
+            system_msg += CONFIG["system_prompt"]
+        
+        if system_msg.strip():
+            conversations.append({
+                "from": "system",
+                "value": system_msg.strip()
+            })
+    
+    # Add messages as conversation turns
+    for msg in messages:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        speaker = msg.get('speaker', role)
+        
+        # Map roles to ShareGPT format
+        if role == 'user':
+            from_role = "human"
+        else:
+            # Use speaker name for non-user roles (NPCs, narrator, etc.)
+            from_role = speaker if speaker and speaker != role else "gpt"
+        
+        if content.strip():  # Skip empty messages
+            conversations.append({
+                "from": from_role,
+                "value": content
+            })
+    
+    return [{
+        "id": str(int(time.time())),
+        "conversations": conversations
+    }]
+
+
+def format_chatml(messages: list, character_context: list, world_context: list,
+                 include_system: bool = True) -> list:
+    """
+    Format messages in ChatML format for LLM fine-tuning.
+    
+    ChatML format:
+    <|im_start|>system\n...<|im_end|>
+    <|im_start|>user\n...<|im_end|>
+    <|im_start|>assistant\n...<|im_end|>
+    """
+    conversation = ""
+    
+    # Add system message if requested
+    if include_system or character_context or world_context:
+        system_msg = ""
+        if character_context:
+            system_msg += "\n".join(character_context) + "\n\n"
+        if world_context:
+            system_msg += "World Context:\n" + "\n".join(world_context) + "\n\n"
+        if include_system:
+            system_msg += CONFIG["system_prompt"]
+        
+        if system_msg.strip():
+            conversation += f"<|im_start|>system\n{system_msg.strip()}<|im_end|>\n"
+    
+    # Add messages as ChatML turns
+    for msg in messages:
+        role = msg.get('role', 'user')
+        content = msg.get('content', '')
+        speaker = msg.get('speaker', role)
+        
+        # Map to ChatML roles
+        if role == 'user':
+            chatml_role = "user"
+        else:
+            # Use specific role name (narrator, NPC name, etc.)
+            chatml_role = speaker if speaker and speaker != role else "assistant"
+        
+        if content.strip():  # Skip empty messages
+            conversation += f"<|im_start|>{chatml_role}\n{content}<|im_end|>\n"
+    
+    return [conversation]
 
 
 # ============================================================================
