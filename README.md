@@ -52,9 +52,9 @@ Examples:
 
 - **Capsule personas** - Multi-character chats compress full character cards (500-1000 tokens) into 50-100 token summaries, saving 60-80% overhead per character while preserving distinct voices.
 
-- **Semantic world info** - Only retrieves lore semantically relevant to the last 5 messages. A 10,000-entry database still injects ~2k tokens because irrelevant entries stay out.
+- **Semantic world info** - Only retrieves lore semantically relevant to the last 5 messages. A 10,000-entry database just injects what's needed because irrelevant entries stay out.
 
-- **Chat-scoped NPCs** - NPCs exist only in their chat context and don't pollute the global character roster. No "guard from Chapter 2" appearing in unrelated prompts.
+- **Configurable character and world card insertion** - Configure how often character and world cards appear in the prompt in settings, with tested defaults already populated.
 
 ## Hardware Requirements
 
