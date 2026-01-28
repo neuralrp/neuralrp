@@ -102,11 +102,13 @@ Examples:
 app/
 ├── data/
 │   ├── neuralrp.db          # SQLite database (characters, chats, world info, embeddings, relationships)
-│   ├── characters/          # Exported SillyTavern V2 JSON cards
-│   ├── chats/               # Exported chat sessions
-│   └── worldinfo/           # Exported world info JSON
-└── images/                  # Generated and uploaded images
+│   ├── characters/          # SillyTavern V2 JSON cards
+│   ├── chats/               # Chat sessions
+│   └── worldinfo/           # World Card JSON
+└── images/                  # Generated images
 ```
+
+**Note:** Exported chats are downloaded directly to your browser's Downloads folder as JSON files (for LLM training), not saved to any server directory.
 
 ## Credits
 
