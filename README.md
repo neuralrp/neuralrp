@@ -1,3 +1,4 @@
+![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 # NeuralRP
 
 I created this because I wanted a local AI roleplay tool that was both simple, but also incorporated character and world cards. From there, I built (using AI) a chat and visual platform with quite a bit going on under the covers to optimize RP with 12-16 GB VRAM cards. Very niche, but if that niche is you, there's some unique features built into this app worth checking out.
