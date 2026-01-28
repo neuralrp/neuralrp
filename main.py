@@ -1914,6 +1914,14 @@ def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_t
     WORLD_INFO_CACHE[cache_key] = result
     return result
 
+def character_has_speaker(messages: List[ChatMessage], char_name: str) -> bool:
+    """Check if a character has ever spoken in the message history."""
+    for msg in messages:
+        speaker = msg.speaker or msg.role
+        if char_name in speaker:
+            return True
+    return False
+
 # Prompt Construction Engine
 def construct_prompt(request: PromptRequest):
     settings = request.settings
@@ -2001,6 +2009,10 @@ def construct_prompt(request: PromptRequest):
             semantic_threshold=0.45,
             is_initial_turn=is_initial_turn
         )
+        
+        # Add triggered world lore to prompt (if any matches)
+        if triggered_lore:
+            full_prompt += "### World Knowledge:\n" + "\n".join(triggered_lore) + "\n"
 
         # === 5.5. RELATIONSHIP CONTEXT (character-to-character and character-to-user dynamics) ===
     # Only inject if there are characters to have relationships
@@ -2028,22 +2040,29 @@ def construct_prompt(request: PromptRequest):
         # Check if this character is an NPC
         is_npc = char_obj.get("is_npc", False)
         
+        # Check if character has already appeared in the chat
+        char_has_appeared = character_has_speaker(request.messages, name)
+        
         if is_group_chat and multi_char_summary:
-            # Group chat mode: use compact capsule summary for both global characters AND NPCs
-            label = "[NPC]" if is_npc else "[Character]"
-            print(f"[CONTEXT] {label} {name} using capsule summary")
+            # Group chat mode: use capsule on first appearance or turn 1 only
+            if not char_has_appeared or len(request.messages) == 0:
+                label = "[NPC]" if is_npc else "[Character]"
+                print(f"[CONTEXT] {label} {name} introduced (capsule)")
+                full_prompt += f"### [{name}]: {multi_char_summary}\n"
             
-            full_prompt += f"### [{name}]: {multi_char_summary}\n"
-            # Use capsule for reinforcement too (shorter)
+            # Always add to reinforcement_chunks for periodic reinforcement
             reinforcement_chunks.append(f"[{name}]: {multi_char_summary}")
         else:
-            # Single character or no capsule: use full profile
-            label = "[NPC]" if is_npc else "[Character]"
-            print(f"[CONTEXT] {label} {name} using full card (no capsule)")
+            # Single character: full card on first turn only
+            if len(request.messages) == 0:
+                label = "[NPC]" if is_npc else "[Character]"
+                print(f"[CONTEXT] {label} {name} full card on first turn")
+                full_prompt += f"### Character Profile: {name}\n{description}\n"
+                if depth_prompt:
+                    full_prompt += f"### Context for {name}: {depth_prompt}\n"
             
-            full_prompt += f"### Character Profile: {name}\n{description}\n"
+            # Add depth_prompt to reinforcement_chunks for periodic reinforcement
             if depth_prompt:
-                full_prompt += f"### Context for {name}: {depth_prompt}\n"
                 reinforcement_chunks.append(depth_prompt)
 
     # === 7. CHAT HISTORY (with reinforcement) ===
@@ -2051,53 +2070,48 @@ def construct_prompt(request: PromptRequest):
     reinforce_freq = settings.get("reinforce_freq", 5)
     world_reinforce_freq = settings.get("world_info_reinforce_freq", 4)  # Default to every 4 turns (optimized)
     
+    # Calculate current turn number (turn = (message_count + 1) // 2, since each turn has user + assistant message)
+    current_turn = (len(request.messages) + 1) // 2
+    
     # Track whether canon law was added in chat history to prevent duplication
     canon_added_in_history = False
     
-    # Get world info reinforcement counter from chat metadata
-    world_reinforce_counter = 0
-    if hasattr(request, 'world_reinforce_counter'):
-        world_reinforce_counter = request.world_reinforce_counter
-    elif hasattr(request, 'metadata') and request.metadata:
-        world_reinforce_counter = request.metadata.get('world_reinforce_counter', 0)
+    # Character reinforcement logic every X turns
+    if reinforce_freq > 0 and current_turn > 0 and current_turn % reinforce_freq == 0:
+        print(f"[REINFORCEMENT] Turn {current_turn}: Reinforcing character profiles")
+        
+        if reinforcement_chunks:
+            # Character reinforcement - reinforce both global characters AND active NPCs
+            for chunk in reinforcement_chunks:
+                # Determine if this is an NPC based on chunk format
+                # NPCs are in format "[{name}]: {summary}" from capsules
+                # or depth_prompt from full profiles
+                is_npc_reinforcement = any(
+                    char.get('is_npc', False) and 
+                    char.get('data', {}).get('name', 'Unknown') in chunk
+                    for char in request.characters
+                )
+                
+                label = "[NPC]" if is_npc_reinforcement else "[Character]"
+                print(f"[REINFORCEMENT] {label} profile reinforced: {chunk[:80]}...")
+            
+            full_prompt += "[REINFORCEMENT: " + " | ".join(reinforcement_chunks) + "]\n"
+        elif is_narrator_mode:
+            # Narrator reinforcement
+            print(f"[REINFORCEMENT] Narrator mode reinforced")
+            full_prompt += f"[REINFORCEMENT: {narrator_instruction.strip()}]\n"
     
-    for i, msg in enumerate(request.messages):
+    # World info canon law reinforcement logic every X turns
+    if world_reinforce_freq > 0 and current_turn > 0 and current_turn % world_reinforce_freq == 0:
+        if canon_law_entries:
+            full_prompt += "[WORLD REINFORCEMENT: " + " | ".join(canon_law_entries) + "]\n"
+            canon_added_in_history = True
+    
+    # Add chat history messages
+    for msg in request.messages:
         # Filter out meta-messages like "Visual System" if they exist
         if msg.speaker == "Visual System":
             continue
-
-        # Character reinforcement logic every X turns
-        if reinforce_freq > 0 and i > 0 and i % reinforce_freq == 0:
-            turn_count = len(request.messages)
-            print(f"[REINFORCEMENT] Turn {turn_count}: Reinforcing character profiles")
-            
-            if reinforcement_chunks:
-                # Character reinforcement - reinforce both global characters AND active NPCs
-                for chunk in reinforcement_chunks:
-                    # Determine if this is an NPC based on chunk format
-                    # NPCs are in format "[{name}]: {summary}" from capsules
-                    # or depth_prompt from full profiles
-                    is_npc_reinforcement = any(
-                        char.get('is_npc', False) and 
-                        char.get('data', {}).get('name', 'Unknown') in chunk
-                        for char in request.characters
-                    )
-                    
-                    label = "[NPC]" if is_npc_reinforcement else "[Character]"
-                    print(f"[REINFORCEMENT] {label} profile reinforced: {chunk[:80]}...")
-                
-                full_prompt += "[REINFORCEMENT: " + " | ".join(reinforcement_chunks) + "]\n"
-            elif is_narrator_mode:
-                # Narrator reinforcement
-                print(f"[REINFORCEMENT] Narrator mode reinforced")
-                full_prompt += f"[REINFORCEMENT: {narrator_instruction.strip()}]\n"
-        
-        # World info canon law reinforcement logic every X turns
-        # Add in history ONLY if we haven't added it yet in this prompt
-        if world_reinforce_freq > 0 and i > 0 and i % world_reinforce_freq == 0:
-            if canon_law_entries and not canon_added_in_history:
-                full_prompt += "[WORLD REINFORCEMENT: " + " | ".join(canon_law_entries) + "]\n"
-                canon_added_in_history = True
         
         speaker = msg.speaker or ("User" if msg.role == "user" else "Narrator")
         full_prompt += f"{speaker}: {msg.content}\n"

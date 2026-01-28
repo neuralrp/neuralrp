@@ -147,15 +147,18 @@ On every generation request, NeuralRP builds a prompt in a specific layered orde
    - Short player/user description
    - Placed early to influence perspective
 
-3. **World Info**
+3. **World Info** (updated in v1.7.1)
    - Canon Law entries first (always included)
-   - Semantic search results second (context-aware)
+   - **Triggered Lore**: Semantic search results added when semantically relevant to current conversation
    - Keyword matches if semantic returns nothing
+   - **World Knowledge Section**: Displays contextually-matched lore entries (not canon law)
 
-4. **Character Definitions**
-   - Single character: Full card content
-   - Multi-character: Capsule personas (compressed summaries)
-   - Focus mode: Selected character emphasized
+4. **Character Definitions** (updated in v1.7.1)
+   - Single character: Full card content shown only on first turn
+   - Multi-character: Capsule personas shown on character's first appearance in chat
+   - Focus mode: Selected character emphasized (same capsules apply to all active characters)
+   - **First Appearance Detection**: Characters tracked via message history to prevent redundant context injection
+   - **Reinforcement Intervals**: Character profiles reinforced every N turns (configurable via `reinforce_freq` setting)
 
 5. **Conversation History**
    - Recent messages verbatim
@@ -170,6 +173,31 @@ On every generation request, NeuralRP builds a prompt in a specific layered orde
 7. **Generation Lead-In**
    - Final formatting instruction
    - User's latest message
+
+### Reinforcement System (updated in v1.7.1)
+
+Character and world info can be reinforced at regular intervals to prevent drift:
+
+**Character Reinforcement:**
+- **Default**: Every 5 turns (configurable via `reinforce_freq` setting, range: 1-100)
+- **Single Character**: Reinforces depth_prompt (PList extensions) periodically
+- **Multi-Character**: Reinforces all character capsules periodically
+- **Turn Calculation**: `current_turn = (message_count + 1) // 2`
+- **Trigger Condition**: `current_turn > 0 AND current_turn % reinforce_freq == 0`
+- **Format**: `[REINFORCEMENT: [Alice]: capsule text | [Bob]: capsule text]`
+- **Purpose**: Reduces prompt repetition while maintaining character consistency
+
+**World Info Canon Law Reinforcement:**
+- **Default**: Every 4 turns (configurable via `world_info_reinforce_freq` setting)
+- **Turn Calculation**: Same as character reinforcement
+- **Trigger Condition**: `current_turn > 0 AND current_turn % world_reinforce_freq == 0`
+- **Format**: `[WORLD REINFORCEMENT: canon law entry 1 | canon law entry 2]`
+- **Purpose**: Ensures canon law appears exactly once per prompt (either in history or at end)
+
+**Key Changes in v1.7.1:**
+- Reinforcement logic moved outside message iteration loop
+- Now uses actual turn numbers instead of message indices
+- Fixed issue where reinforcement used message index instead of turn count
 
 ### Chat Modes
 

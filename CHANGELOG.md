@@ -1,8 +1,31 @@
 # Changelog
 
 All notable changes to NeuralRP are documented in this file.
-
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+***
+
+## [1.7.1] - 2026-01-27
+
+### Fixed
+- **Character Card Enforcement**: Fixed critical bug where character cards and capsules appeared in every prompt instead of only on first appearance
+  - Added `character_has_speaker()` helper function to track character appearance in message history
+  - Group chats: Capsules now only shown on character's first appearance OR turn 1
+  - Single character: Full card now only shown on turn 1 (not every turn)
+  - Prevents redundant context injection and reduces token overhead significantly
+- **World Info Triggered Lore**: Fixed missing semantic world info entries in prompts
+  - `triggered_lore` was fetched via semantic search but never added to prompt
+  - Now displays semantically-matched world knowledge entries as "### World Knowledge:" section
+- **Reinforcement Logic**: Fixed reinforcement intervals to use actual turn numbers instead of message indices
+  - Reinforcement now correctly triggers every N turns based on `reinforce_freq` setting
+  - World canon law reinforcement correctly uses `world_info_reinforce_freq` setting
+  - Turn calculation: `current_turn = (message_count + 1) // 2`
+  - Moved reinforcement logic outside message iteration loop for clarity and correctness
+
+### Technical
+- Updated Context Assembly documentation in docs/TECHNICAL.md to reflect new behavior
+- Added Reinforcement System subsection documenting turn-based interval calculation
+- Updated Character Definitions to clarify first-appearance-only behavior
 
 ***
 
