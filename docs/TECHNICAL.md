@@ -188,11 +188,11 @@ Character and world info can be reinforced at regular intervals to prevent drift
 - **Purpose**: Reduces prompt repetition while maintaining character consistency
 
 **World Info Canon Law Reinforcement:**
-- **Default**: Every 4 turns (configurable via `world_info_reinforce_freq` setting)
+- **Default**: Every 3 turns (configurable via `world_info_reinforce_freq` setting)
 - **Turn Calculation**: Same as character reinforcement
-- **Trigger Condition**: `current_turn > 0 AND current_turn % world_reinforce_freq == 0`
-- **Format**: `[WORLD REINFORCEMENT: canon law entry 1 | canon law entry 2]`
-- **Purpose**: Ensures canon law appears exactly once per prompt (either in history or at end)
+- **Trigger Condition**: `is_initial_turn OR current_turn % world_reinforce_freq == 0`
+- **Format**: `### Canon Law (World Rules):\n{canon entries}`
+- **Purpose**: Shows canon law on initial turn and every Nth turn to maintain consistency without repetition
 
 **Key Changes in v1.7.1:**
 - Reinforcement logic moved outside message iteration loop

@@ -5,11 +5,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.7.3] - 2026-01-28
+
+### Added
+- **Immediate Edit Notifications**: Character, NPC, and world info card edits now appear in "Recent Updates" on the next chat turn
+
+### Fixed
+- **Character Card Editing**: Changes now sync immediately to active chats without refresh
+- **NPC Card Editing**: Mid-chat NPC edits now take effect on the next message
+- **World Info Semantic Matching**: Keys now properly trigger entries; quoted keys require exact match, unquoted use semantic search
+- **Chat Message Editing**: Fixed edit window collapsing to narrow box
+
+***
+
 ## [1.7.2] - 2026-01-28
 
 ### Fixed
 - **World Info Saving**: Fixed bug where editing world cards did not persist changes
-  - `/api/world-info/edit-entry`, `/api/world-info/add-entry`, and `/api/world-info/edit-entry-ai` now sync to database after saving JSON files
   - Previously changes were saved to JSON but never written to database, causing edits to appear lost after refresh
   - Frontend `saveWorldEntry()` now saves all editable fields (key, comment, content, is_canon_law, useProbability, probability) instead of only content
 
@@ -27,15 +39,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `triggered_lore` was fetched via semantic search but never added to prompt
   - Now displays semantically-matched world knowledge entries as "### World Knowledge:" section
 - **Reinforcement Logic**: Fixed reinforcement intervals to use actual turn numbers instead of message indices
-  - Reinforcement now correctly triggers every N turns based on `reinforce_freq` setting
-  - World canon law reinforcement correctly uses `world_info_reinforce_freq` setting
-  - Turn calculation: `current_turn = (message_count + 1) // 2`
-  - Moved reinforcement logic outside message iteration loop for clarity and correctness
-
-### Technical
-- Updated Context Assembly documentation in docs/TECHNICAL.md to reflect new behavior
-- Added Reinforcement System subsection documenting turn-based interval calculation
-- Updated Character Definitions to clarify first-appearance-only behavior
 
 ***
 

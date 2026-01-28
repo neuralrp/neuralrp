@@ -628,6 +628,7 @@
                                     <div>
                                         <label class="text-[9px] text-slate-500 font-black uppercase">Keys
                                             (comma-separated)</label>
+                                        <p class="text-[10px] text-slate-400 mb-1">Use quotes around phrase for exact match</p>
                                         <input x-model="editingWorldEntry.entry.key"
                                             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] outline-none focus:ring-1 focus:ring-blue-500"
                                             placeholder="e.g. magic, spells, arcane">
@@ -1305,7 +1306,7 @@
                     <template x-for="(msg, index) in messages" :key="msg.id">
                         <div class="flex group" :class="msg.role === 'user' ? 'justify-end' : 'justify-start'">
                             <div class="max-w-[85%] space-y-1.5 relative"
-                                :style="editingMessageId === msg.id && editingWidth ? 'min-width: ' + editingWidth : ''">
+                                :style="editingMessageId === msg.id && editingWidth ? 'width: ' + editingWidth : ''">
                                 <div x-show="msg.role !== 'user' && msg.speaker !== 'Visual System'"
                                     class="text-[9px] font-black text-blue-500 uppercase tracking-[0.2em] ml-4 mb-1"
                                     x-text="msg.speaker || 'Narrator'"></div>
@@ -1330,7 +1331,7 @@
                                             <i class="fa-solid fa-code-branch text-[8px]"></i>
                                         </button>
                                         <button
-                                            @click="editingMessageId = msg.id; editBuffer = msg.content; editingWidth = $el.closest('.max-w-\$$85\\%\$$').offsetWidth + 'px'"
+                                            @click="editingMessageId = msg.id; editBuffer = msg.content; editingWidth = $el.closest('.max-w-\\[85\\%\\]').offsetWidth + 'px'"
                                             class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50">
                                             <i class="fa-solid fa-pen text-[8px]"></i>
                                         </button>
@@ -2460,7 +2461,7 @@
                 user_persona: '',
                 userName: '',
                 reinforce_freq: 5,
-                world_info_reinforce_freq: 5,
+                world_info_reinforce_freq: 3,
                 world_info_enabled: true,
                 max_world_info_entries: 10,
                 temperature: 0.7,
@@ -3734,6 +3735,7 @@
             updateMessage(index) {
                 this.messages[index].content = this.editBuffer;
                 this.editingMessageId = null;
+                this.editingWidth = null;
                 this.editBuffer = '';
                 this.updateTokenCount();
             },
@@ -4121,11 +4123,20 @@
 
             startEditWorldEntry(worldInfo, entryUid) {
                 const entry = worldInfo.entries[entryUid];
+                const keyStr = Array.isArray(entry.key) ? entry.key.join(', ') : entry.key || '';
                 this.editingWorldEntry = {
                     world_name: worldInfo.name,
                     entry_uid: entryUid,
                     entry: {
-                        key: Array.isArray(entry.key) ? entry.key.join(', ') : entry.key || '',
+                        key: keyStr,
+                        comment: entry.comment || '',
+                        content: entry.content || '',
+                        is_canon_law: entry.is_canon_law || false,
+                        useProbability: entry.useProbability || false,
+                        probability: entry.probability || 100
+                    },
+                    original: {
+                        key: keyStr,
                         comment: entry.comment || '',
                         content: entry.content || '',
                         is_canon_law: entry.is_canon_law || false,
@@ -4166,7 +4177,19 @@
                         { field: 'probability', value: this.editingWorldEntry.entry.probability }
                     ];
 
+                    const changedFields = [];
                     for (const f of fields) {
+                        if (!this.editingWorldEntry.original) {
+                            changedFields.push(f);
+                        } else {
+                            const originalValue = this.editingWorldEntry.original[f.field];
+                            if (originalValue !== f.value) {
+                                changedFields.push(f);
+                            }
+                        }
+                    }
+
+                    for (const f of changedFields) {
                         const res = await axios.post('/api/world-info/edit-entry', {
                             world_name: this.editingWorldEntry.world_name,
                             entry_uid: this.editingWorldEntry.entry_uid,
@@ -4750,6 +4773,8 @@ async generateAllFields() {
                     if (res.data.success) {
                         this.editingChar.data[field] = res.data.text;
                         alert(`${field} updated!`);
+                        // Reload characters from backend to get updated data
+                        await this.fetchCharacters();
                     } else {
                         alert(`Error: ${res.data.error}`);
                     }
@@ -4799,6 +4824,8 @@ async generateAllFields() {
                         }
                         this.editingChar.data.extensions.multi_char_summary = res.data.text;
                         alert("Capsule updated!");
+                        // Reload characters from backend to get updated data
+                        await this.fetchCharacters();
                     } else {
                         alert(`Error: ${res.data.error}`);
                     }

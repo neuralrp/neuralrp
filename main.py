@@ -597,6 +597,79 @@ class LRUCache:
 # Cache stores processed search results (not embeddings which are in sqlite-vec)
 WORLD_INFO_CACHE = LRUCache(max_size=300)
 
+# Recent Edits Tracking System (v1.7.3)
+# In-memory tracking for one-time flash notifications
+# Completely separate from reinforcement intervals - appears once then disappears
+# Format: {'character': {filename: (timestamp, field, content)}, ...}
+RECENT_EDITS = {
+    'character': {},  # filename -> (timestamp, field, full_field_content)
+    'world': {},     # 'world_name:entry_uid' -> (timestamp, field, full_field_content)
+    'npc': {}        # 'chat_id:entity_id' -> (timestamp, field, full_field_content)
+}
+
+def add_recent_edit(edit_type: str, entity_id: str, field: str, content: str) -> None:
+    """Record a recent edit with timestamp.
+    
+    This is independent of reinforcement intervals - it's a one-time notification system.
+    Edits appear on next chat turn, then are cleared.
+    
+    Args:
+        edit_type: 'character', 'world', or 'npc'
+        entity_id: filename (character), 'world_name:entry_uid' (world), or 'chat_id:entity_id' (npc)
+        field: The field that was edited (e.g., 'personality', 'description')
+        content: Full content of edited field (entire field content, not just changes)
+    """
+    timestamp = time.time()
+    RECENT_EDITS[edit_type][entity_id] = (timestamp, field, content)
+    print(f"[RECENT_EDIT] Recorded {edit_type} {entity_id}: {field} (will show on next turn)")
+
+def get_and_clear_recent_edits(edit_type: str, entity_ids: List[str] = None) -> Dict[str, tuple]:
+    """Get and clear recent edits for specified entities.
+    
+    This is a one-time retrieval - edits are removed immediately after.
+    This ensures edits only appear on ONE chat turn, then disappear.
+    
+    Args:
+        edit_type: 'character', 'world', or 'npc'
+        entity_ids: Specific entity IDs to retrieve (list), or None for all (for world info)
+    
+    Returns:
+        Dict of entity_id -> (timestamp, field, content)
+    """
+    if edit_type not in RECENT_EDITS:
+        return {}
+    
+    if entity_ids is None:
+        # For world info, return and clear ALL entries
+        edits = RECENT_EDITS[edit_type].copy()
+        RECENT_EDITS[edit_type].clear()
+        return edits
+    else:
+        # For characters/NPCs, return only specified IDs
+        edits = {}
+        for entity_id in entity_ids:
+            if entity_id in RECENT_EDITS[edit_type]:
+                edits[entity_id] = RECENT_EDITS[edit_type][entity_id]
+                del RECENT_EDITS[edit_type][entity_id]
+        return edits
+
+def cleanup_old_edits(max_age_seconds: int = 300) -> None:
+    """Remove edits older than max_age_seconds.
+    
+    Safety cleanup in case edits aren't consumed (e.g., chat abandoned, server restart).
+    Called periodically to prevent memory leaks.
+    
+    Args:
+        max_age_seconds: Maximum age before cleanup (default: 5 minutes)
+    """
+    current_time = time.time()
+    for edit_type in RECENT_EDITS:
+        for entity_id in list(RECENT_EDITS[edit_type].keys()):
+            timestamp, _, _ = RECENT_EDITS[edit_type][entity_id]
+            if current_time - timestamp > max_age_seconds:
+                del RECENT_EDITS[edit_type][entity_id]
+                print(f"[RECENT_EDIT] Cleaned up old edit: {edit_type} {entity_id} (age: {int(current_time - timestamp)}s)")
+
 # Semantic Search Engine
 class SemanticSearchEngine:
     GENERIC_KEYS = {
@@ -612,7 +685,44 @@ class SemanticSearchEngine:
         # faction buckets
         "faction", "guild", "house", "clique", "resistance", "ruling",
     }
-
+    
+    @staticmethod
+    def parse_keys_with_types(keys):
+        """
+        Parse keys and categorize as phrase (quoted) or word (unquoted).
+        
+        Returns:
+            dict with 'quoted' and 'unquoted' lists, and 'is_quoted' flags per key
+        """
+        quoted = []
+        unquoted = []
+        is_quoted_flags = []
+        
+        for key in keys:
+            stripped = key.strip()
+            
+            # Check for matching quotes (single or double)
+            if (stripped.startswith('"') and stripped.endswith('"')) or \
+               (stripped.startswith("'") and stripped.endswith("'")):
+                # Remove quotes and add to quoted
+                inner = stripped[1:-1]
+                if inner:  # Skip empty quotes
+                    quoted.append(inner)
+                    is_quoted_flags.append(True)
+            else:
+                # Unquoted key
+                if stripped:  # Skip empty strings
+                    unquoted.append(stripped)
+                    is_quoted_flags.append(False)
+        
+        # Return categorized keys and flags
+        return {
+            'quoted': quoted,
+            'unquoted': unquoted,
+            'is_quoted_flags': is_quoted_flags,
+            'all_normalized': [k.strip().lower() for k in keys if k.strip()]
+        }
+ 
     def __init__(self):
         self.model = None
         self.embeddings_cache = {}
@@ -794,19 +904,25 @@ class SemanticSearchEngine:
         
         for uid in missing_uids:
             entry = world_info["entries"][uid]
-            # Embed only the PRIMARY key (first line/phrase); remaining keys are for understanding only
-            primary_key = entry.get("key", [])
-            primary_key = primary_key[0] if primary_key else ""
-            primary_list = [primary_key] if primary_key and primary_key.lower() not in self.GENERIC_KEYS else []
-            secondary_list = [k for k in entry.get("keysecondary", []) if k.lower() not in self.GENERIC_KEYS]
+            all_keys = entry.get("key", [])
+            
+            # Parse keys into quoted and unquoted categories
+            parsed = SemanticSearchEngine.parse_keys_with_types(all_keys)
+            
+            # Only embed unquoted keys (semantic search)
+            primary_list = [k for k in parsed['unquoted'] 
+                           if k.lower() not in self.GENERIC_KEYS]
             keys = ", ".join(primary_list)
-            secondary = ", ".join(secondary_list)
-            if keys or secondary:
+            
+            if keys:
                 prefixed_content = f"Keywords: {keys}"
-                if secondary:
-                    prefixed_content += f"; Secondary: {secondary}"
                 contents.append(prefixed_content)
                 uids_to_compute.append(uid)
+            
+            # Store key type metadata for later matching
+            if 'entries' not in world_info.get('_metadata', {}):
+                world_info.setdefault('_metadata', {})['entries'] = {}
+            world_info['_metadata']['entries'][uid] = parsed
         
         if not contents:
             return embeddings_from_db
@@ -1522,6 +1638,39 @@ def sync_world_from_json(world_name):
     print(f"Sync Summary for '{world_name}': Added {added_count}, Removed {removed_count}, Merged {merged_count} entries")
     return {"added": added_count, "removed": removed_count, "merged": merged_count}
 
+def sync_character_from_json(filename):
+    """Sync a single character JSON file to the database.
+    
+    Loads the character JSON and saves it to the database, updating existing entries.
+    This is similar to sync_world_from_json but simpler since characters are atomic.
+    
+    Args:
+        filename: The character JSON filename (e.g., "Alice.json")
+    
+    Returns:
+        dict with 'success' (bool) and 'message' (str)
+    """
+    file_path = os.path.join(DATA_DIR, "characters", filename)
+    
+    if not os.path.exists(file_path):
+        print(f"Character JSON not found: {file_path}")
+        return {"success": False, "message": f"Character file not found: {filename}"}
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            char_data = json.load(f)
+        
+        # Save to database (updates existing if present)
+        if db_save_character(char_data, filename):
+            print(f"Synced character to database: {filename}")
+            return {"success": True, "message": f"Character synced: {filename}"}
+        else:
+            print(f"Failed to save character to database: {filename}")
+            return {"success": False, "message": f"Failed to save character to database: {filename}"}
+    except Exception as e:
+        print(f"Failed to sync character {filename}: {e}")
+        return {"success": False, "message": f"Error syncing character: {str(e)}"}
+
 def cleanup_world_info_filenames():
     """Rename world info JSON files with SillyTavern suffixes to clean names.
     
@@ -1814,24 +1963,25 @@ def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_t
 
     # Stricter matching with comprehensive normalization: apostrophes, possessives, plurals, punctuation
     GENERIC_KEYS = SemanticSearchEngine.GENERIC_KEYS
-
+  
     def normalize_for_matching(s: str) -> str:
         """Normalize text for matching: remove apostrophes, quotes, hyphens, and other punctuation"""
         return re.sub(r"['\"\-\.,:;!?()]+", "", s)
 
-    def key_matches_text(key: str, text: str) -> bool:
+    def key_matches_text(key: str, text: str, is_quoted: bool = False) -> bool:
         key_normalized = normalize_for_matching(key.strip().lower())
         if len(key_normalized) < 3 or key_normalized in GENERIC_KEYS:
             return False
         
-        # Create pattern that matches both singular and plural forms
-        if key_normalized.endswith('s') and len(key_normalized) > 3:
-            key_base = key_normalized[:-1]
-            key_pattern = re.escape(key_base).replace(r"\ ", r"\s+")
-            pattern = r"\b" + key_pattern + r"s?\b"
+        key_pattern = re.escape(key_normalized).replace(r"\ ", r"\s+")
+        
+        if is_quoted:
+            # Quoted keys: strict phrase match with word boundaries
+            pattern = r"\b" + key_pattern + r"\b"
         else:
-            key_pattern = re.escape(key_normalized).replace(r"\ ", r"\s+")
-            pattern = r"\b" + key_pattern + r"s?\b"
+            # Unquoted keys: flexible matching (semantic handles variations)
+            # Use word boundaries but allow matches as part of larger phrases
+            pattern = r"(?:\b|^)" + key_pattern + r"(?:\b|$)"
         
         text_normalized = normalize_for_matching(text)
         return re.search(pattern, text_normalized) is not None
@@ -1841,7 +1991,7 @@ def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_t
         if len(content_normalized) < 3:
             return False
         content_pattern = re.escape(content_normalized).replace(r"\ ", r"\s+")
-        pattern = r"\b" + content_pattern + r"s?\b"
+        pattern = r"\b" + content_pattern + r"\b"
         
         text_normalized = normalize_for_matching(text)
         return re.search(pattern, text_normalized) is not None
@@ -1854,10 +2004,21 @@ def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_t
         
         # Check if this is also a keyword match
         entry = entries.get(uid, {})
-        primary_key = entry.get("key", [])
-        primary_key = [primary_key[0].lower()] if primary_key else []
-        keys = primary_key + [k.lower() for k in entry.get("keysecondary", [])]
-        is_keyword_match = any(key_matches_text(k, processed_text) for k in keys)
+        metadata = world_info.get('_metadata', {}).get('entries', {}).get(uid, {})
+        all_keys = entry.get("key", [])
+        
+        # Get key type flags
+        is_quoted_flags = metadata.get('is_quoted_flags', [])
+        
+        # Match all keys with their type flags
+        is_keyword_match = False
+        for i, key in enumerate(all_keys):
+            if not key.strip():
+                continue
+            is_quoted = is_quoted_flags[i] if i < len(is_quoted_flags) else False
+            if key_matches_text(key, processed_text, is_quoted):
+                is_keyword_match = True
+                break
         
         all_matches.append((content, similarity, is_keyword_match, uid))
         seen_normalized.add(norm)
@@ -1881,10 +2042,22 @@ def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_t
             continue
 
         # Check for keyword match
-        primary_key = entry.get("key", [])
-        primary_key = [primary_key[0].lower()] if primary_key else []
-        keys = primary_key + [k.lower() for k in entry.get("keysecondary", [])]
-        match_on_keys = any(key_matches_text(k, processed_text) for k in keys)
+        metadata = world_info.get('_metadata', {}).get('entries', {}).get(uid, {})
+        all_keys = entry.get("key", [])
+        
+        # Get key type flags
+        is_quoted_flags = metadata.get('is_quoted_flags', [])
+        
+        # Check all keys with their type flags
+        match_on_keys = False
+        for i, key in enumerate(all_keys):
+            if not key.strip():
+                continue
+            is_quoted = is_quoted_flags[i] if i < len(is_quoted_flags) else False
+            if key_matches_text(key, processed_text, is_quoted):
+                match_on_keys = True
+                break
+        
         match_on_content = content_matches_text(content, processed_text)
 
         if match_on_keys or match_on_content:
@@ -2026,7 +2199,59 @@ def construct_prompt(request: PromptRequest):
         
         if relationship_context:
             full_prompt += relationship_context + "\n"
-
+    
+    # === 6.5. RECENT UPDATES (one-time notification, independent of intervals) ===
+    # This is completely separate from reinforcement intervals:
+    # - Does NOT affect current_turn calculation
+    # - Does NOT affect reinforce_freq timing
+    # - Does NOT affect world_reinforce_freq timing
+    # - Does NOT affect semantic search
+    # Appears on ONE turn after edit, then disappears
+    recent_updates = []
+    
+    if request.chat_id:
+        # Check for recent character/NPC edits
+        for char_obj in request.characters:
+            char_filename = char_obj.get("_filename")
+            entity_id = char_obj.get("entity_id")
+            is_npc = char_obj.get("is_npc", False)
+            char_name = char_obj.get("name", "Unknown")
+            
+            if is_npc and entity_id:
+                # NPC: entity_id format is 'chat_id:entity_id'
+                npc_entity_id = f"{request.chat_id}:{entity_id}"
+                edit = get_and_clear_recent_edits('npc', [npc_entity_id]).get(npc_entity_id)
+                if edit:
+                    _, field, content = edit
+                    recent_updates.append(f"[NPC Updated: {char_name} - {field}]\n{content}")
+                    print(f"[RECENT_EDIT] NPC {char_name} edit will show this turn: {field}")
+            elif char_filename:
+                # Character: entity_id is filename
+                edit = get_and_clear_recent_edits('character', [char_filename]).get(char_filename)
+                if edit:
+                    _, field, content = edit
+                    recent_updates.append(f"[Character Updated: {char_name} - {field}]\n{content}")
+                    print(f"[RECENT_EDIT] Character {char_name} edit will show this turn: {field}")
+        
+        # Check for recent world info edits
+        if request.world_info:
+            world_name = request.world_info.get("name", "")
+            # Get all recent edits for this world (None = get all world edits)
+            world_edits = get_and_clear_recent_edits('world', None)
+            
+            # Filter edits for current world
+            for entity_id, edit in world_edits.items():
+                if entity_id.startswith(world_name + ":"):
+                    entry_uid = entity_id.split(":", 1)[1]
+                    _, field, content = edit
+                    recent_updates.append(f"[World Info Updated - Entry {entry_uid} - {field}]\n{content}")
+                    print(f"[RECENT_EDIT] World info {world_name}:{entry_uid} edit will show this turn: {field}")
+    
+    # Add to prompt if there are any recent updates
+    # Section only appears if recent_updates is non-empty (no wasted tokens)
+    if recent_updates:
+        full_prompt += "\n### Recent Updates:\n" + "\n\n".join(recent_updates) + "\n"
+    
     # === 6. CHARACTER PROFILES (characters exist in the world context) ===
     reinforcement_chunks = []
     
@@ -2068,13 +2293,10 @@ def construct_prompt(request: PromptRequest):
     # === 7. CHAT HISTORY (with reinforcement) ===
     full_prompt += "\n### Chat History:\n"
     reinforce_freq = settings.get("reinforce_freq", 5)
-    world_reinforce_freq = settings.get("world_info_reinforce_freq", 4)  # Default to every 4 turns (optimized)
+    world_reinforce_freq = settings.get("world_info_reinforce_freq", 3)  # Default to every 3 turns
     
-    # Calculate current turn number (turn = (message_count + 1) // 2, since each turn has user + assistant message)
-    current_turn = (len(request.messages) + 1) // 2
-    
-    # Track whether canon law was added in chat history to prevent duplication
-    canon_added_in_history = False
+    # Calculate current turn number (turn = message_count // 2 + 1, since each turn has user + assistant message)
+    current_turn = len(request.messages) // 2 + 1
     
     # Character reinforcement logic every X turns
     if reinforce_freq > 0 and current_turn > 0 and current_turn % reinforce_freq == 0:
@@ -2101,12 +2323,6 @@ def construct_prompt(request: PromptRequest):
             print(f"[REINFORCEMENT] Narrator mode reinforced")
             full_prompt += f"[REINFORCEMENT: {narrator_instruction.strip()}]\n"
     
-    # World info canon law reinforcement logic every X turns
-    if world_reinforce_freq > 0 and current_turn > 0 and current_turn % world_reinforce_freq == 0:
-        if canon_law_entries:
-            full_prompt += "[WORLD REINFORCEMENT: " + " | ".join(canon_law_entries) + "]\n"
-            canon_added_in_history = True
-    
     # Add chat history messages
     for msg in request.messages:
         # Filter out meta-messages like "Visual System" if they exist
@@ -2117,9 +2333,9 @@ def construct_prompt(request: PromptRequest):
         full_prompt += f"{speaker}: {msg.content}\n"
 
     # === 8. CANON LAW (pinned for recency bias - right before generation) ===
-    # Add at the end ONLY if it wasn't already added in the chat history
-    # This ensures canon law appears exactly once per prompt for maximum efficiency
-    if canon_law_entries and not canon_added_in_history:
+    # Show canon law on turn 0 (initial) and every world_reinforce_freq turns
+    is_initial_turn = len(request.messages) <= 2  # Same logic as line 2160
+    if canon_law_entries and world_reinforce_freq > 0 and (is_initial_turn or current_turn % world_reinforce_freq == 0):
         full_prompt += "\n### Canon Law (World Rules):\n" + "\n".join(canon_law_entries) + "\n"
 
     # === 9. CONTINUE HINT + LEAD-IN ===
@@ -2883,46 +3099,15 @@ async def edit_character_field(req: CharacterEditRequest):
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(char_data, f, indent=2, ensure_ascii=False)
         
-        return {"success": True, "message": f"Field '{req.field}' updated successfully"}
-        
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-@app.post("/api/characters/edit-field-ai")
-async def edit_character_field_ai(req: CharacterEditFieldRequest):
-    """Use AI to generate or improve a specific field in a character card."""
-    try:
-        file_path = os.path.join(DATA_DIR, "characters", req.filename)
-        if not os.path.exists(file_path):
-            return {"success": False, "error": "Character file not found"}
-        
-        with open(file_path, "r", encoding="utf-8") as f:
-            char_data = json.load(f)
-        
-        char_name = char_data["data"]["name"]
-        
-        # Use existing generation logic with context
-        card_req = CardGenRequest(
-            char_name=char_name,
-            field_type=req.field,
-            context=req.context,
-            source_mode=req.source_mode
-        )
-        
-        # Call the existing generation endpoint logic
-        result = await generate_card_field(card_req)
-        
-        if result["success"]:
-            # Update the character with the generated content
-            char_data["data"][req.field] = result["text"]
+            # Sync to database so changes take effect immediately in active chats
+            sync_result = sync_character_from_json(req.filename)
+            if not sync_result["success"]:
+                print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
             
-            # Save the updated character
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(char_data, f, indent=2, ensure_ascii=False)
+            # Record recent edit for immediate context injection
+            add_recent_edit('character', req.filename, req.field, req.new_value)
             
-            return {"success": True, "text": result["text"]}
-        else:
-            return {"success": False, "error": result["error"]}
+            return {"success": True, "message": f"Field '{req.field}' updated successfully"}
         
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -2948,6 +3133,14 @@ async def edit_character_capsule(req: CharacterEditRequest):
         # Save the updated character
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(char_data, f, indent=2, ensure_ascii=False)
+        
+        # Sync to database so changes take effect immediately in active chats
+        sync_result = sync_character_from_json(req.filename)
+        if not sync_result["success"]:
+            print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
+        
+        # Record recent edit for immediate context injection
+        add_recent_edit('character', req.filename, 'multi_char_summary', req.new_value)
         
         return {"success": True, "message": "Capsule updated successfully"}
         
@@ -2988,6 +3181,14 @@ async def edit_character_capsule_ai(req: CharacterEditFieldRequest):
             # Save the updated character
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(char_data, f, indent=2, ensure_ascii=False)
+            
+            # Sync to database so changes take effect immediately in active chats
+            sync_result = sync_character_from_json(req.filename)
+            if not sync_result["success"]:
+                print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
+            
+            # Record recent edit for immediate context injection
+            add_recent_edit('character', req.filename, 'multi_char_summary', result['text'])
             
             return {"success": True, "text": result["text"]}
         else:
@@ -3288,30 +3489,53 @@ def load_character_profiles(active_chars: List[str], localnpcs: Dict) -> List[di
 async def chat(request: PromptRequest):
     # Always define chat_data first
     chat_data = None
+    
+    # Periodic cleanup of old edits (1% chance per chat request)
+    # This prevents memory leaks if edits are never consumed
+    if random.random() < 0.01:
+        cleanup_old_edits(max_age_seconds=300)
+
+    # Load chat data if chat_id provided (needed for NPCs and metadata)
+    if request.chat_id:
+        chat_data = db_get_chat(request.chat_id)
 
     # ========== CHARACTER RESOLUTION ==========
     # Check if characters are already resolved (dicts with 'data' field)
     # This happens on subsequent messages after first resolution
     if request.characters and isinstance(request.characters[0], dict) and "data" in request.characters[0]:
-        # Characters already resolved - skip resolution
-        print(f"[CONTEXT] Characters already resolved ({len(request.characters)} chars)")
+        # Characters already resolved - BUT reload NPCs from metadata
+        # NPCs are frequently edited mid-chat and need fresh data
+        if chat_data:
+            metadata = chat_data.get("metadata", {}) or {}
+            localnpcs = metadata.get("localnpcs", {}) or {}
+            
+            # Reload NPCs from metadata to get latest edits
+            npcs_updated = 0
+            for i, char in enumerate(request.characters):
+                if char.get("is_npc") or char.get("npcId"):
+                    entity_id = char.get("entity_id") or char.get("npcId")
+                    if entity_id in localnpcs:
+                        # Reload NPC from metadata with latest data
+                        request.characters[i] = {
+                            'name': localnpcs[entity_id].get('name', char.get('name')),
+                            'data': localnpcs[entity_id].get('data', char.get('data')),
+                            'entity_id': entity_id,
+                            'is_npc': True
+                        }
+                        npcs_updated += 1
+            
+            if npcs_updated > 0:
+                print(f"[CONTEXT] Reloaded {npcs_updated} NPCs from metadata (mid-chat edits detected)")
     else:
-        # Load chat data if needed
-        if request.chat_id:
-            chat_data = db_get_chat(request.chat_id)
-
         # Resolve character references (global + NPCs)
-        # (you may have more logic here)
+        if chat_data:
+            metadata = chat_data.get("metadata", {}) or {}
+            localnpcs = metadata.get("localnpcs", {}) or {}
+            active_chars = chat_data.get("activeCharacters", [])
 
-    # Now chat_data is always defined (None or a dict)
-    if chat_data:
-        metadata = chat_data.get("metadata", {}) or {}
-        localnpcs = metadata.get("localnpcs", {}) or {}
-        active_chars = chat_data.get("activeCharacters", [])
-
-        # Resolve character references to full objects
-        resolved_characters = load_character_profiles(active_chars, localnpcs)
-        request.characters = resolved_characters
+            # Resolve character references to full objects
+            resolved_characters = load_character_profiles(active_chars, localnpcs)
+            request.characters = resolved_characters
 
 
     
@@ -3528,18 +3752,7 @@ async def chat(request: PromptRequest):
             hints = hint_engine.generate_hint(performance_tracker, tokens)
             if hints:
                 data["_performance_hints"] = hints
-            
-            # Update world info reinforcement counter in chat metadata
-            world_reinforce_freq = current_request.settings.get("world_info_reinforce_freq", 3)
-            if world_reinforce_freq > 0:
-                # Calculate current counter based on message count
-                current_counter = len(current_request.messages)
-                
-                # Initialize metadata dict if not present
-                if current_request.metadata is None:
-                    current_request.metadata = {}
-                current_request.metadata['world_reinforce_counter'] = current_counter
-            
+
             # Handle chat_id properly - only generate NEW if truly missing, not if invalid
             if not current_request.chat_id:
                 # No chat_id at all - generate new one
@@ -4393,7 +4606,19 @@ async def update_npc(chat_id: str, npc_id: str, request: Request):
             metadata["localnpcs"] = localnpcs
             chat["metadata"] = metadata
             db_save_chat(chat_id, chat)
-
+            
+            # Detect changed fields to record recent edits
+            # Compare old NPC data with new data to identify what changed
+            existing_npc = db_get_npc_by_id(npc_id, chat_id)
+            old_data = existing_npc.get('data', {}) if existing_npc else {}
+            
+            for field, new_value in npc_data.items():
+                if old_data.get(field) != new_value:
+                    # Entity ID format: 'chat_id:entity_id'
+                    npc_entity_id = f"{chat_id}:{npc_id}"
+                    add_recent_edit('npc', npc_entity_id, field, new_value)
+                    print(f"[RECENT_EDIT] NPC {npc_id} field changed: {field}")
+            
             print(f"[NPC_UPDATE] Updated NPC {npc_id} in database and metadata")
             return {"success": True, "message": "NPC updated successfully"}
 
@@ -4824,6 +5049,11 @@ async def edit_world_entry(req: WorldEditRequest):
         # Clear caches to reflect the change
         WORLD_INFO_CACHE.clear()
         
+        # Record recent edit for immediate context injection
+        # Entity ID format: 'world_name:entry_uid'
+        entity_id = f"{req.world_name}:{req.entry_uid}"
+        add_recent_edit('world', entity_id, req.field, req.new_value)
+        
         return {"success": True, "message": f"Entry '{req.entry_uid}' field '{req.field}' updated successfully"}
         
     except Exception as e:
@@ -5121,9 +5351,9 @@ async def get_world_info_reinforcement_config():
     return {
         "success": True,
         "config": {
-            "world_info_reinforce_freq": 4,  # Default value
-            "description": "Frequency (in turns) for reinforcing canon law entries. 1 = every turn, 4 = every 4 turns, etc.",
-            "default": 4,
+            "world_info_reinforce_freq": 3,  # Default value
+            "description": "Frequency (in turns) for reinforcing canon law entries. 1 = every turn, 3 = every 3 turns, etc.",
+            "default": 3,
             "min": 1,
             "max": 100
         }
