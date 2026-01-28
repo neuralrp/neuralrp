@@ -4157,23 +4157,33 @@
             async saveWorldEntry() {
                 if (!this.editingWorldEntry) return;
                 try {
-                    const res = await axios.post('/api/world-info/edit-entry', {
-                        world_name: this.editingWorldEntry.world_name,
-                        entry_uid: this.editingWorldEntry.entry_uid,
-                        field: 'content',
-                        new_value: this.editingWorldEntry.entry.content
-                    });
+                    const fields = [
+                        { field: 'key', value: this.editingWorldEntry.entry.key },
+                        { field: 'comment', value: this.editingWorldEntry.entry.comment },
+                        { field: 'content', value: this.editingWorldEntry.entry.content },
+                        { field: 'is_canon_law', value: this.editingWorldEntry.entry.is_canon_law },
+                        { field: 'useProbability', value: this.editingWorldEntry.entry.useProbability },
+                        { field: 'probability', value: this.editingWorldEntry.entry.probability }
+                    ];
 
-                    if (res.data.success) {
-                        alert("World info entry saved!");
-                        this.editingWorldEntry = null;
-                        await this.fetchWorldInfo();
-                    } else {
-                        alert(`Error: ${res.data.error}`);
+                    for (const f of fields) {
+                        const res = await axios.post('/api/world-info/edit-entry', {
+                            world_name: this.editingWorldEntry.world_name,
+                            entry_uid: this.editingWorldEntry.entry_uid,
+                            field: f.field,
+                            new_value: f.value
+                        });
+                        if (!res.data.success) {
+                            throw new Error(`Failed to save ${f.field}: ${res.data.error}`);
+                        }
                     }
+
+                    alert("World info entry saved!");
+                    this.editingWorldEntry = null;
+                    await this.fetchWorldInfo();
                 } catch (e) {
                     console.error("Failed to save world entry", e);
-                    alert("Failed to save world info entry.");
+                    alert("Failed to save world info entry: " + e.message);
                 }
             },
 

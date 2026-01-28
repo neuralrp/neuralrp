@@ -1,6 +1,6 @@
 # NeuralRP
 
- I created this because I wanted a local AI roleplay tool that was both simple, but also incorporated character and world cards. From there, I built (using AI) a chat and visual platform with quite a bit going on under the covers to optimize RP with 12-16 GB VRAM cards. Very niche, but if that niche is you, there's some unique features built into this app worth checking out.
+I created this because I wanted a local AI roleplay tool that was both simple, but also incorporated character and world cards. From there, I built (using AI) a chat and visual platform with quite a bit going on under the covers to optimize RP with 12-16 GB VRAM cards. Very niche, but if that niche is you, there's some unique features built into this app worth checking out.
 
 ## What Makes It Different
 
@@ -14,7 +14,7 @@ Create, manage, and promote non-player characters within individual chats. NPCs 
 
 **12GB VRAM Optimization**
 
-Performance Mode queues heavy operations (image generation, embeddings) while allowing light tasks (chat) to proceed. Run KoboldCCP and Stable Diffusion together on RTX 3060/4060 Ti hardware without crashes.
+Performance Mode queues heavy operations while allowing light tasks to proceed. Run KoboldCCP and Stable Diffusion together on 12 GB vRAM without crashes.
 
 **Persistent World State**
 
@@ -47,13 +47,13 @@ Examples:
 
 - **Relationship tracking** - Five emotional dimensions tracked via semantic embeddings (no LLM calls). Only injects context when (1) relationships are meaningful enough to matter, and (2) they're semantically relevant to the current conversation. A fight scene won't get "Alice trusts Bob" injected unless trust is actually part of the conflict.
 
-**Adaptive canon law** - Core world info reinforces every N turns (default: 3) instead of every single turn, preventing repetition while keeping characters grounded in the setting. This also allows you to tune what the characters see on the fly.
+- **Adaptive canon law** - Core world info reinforces every N turns (default: 3) instead of every single turn, preventing repetition while keeping characters grounded in the setting. This also allows you to tune what the characters see on the fly.
 
-**Capsule personas** - Multi-character chats compress full character cards (500-1000 tokens) into 50-100 token summaries, saving 60-80% overhead per character while preserving distinct voices.
+- **Capsule personas** - Multi-character chats compress full character cards (500-1000 tokens) into 50-100 token summaries, saving 60-80% overhead per character while preserving distinct voices.
 
-**Semantic world info** - Only retrieves lore semantically relevant to the last 5 messages. A 10,000-entry database still injects ~2k tokens because irrelevant entries stay out.
+- **Semantic world info** - Only retrieves lore semantically relevant to the last 5 messages. A 10,000-entry database still injects ~2k tokens because irrelevant entries stay out.
 
-**Chat-scoped NPCs** - NPCs exist only in their chat context and don't pollute the global character roster. No "guard from Chapter 2" appearing in unrelated prompts.
+- **Chat-scoped NPCs** - NPCs exist only in their chat context and don't pollute the global character roster. No "guard from Chapter 2" appearing in unrelated prompts.
 
 ## Hardware Requirements
 
@@ -112,7 +112,7 @@ app/data/
 
 ## Credits
 
-**Version 1.7.0** - Chat-Scoped NPC System, Adaptive Relationship Tracking
+**Version 1.7.2** - World Info Saving Fix
 
 Built with [FastAPI](https://fastapi.tiangolo.com/) • Compatible with [SillyTavern](https://github.com/SillyTavern/SillyTavern) • Integrates [KoboldCpp](https://github.com/LostRuins/koboldcpp) and [AUTOMATIC1111 Stable Diffusion](https://github.com/AUTOMATIC1111/stable-diffusion-webui)
 

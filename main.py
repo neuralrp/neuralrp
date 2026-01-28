@@ -4789,7 +4789,7 @@ async def edit_world_entry(req: WorldEditRequest):
         entry = world_data["entries"][req.entry_uid]
         
         # Validate field exists
-        valid_fields = ["content", "key", "is_canon_law", "probability", "useProbability"]
+        valid_fields = ["content", "key", "comment", "is_canon_law", "probability", "useProbability"]
         if req.field not in valid_fields:
             return {"success": False, "error": "Invalid field"}
         
@@ -4814,6 +4814,15 @@ async def edit_world_entry(req: WorldEditRequest):
         # Save the updated world info
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(world_data, f, indent=2, ensure_ascii=False)
+        
+        # Sync to database
+        try:
+            db_save_world(req.world_name, world_data.get("entries", {}))
+        except Exception as db_error:
+            print(f"Warning: Failed to sync world edit to database: {db_error}")
+        
+        # Clear caches to reflect the change
+        WORLD_INFO_CACHE.clear()
         
         return {"success": True, "message": f"Entry '{req.entry_uid}' field '{req.field}' updated successfully"}
         
@@ -4891,6 +4900,15 @@ async def edit_world_entry_ai(req: WorldEditEntryRequest):
             # Save the updated world info
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(world_data, f, indent=2, ensure_ascii=False)
+            
+            # Sync to database when updating existing entries
+            try:
+                db_save_world(req.world_name, world_data.get("entries", {}))
+            except Exception as db_error:
+                print(f"Warning: Failed to sync world AI edit to database: {db_error}")
+            
+            # Clear caches to reflect the change
+            WORLD_INFO_CACHE.clear()
             
             return {"success": True, "text": result["text"]}
         else:
@@ -4981,6 +4999,15 @@ async def add_world_entry(world_name: str, entry_data: dict):
         # Save the updated world info
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(world_data, f, indent=2, ensure_ascii=False)
+        
+        # Sync to database
+        try:
+            db_save_world(world_name, world_data.get("entries", {}))
+        except Exception as db_error:
+            print(f"Warning: Failed to sync world add to database: {db_error}")
+        
+        # Clear caches to reflect the change
+        WORLD_INFO_CACHE.clear()
         
         return {"success": True, "entry_uid": str(uid_counter), "message": "New entry added successfully"}
         

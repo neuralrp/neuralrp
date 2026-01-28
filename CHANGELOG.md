@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.7.2] - 2026-01-28
+
+### Fixed
+- **World Info Saving**: Fixed bug where editing world cards did not persist changes
+  - `/api/world-info/edit-entry`, `/api/world-info/add-entry`, and `/api/world-info/edit-entry-ai` now sync to database after saving JSON files
+  - Previously changes were saved to JSON but never written to database, causing edits to appear lost after refresh
+  - Frontend `saveWorldEntry()` now saves all editable fields (key, comment, content, is_canon_law, useProbability, probability) instead of only content
+
+***
+
 ## [1.7.1] - 2026-01-27
 
 ### Fixed
