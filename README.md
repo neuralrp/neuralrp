@@ -76,23 +76,20 @@ Examples:
    cd neuralrp
    ```
 
-2. **Install dependencies**
+2. **Run NeuralRP**
    ```bash
-   pip install -r requirements.txt
+   launcher.bat    # On Windows - handles everything automatically
    ```
-
-3. **Configure endpoints** (edit `main.py` if needed)
-   - KoboldCpp API: `http://127.0.0.1:5001`
-   - Stable Diffusion API: `http://127.0.0.1:7861`
-
-4. **Run NeuralRP**
-   ```bash
+   Or for other systems:
+   ```bash (or double-click in folder)
+   pip install -r requirements.txt
    python main.py
    ```
-   Or use `launcher.bat` on Windows
 
-5. **Open browser**
+3. **Open browser**
    Navigate to `http://localhost:8000`
+   
+   Configure your LLM and image generation endpoints in the app's Settings panel.
 
 ## Documentation
 
