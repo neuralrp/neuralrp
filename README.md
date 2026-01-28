@@ -98,14 +98,14 @@ Examples:
 
 ## Data Structure
 
-All content lives in `app/data/`:
-
 ```
-app/data/
-├── neuralrp.db          # SQLite database (characters, chats, world info, embeddings, relationships)
-├── characters/          # Exported SillyTavern V2 JSON cards
-├── chats/               # Exported chat sessions
-└── worldinfo/           # Exported world info JSON
+app/
+├── data/
+│   ├── neuralrp.db          # SQLite database (characters, chats, world info, embeddings, relationships)
+│   ├── characters/          # Exported SillyTavern V2 JSON cards
+│   ├── chats/               # Exported chat sessions
+│   └── worldinfo/           # Exported world info JSON
+└── images/                  # Generated and uploaded images
 ```
 
 ## Credits
