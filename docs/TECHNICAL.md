@@ -26,6 +26,7 @@ This document explains how NeuralRP's advanced features work under the hood, des
 18. [Undo/Redo System](#undo-redo-system)
 19. [Character Name Consistency](#character-name-consistency)
 20. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
+    - [Context Hygiene Philosophy](#context-hygiene-philosophy)
 
 ---
 
@@ -39,6 +40,41 @@ NeuralRP is a single FastAPI application that coordinates between:
 - **sqlite-vec** for vector similarity search
 
 All data lives in a centralized SQLite database (`app/data/neuralrp.db`), with optional JSON export for SillyTavern compatibility.
+
+### Core Design Philosophy: Context Hygiene
+
+NeuralRP is built around one fundamental constraint: **LLMs have finite context windows, but stories have infinite potential**.
+
+**The Challenge:**
+- Standard LLM context: 4096 tokens (~3000 words)
+- Single character card: 500-2000 tokens
+- Multi-character chat (3 chars): 1500-6000 tokens just for character definitions
+- Long conversations: 100+ tokens per turn
+- World lore: 50-1000 tokens per entry
+
+**Without intelligent context management:**
+- Single-character 50-turn chat: 6300+ tokens required → Token overflow ❌
+- Multi-character 30-turn chat: 6300+ tokens required → Token overflow ❌
+- Result: Can't have long chats, can't have multiple characters, can't use world info
+
+**NeuralRP's Solution: Context Hygiene Architecture**
+
+The entire system is designed to maximize narrative richness within finite token budget through:
+
+1. **Selective Injection**: Full content on first appearance, minimal reinforcement thereafter
+2. **Context-Aware Retrieval**: Semantic matching ensures only relevant world info is injected
+3. **Scalable Characterization**: Capsules enable 5+ character chats vs 1-2 with full cards
+4. **Periodic Re-anchoring**: Reinforcement prevents drift without repetition
+5. **Dynamic Summarization**: Trade old context for new when budget nears limit
+
+**This philosophy drives every technical decision documented in this file:**
+- Why single character uses PList reinforcement (not full cards)
+- Why multi-character uses capsules (not full cards)
+- Why world info has quoted vs unquoted keys (precision vs flexibility)
+- Why reinforcement intervals exist (balance consistency vs tokens)
+- Why first appearance detection matters (prevent bloat)
+
+For a deep dive into context hygiene tradeoffs and reasoning, see [Context Hygiene Philosophy](#context-hygiene-philosophy) in the Design Decisions section.
 
 ### Project Structure
 
@@ -94,10 +130,13 @@ NeuralRP migrated from JSON files to SQLite in v1.5.0 for several key benefits:
 ### Core Tables
 
 **Characters** - Character cards with JSON data, extensions (danbooru tags, capsules)
+- Character edits auto-sync to database on save (v1.7.3)
 
 **Worlds + World Entries** - World info containers with embeddings linked to `vec_world_entries`
+- World info edits auto-sync to database on save (v1.7.3)
 
 **Chats** - Chat sessions with summaries, metadata, branch info, and autosave flags
+- NPCs stored in chat metadata, reloaded on every message for immediate edit synchronization (v1.7.3)
 
 **Messages** - Individual chat messages linked to chats, with soft delete support (`summarized` field)
 
@@ -131,6 +170,31 @@ NeuralRP maintains backward compatibility through auto-export:
 
 This lets you move characters and world info between NeuralRP and SillyTavern seamlessly.
 
+### Real-Time Edit Synchronization (v1.7.3)
+
+NeuralRP provides immediate synchronization of character, NPC, and world info edits to active chat sessions without requiring page refresh.
+
+**Character Card Editing:**
+- Character edit endpoints automatically sync JSON changes to database (similar to world info behavior in v1.7.2)
+- Frontend reloads character list after successful edits to ensure UI has latest data
+- Changes take effect immediately in active chat sessions
+- **Previous bug fix**: Character edits were saved to JSON but never synced to database, causing edits to not persist until page refresh
+
+**NPC Card Editing:**
+- NPCs are reloaded from metadata on **every message** (not just at chat start)
+- Mid-chat NPC edits now take effect on the next message
+- NPCs frequently edited mid-chat (personalities, dialogues, etc.) update immediately without refresh
+- **Previous bug fix**: NPCs were loaded once at start of chat, ignoring edits made mid-chat
+
+**World Info Editing:**
+- World info keys now properly trigger entries with all keys in `key` array processed
+- Character, NPC, and world info card edits appear in "Recent Updates" on the next chat turn
+- Immediate edit notifications keep users informed of changes
+
+**Edit Notifications:**
+- Character, NPC, and world info card edits now appear in "Recent Updates" section on the next chat turn
+- Provides visibility into what changed without navigating away from conversation
+
 ---
 
 ## Context Assembly
@@ -147,18 +211,66 @@ On every generation request, NeuralRP builds a prompt in a specific layered orde
    - Short player/user description
    - Placed early to influence perspective
 
-3. **World Info** (updated in v1.7.1)
-   - Canon Law entries first (always included)
-   - **Triggered Lore**: Semantic search results added when semantically relevant to current conversation
-   - Keyword matches if semantic returns nothing
-   - **World Knowledge Section**: Displays contextually-matched lore entries (not canon law)
+3. **World Info** (updated in v1.7.3)
+    - Canon Law entries first (always included)
+    - **Triggered Lore**: Semantic search results added when semantically relevant to current conversation
+    - **Quoted vs Unquoted Keys**: 
+      - Quoted keys (`"Great Crash Landing"`): strict keyword matching, NO semantic search (exact phrase match only)
+      - Unquoted keys: semantic search + flexible keyword matching (catches plurals, synonyms)
+    - **World Knowledge Section**: Displays contextually-matched lore entries (not canon law)
+    - All keys in `key` array now processed (previously only first element used)
 
-4. **Character Definitions** (updated in v1.7.1)
-   - Single character: Full card content shown only on first turn
-   - Multi-character: Capsule personas shown on character's first appearance in chat
-   - Focus mode: Selected character emphasized (same capsules apply to all active characters)
-   - **First Appearance Detection**: Characters tracked via message history to prevent redundant context injection
-   - **Reinforcement Intervals**: Character profiles reinforced every N turns (configurable via `reinforce_freq` setting)
+4. **Character Definitions** (updated in v1.7.3)
+
+**Context Injection Strategy - Why Different Approaches for Single vs Multi-Character:**
+
+NeuralRP uses fundamentally different character injection strategies for single-character vs multi-character chats, driven by context hygiene and token efficiency considerations:
+
+**Single Character Chats: Full Card on Turn 1 Only**
+- **Behavior**: Complete character card (description + PList) injected on first turn only
+- **Format**: `### Character Profile: {name}\n{full description}\n### Context for {name}: {PList}`
+- **Reinforcement**: Only PList (depth_prompt) section reinforced periodically
+- **Reasoning**:
+  - **Token Efficiency**: Full cards (500-2000 tokens) would overwhelm context if repeated every turn
+  - **Drift Prevention**: PList contains essential personality/behavioral constraints sufficient for consistency
+  - **LLM Focus**: PList provides concentrated guidance without redundant full descriptions
+  - **Context Hygiene**: Single character = one focus point = full context on introduction adequate
+
+**Multi-Character Chats: Capsules on First Appearance, Then Periodically**
+- **Behavior**: Capsule summaries (50-200 tokens) injected on character's first appearance in chat
+- **Format**: `### [{name}]: {capsule summary with dialog examples}`
+- **Reinforcement**: Capsules reinforced every N turns (same interval as single-character PList)
+- **Reasoning**:
+  - **Token Budget**: Multiple full cards (2000-6000+ tokens total) would consume entire context window
+  - **Voice Differentiation**: Capsules include dialog examples showing character speech patterns
+  - **Grounding**: Capsules provide "this is how X speaks" examples better than PList alone
+  - **Context Hygiene**: In group chats, each character gets minimal but distinctive footprint
+  - **Scalability**: Adding 3rd, 4th, 5th character remains sustainable (vs full card scaling)
+
+**Focus Mode:**
+- **Behavior**: Selected character emphasized with same capsule logic applying to all active characters
+- **Reasoning**: Even when focused on one character, others remain "present" in scene with minimal overhead
+
+**First Appearance Detection (Critical for Context Hygiene):**
+- **Mechanism**: `character_has_speaker()` tracks if character has spoken in message history
+- **Behavior**: Capsule injected only on first appearance, then periodically via reinforcement
+- **Context Hygiene**: Prevents redundant injections (same character card repeated every turn = wasted tokens)
+- **Dynamic Addition**: Characters/NPCs added mid-chat automatically trigger capsule injection (no message = no appearance yet)
+- **Reasoning**:
+  - **Avoid Bloat**: Character A enters turn 5, shouldn't inject full description again turn 6-50
+  - **Consistent State**: Character behavior doesn't change, no need to repeat full definition
+  - **Token Optimization**: Reserve tokens for conversation flow, not re-defining characters
+
+**Context Injection on Entry:**
+- **Behavior**: Upon character, NPC, or world introduction to a chat, their card/capsule is dropped into the context window on first appearance
+- **Example Scenario**:
+  - Turn 1: Alice, Bob start chat → Alice and Bob capsules injected
+  - Turn 10: User adds Charlie → Charlie capsule injected (Alice/Bob NOT re-injected)
+  - Turn 15: NPC "Guard Marcus" created → NPC capsule injected
+- **Reasoning**:
+  - **Just-in-Time Grounding**: Character defined when they become relevant to conversation
+  - **No Proactive Bloat**: Undefined characters don't consume tokens until needed
+  - **LLM Attention**: New character gets immediate spotlight in context
 
 5. **Conversation History**
    - Recent messages verbatim
@@ -174,30 +286,153 @@ On every generation request, NeuralRP builds a prompt in a specific layered orde
    - Final formatting instruction
    - User's latest message
 
-### Reinforcement System (updated in v1.7.1)
+### Reinforcement System (updated in v1.7.3)
 
-Character and world info can be reinforced at regular intervals to prevent drift:
+**Why Reinforcement is Necessary: Context Drift Problem**
 
-**Character Reinforcement:**
+Even after initial character/world injection, LLMs naturally "forget" or "drift" away from defined behaviors over long conversations. This is not a failure—it's how LLMs process context:
+
+**Drift Mechanisms:**
+- **Attention Decay**: Early context (turn 1-10) receives less attention than recent messages (turn 80-100)
+- **Narrative Flow**: LLM prioritizes current plot momentum over static character definitions
+- **Token Saturation**: In 4096-token contexts, initial character definition (500+ tokens) gets "crowded out"
+
+**Reinforcement Solution:** Periodically re-inject essential character/world info to "re-anchor" LLM behavior without consuming tokens with full re-definitions.
+
+---
+
+**Character Reinforcement: Different Strategies for Context Hygiene**
+
+**Single Character Chats: PList (Depth Prompt) Reinforcement**
 - **Default**: Every 5 turns (configurable via `reinforce_freq` setting, range: 1-100)
-- **Single Character**: Reinforces depth_prompt (PList extensions) periodically
-- **Multi-Character**: Reinforces all character capsules periodically
+- **What's Reinforced**: Only `depth_prompt` (PList extensions), NOT full description
+- **Format**: `[REINFORCEMENT: Alice is quiet, observant, and uses short sentences.]`
 - **Turn Calculation**: `current_turn = (message_count + 1) // 2`
 - **Trigger Condition**: `current_turn > 0 AND current_turn % reinforce_freq == 0`
-- **Format**: `[REINFORCEMENT: [Alice]: capsule text | [Bob]: capsule text]`
-- **Purpose**: Reduces prompt repetition while maintaining character consistency
+
+**Context Hygiene Reasoning for PList-Only Reinforcement:**
+- **Redundancy Avoidance**: Full description already provided on turn 1—repeating wastes 500-1500 tokens
+- **Behavioral Constraints**: PList contains personality, speech patterns, behavioral rules—what actually matters for consistency
+- **Token Efficiency**: PList (50-200 tokens) vs full card (500-2000 tokens) = 5-10x savings
+- **LLM Preference**: LLM remembers facts from full description, but needs reminders on HOW to behave (PList)
+- **Example**:
+  - Full description (turn 1): "Alice is a 28-year-old engineer with blue eyes, works at SpaceX..."
+  - LLM remembers: Alice is engineer, SpaceX (facts)
+  - Drift: Alice starts using slang, long paragraphs (behavioral drift)
+  - Reinforcement (turn 10): "Alice speaks professionally, uses technical jargon, concise answers" (fixes drift)
+
+**Multi-Character Chats: Capsule Reinforcement with Dialog Examples**
+- **Default**: Every 5 turns (same `reinforce_freq` setting)
+- **What's Reinforced**: All active character capsules (includes dialog examples)
+- **Format**: `[REINFORCEMENT: [Alice]: "Quiet, speaks in short sentences" | [Bob]: "Loud, enthusiastic, uses exclamation points"]`
+- **Behavior**: Reinforces capsules for ALL active characters simultaneously (not individually)
+
+**Context Hygiene Reasoning for Capsule Reinforcement:**
+- **Voice Differentiation**: In group chats, LLM must distinguish 3-5+ voices
+  - Without reinforcement: All characters start sounding identical after ~20 turns
+  - With capsules: Dialog examples provide "voice fingerprints" for each character
+- **Compact Grounding**: Capsules (50-200 tokens each) include:
+  - Personality summary (10-50 tokens)
+  - Dialog examples (40-150 tokens) → "Here's how Alice speaks"
+  - More effective than PList alone for voice differentiation
+- **Scalability**:
+  - 3 characters: 3 capsules × 150 tokens = 450 tokens (sustainable)
+  - 5 characters: 5 capsules × 150 tokens = 750 tokens (still sustainable)
+  - Full cards would be: 5 characters × 1000 tokens = 5000 tokens (unsustainable)
+- **Group Dynamics**: Reinforcing all capsules simultaneously maintains ensemble balance
+  - Alice doesn't become "more" characterized than Bob
+  - All voices refreshed together, preventing one voice dominating
+
+**Why Different Reinforcement Content (PList vs Capsules)?**
+
+| Factor | Single Character (PList) | Multi-Character (Capsules) |
+|--------|-------------------------|---------------------------|
+| **Primary Goal** | Maintain behavior consistency | Maintain voice differentiation |
+| **Risk** | Character drift from defined personality | Voice blending/loss of distinctiveness |
+| **LLL Focus** | One character = easy to track behavior | Multiple characters = hard to distinguish voices |
+| **Content Needed** | Behavioral rules (PList) | Voice examples + personality (capsules) |
+| **Token Cost** | 50-200 tokens/5 turns | 150-750 tokens/5 turns (scales with characters) |
+| **Alternative** | Full card (waste) | Full cards (impossible token budget) |
+
+---
 
 **World Info Canon Law Reinforcement:**
-- **Default**: Every 3 turns (configurable via `world_info_reinforce_freq` setting)
+
+- **Default**: Every 3 turns (configurable via `world_info_reinforce_freq` setting, range: 1-100)
 - **Turn Calculation**: Same as character reinforcement
 - **Trigger Condition**: `is_initial_turn OR current_turn % world_reinforce_freq == 0`
 - **Format**: `### Canon Law (World Rules):\n{canon entries}`
-- **Purpose**: Shows canon law on initial turn and every Nth turn to maintain consistency without repetition
+- **Behavior**: Canon law entries shown on turn 0 (initial) and every Nth turn thereafter
+
+**Context Hygiene Reasoning for World Reinforcement:**
+- **Hard Constraints**: Canon laws are rules that MUST NOT be violated (physics, magic system limits)
+- **Priority**: More critical than character reinforcement—breaking canon law breaks story logic
+- **Frequency**: Higher than character reinforcement (3 vs 5 turns default)
+  - Reason: World rules easier to forget than character personality
+  - Example: "No flying" rule vs "Alice is shy"—world rule violated if forgotten even once
+- **No Bloat Risk**: Canon law typically 50-200 tokens (compact ruleset)
+  - Unlike full character cards, canon law designed for brevity
+- **Semantic Search Separation**:
+  - Canon law = always included + reinforced
+  - Triggered lore = semantically matched, not reinforced (dynamic)
+  - Rationale: Lore entry about "dragons" not relevant to "underwater scene"—reinforcing would distract
+
+---
+
+**Reinforcement Tradeoffs and Context Hygiene Philosophy**
+
+**Why Reinforce at All? Why Not Just Trust Initial Injection?**
+
+| Approach | Pros | Cons | Verdict |
+|----------|-------|-------|---------|
+| **Initial injection only** | Maximum token availability | Character drift, voice blending, canon violations | ❌ Fails long conversations |
+| **Every turn reinforcement** | Perfect consistency, zero drift | Token exhaustion, reduced conversation capacity | ❌ Unsustainable |
+| **Periodic reinforcement (current)** | Balance: maintain consistency + conserve tokens | Requires tuning frequency | ✅ Optimal |
+
+**Token Budget Allocation Example (4096-token context):**
+
+| Component | Token Cost | Frequency | Long-Term Token Share |
+|-----------|-------------|-------------|------------------------|
+| System prompt | 300 | Always | 300 |
+| Conversation history | 1500 | Every turn | 1500 (grows with chat) |
+| Single character (initial) | 1000 | Turn 1 only | 1000 (amortized) |
+| Single character (PList) | 100 | Every 5 turns | 100/tick |
+| Multi-character (capsules) | 450 (3 chars) | Every 5 turns | 450/tick |
+| Canon law | 150 | Every 3 turns | 150/tick |
+| **Available for content** | **~1800 tokens** | - | **~1800 tokens** |
+
+**Why This Allocation Works:**
+- **Conversation Priority**: ~45% of tokens reserved for actual dialogue (highest importance)
+- **Character Grounding**: ~20% for reinforcement (prevents drift without overwhelming)
+- **World Rules**: ~5% for canon law (small but critical)
+- **System Overhead**: ~8% for instructions (unavoidable)
+- **Headroom**: ~22% buffer for triggered lore, relationships, dynamic elements
+
+**Reinforcement as "Hygiene Maintenance":**
+
+Think of reinforcement like cleaning a house:
+- **Initial injection**: Deep clean (thorough, time-consuming)
+- **Daily/Weekly**: Quick maintenance (reinforcement keeps things tidy)
+- **Frequency Tuning**: Too frequent = wasted effort, too infrequent = mess accumulates
+
+**User Control:**
+- `reinforce_freq`: 1-100 (1 = every turn, 100 = rarely)
+- `world_info_reinforce_freq`: 1-100 (separate control for canon law)
+- **Recommended Defaults**:
+  - Most users: 5 turns character, 3 turns world (balanced)
+  - Short chats (<20 turns): Set to 10 (less reinforcement needed)
+  - Long chats (>100 turns): Set to 3 (more reinforcement needed)
 
 **Key Changes in v1.7.1:**
 - Reinforcement logic moved outside message iteration loop
 - Now uses actual turn numbers instead of message indices
 - Fixed issue where reinforcement used message index instead of turn count
+
+**Key Changes in v1.7.3:**
+- Clarified multi-character capsule reinforcement timing
+- Character, NPC, and world info context injection on first appearance to chat
+- Added comprehensive context hygiene rationale for injection strategies
+- Documented token efficiency tradeoffs and decision reasoning
 
 ### Chat Modes
 
@@ -229,25 +464,118 @@ Context assembly monitors token count and adjusts automatically:
 
 ## World Info Engine
 
-### Retrieval Strategy
+### Retrieval Strategy (updated in v1.7.3)
 
 NeuralRP uses a hybrid approach to find relevant world info:
 
-1. **Semantic Search** (primary)
+1. **Semantic Search** (primary for unquoted keys)
    - Query: Last 5 messages concatenated
    - Method: Cosine similarity against entry embeddings
    - Threshold: 0.35-0.45 depending on turn count
    - Returns: Top N entries above threshold
+   - Only applies to unquoted keys
 
-2. **Keyword Matching** (fallback)
-   - Triggered when semantic returns no results
+2. **Keyword Matching** (for quoted keys and fallback)
+   - **Quoted keys** (`"Great Crash Landing"`): Exact phrase match only, NO semantic search (prevents false positives)
+   - **Unquoted keys**: Flexible keyword matching with exact word boundaries
    - Case-insensitive substring matching
    - Configurable entry cap (default: 10)
+   - All keys in `key` array now processed (previously only first element used)
 
 3. **Canon Law** (always included)
    - Entries marked `is_canon_law = true`
    - Never subject to caps or probability
    - Injected at end of context to override drift
+
+**Key Changes in v1.7.3:**
+- **Quoted vs Unquoted Keys**: Quoted keys require strict keyword matching (no semantic search), unquoted keys use semantic search + flexible keyword matching
+- **All Keys Processed**: All elements in `key` array now used for embeddings/keyword matching (not just first element)
+- **Removed**: Broken pluralization logic (semantic embeddings handle plurals naturally)
+- **Removed**: `keysecondary` field support (users should migrate synonyms to `key` array)
+- **Keyword Matching**: Now uses exact word boundaries only (simpler, more reliable)
+
+---
+
+**Context Hygiene Rationale: Quoted vs Unquoted Keys**
+
+**Problem with Semantic Search Alone:**
+
+Semantic embeddings excel at understanding meaning, but can introduce false positives in world info retrieval:
+
+| Scenario | Key | User Says | Semantic Match | Problem |
+|----------|------|-----------|----------------|----------|
+| **Proper Noun** | `Dragon` (unquoted) | "I fought a scary lizard" | ✓ Correct (semantic) |
+| **Specific Phrase** | `"Great Crash Landing"` (quoted) | "There was a bad crash" | ✗ False positive (similar but wrong) |
+| **Technical Term** | `"Quantum Entanglement"` (quoted) | "Quantum mechanics is complex" | ✗ Too broad (topic match, not phrase) |
+| **Name Collision** | `"Marcus the Guard"` (quoted) | "I saw a guard" | ✗ False positive (any guard, not Marcus) |
+
+**Why Quoted Keys Need Exact Matching:**
+
+**1. Context Hygiene - Prevent Narrative Errors:**
+- **Quoted keys** are typically proper nouns, specific events, or technical terms
+- Example: `"Great Crash Landing"` refers to ONE historical event
+- Semantic match on "crash" would inject unrelated crash lore → confusion
+- **Exact matching**: Only inject when user says "Great Crash Landing" verbatim
+- **Rationale**: Specific events must not trigger on generic mentions
+
+**2. Token Efficiency - Avoid Irrelevant Lore:**
+- **Unquoted semantic search**: "dragon" triggers "dragon biology", "dragon history", "dragon myths" (50-300 tokens)
+- **Quoted exact match**: `"The Red Dragon of Mount Doom"` triggers only that entry (20 tokens)
+- **Savings**: 280 tokens avoided when generic dragon discussed
+- **Context Hygiene**: Specific lore only when user references specific thing
+
+**3. Narrative Precision - Maintaining Author Intent:**
+- **Author creates world entry**: Key: `"The Treaty of 1842"`, Content: "Treaty ending war between Kingdom A and Kingdom B"
+- **User asks**: "What happened in 1842?"
+- **Semantic search danger**: Matches "The Great Flood of 1842" (different event, same year)
+- **Exact matching solution**: Only triggers on "Treaty of 1842" (author's specific key)
+- **Context Hygiene**: Year-based semantic matching = disaster; exact phrase = precision
+
+**Why Unquoted Keys Use Semantic Search:**
+
+**1. Natural Language Flexibility:**
+- **Unquoted key**: `dragon`
+- **User queries**: "fire-breathing lizard", "mythical beast", "flying monster"
+- **Semantic search**: All match "dragon" embedding (✓ correct)
+- **Alternative (keyword-only)**: Would only trigger on word "dragon" (✗ fails natural language)
+- **Rationale**: Users don't think in database keys—they describe naturally
+
+**2. Plural and Synonym Handling:**
+- **Unquoted key**: `king`
+- **User says**: "The kings ruled together", "monarchs gathered", "royal leaders met"
+- **Semantic search**: All match "king" embedding (✓ correct)
+- **Keyword-only**: Only "king" triggers (✗ misses plurals/synonyms)
+- **Rationale**: Semantic embeddings naturally handle plurals/synonyms without manual configuration
+
+**3. Context Discovery:**
+- **Scenario**: User doesn't know world exists, describes situation naturally
+- **User says**: "We're underwater, can't breathe"
+- **Unquoted key**: `underwater`
+- **Semantic match**: ✓ Triggers lore about drowning mechanics
+- **Rationale**: Semantic search enables "discovery"—users find relevant lore without knowing exact keys
+
+**Decision Framework for Authors:**
+
+| Key Type | Example | When to Use | Matching Strategy |
+|-----------|---------|--------------|-------------------|
+| **Quoted** | `"The Great Crash Landing"` | Proper noun, specific event, technical term | Exact phrase only |
+| **Quoted** | `"Quantum Entanglement"` | Scientific/technical term needing precision | Exact phrase only |
+| **Unquoted** | `dragon`, `magic`, `kingdom` | General concept, topic, creature | Semantic + keyword |
+| **Unquoted** | `underwater breathing`, `portal` | Mechanic, ability, setting | Semantic + keyword |
+
+**Context Hygiene Tradeoff Summary:**
+
+| Approach | Precision | Flexibility | Token Efficiency | Best For |
+|----------|-----------|--------------|-------------------|------------|
+| **Quoted (exact)** | ⭐⭐⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐⭐ | Proper nouns, specific events |
+| **Unquoted (semantic)** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | General concepts, natural queries |
+
+**Why Both Systems Coexist:**
+
+- **Not one-size-fits-all**: World info contains both specific events AND general concepts
+- **Hybrid approach**: Gives authors control over when precision vs flexibility matters
+- **Context hygiene**: Prevents false positives (quoted) while enabling natural queries (unquoted)
+- **Token efficiency**: Exact matches reduce irrelevant lore, semantic search enables discovery
 
 ### Probability Weighting
 
@@ -1159,6 +1487,10 @@ Inject into prompt construction
     ↓
 Character reinforcement (every 5 turns, includes NPCs)
 ```
+
+**Key Changes in v1.7.3:**
+- NPCs are now reloaded from metadata on **every message** (not just at chat start)
+- Ensures mid-chat NPC edits (personalities, dialogues, etc.) take effect immediately without page refresh
 
 **NPC Promotion**:
 ```
@@ -3565,6 +3897,119 @@ The character name consistency helper integrates with:
 ---
 
 ## Design Decisions & Tradeoffs
+
+### Context Hygiene Philosophy
+
+**Core Problem: Finite Token Budget, Infinite Narrative Potential**
+
+LLMs are context-window limited (typically 4096-8192 tokens), but stories can span hundreds of turns, dozens of characters, and thousands of world details. This creates a fundamental tension:
+
+**What We Want:**
+- Complete character definitions always available
+- All world lore accessible at all times
+- Conversation history preserved in full
+- Every character grounded in their personality
+
+**What We Have:**
+- 4096 tokens total (~3000 words)
+- Character cards: 500-2000 tokens each
+- World lore: 50-1000 tokens per entry
+- Conversation: ~100 tokens per turn
+- System overhead: ~300-500 tokens
+
+**The Math Problem (Example):**
+```
+Single character, 50-turn conversation:
+  - System: 300 tokens
+  - Character (turn 1): 1000 tokens
+  - Conversation (50 turns × 100 tokens): 5000 tokens
+  - Total: 6300 tokens > 4096 token limit ❌
+
+Multi-character (3 chars), 30-turn conversation:
+  - System: 300 tokens
+  - 3 Characters (turn 1): 3000 tokens
+  - Conversation (30 turns × 100 tokens): 3000 tokens
+  - Total: 6300 tokens > 4096 token limit ❌
+```
+
+**Context Hygiene Solutions:**
+
+1. **Injection Strategy**: Full content on entry, minimal on reinforcement
+   - Single character: Full card (turn 1) + PList (periodic)
+   - Multi-character: Capsules (first appearance) + capsules (periodic)
+   - World info: Canon law (always) + triggered lore (semantic)
+
+2. **Reinforcement Intervals**: Re-anchor without repetition
+   - Character: Every 5 turns (balance drift prevention vs token efficiency)
+   - World: Every 3 turns (higher priority than character)
+   - Not every turn (wastes tokens) + not never (causes drift)
+
+3. **First Appearance Detection**: Inject only when needed
+   - Characters/NPCs: Define when they enter scene (not before, not after)
+   - World lore: Semantic matching (only when relevant to current conversation)
+   - Prevents pre-loading irrelevant information
+
+4. **Summarization**: Trade old context for new
+   - When token limit near: Summarize oldest messages (~80% compression)
+   - Keeps conversation flow while freeing tokens for new content
+   - Critical for long-running chats (>50 turns)
+
+5. **Selective Injection**: Right information, right time
+   - Quoted keys: Exact match only (prevents false positives)
+   - Unquoted keys: Semantic search (enables natural queries)
+   - Canon law: Always present (critical rules never forgotten)
+   - Triggered lore: Context-aware (only what's semantically relevant)
+
+**The "Hygiene" Analogy:**
+
+Think of context as a **4000-word essay** you're writing live:
+
+- **Bad hygiene**: Repeat same paragraph 50 times (full card every turn)
+  - Result: Essay filled with redundancy, no room for new ideas
+
+- **Good hygiene**: State thesis once, remind key points periodically
+  - Result: Essay flows naturally, main ideas reinforced without repetition
+
+- **NeuralRP's approach**:
+  - Turn 1: Introduce all characters/world (thesis statement)
+  - Turn 5, 10, 15...: Remind key characteristics (reinforcement)
+  - Ongoing: Conversation flow (new content)
+  - Token budget: ~80% conversation, ~20% reinforcement
+
+**Tradeoffs Made:**
+
+| Decision | What We Sacrifice | What We Gain | Verdict |
+|----------|-------------------|----------------|----------|
+| **Single char: PList only reinforcement** | Some character nuance lost | 90% token savings, behavior maintained | ✅ Worth it |
+| **Multi-char: Capsules not full cards** | Full character details not always available | Enables 5+ character chats, voice differentiation | ✅ Critical |
+| **Reinforcement every 5 turns** | Some drift between turns | Token budget sustainable, long chats possible | ✅ Balanced |
+| **Semantic world info** | Potential false positives | Natural language queries, discovery enabled | ✅ Net positive |
+
+**Context Hygiene as User Experience:**
+
+Without context hygiene:
+- "Can't add more characters" (token budget exhausted)
+- "Characters all sound the same after 20 turns"
+- "Forgot world rules mid-conversation"
+- "Can't have long conversations" (context fills up)
+
+With context hygiene:
+- "Have 5+ characters in group chats" (✓ capsules scale)
+- "Characters stay in character after 100 turns" (✓ reinforcement)
+- "World rules maintained throughout" (✓ canon law reinforcement)
+- "Conversations last 200+ turns" (✓ summarization + efficient injection)
+
+**Philosophy Summary:**
+
+1. **Just-in-Time Grounding**: Information appears when relevant, not before
+2. **Minimal Reinforcement**: Re-anchor behavior, don't redefine entirely
+3. **Context Awareness**: Match world lore to current scene, not entire database
+4. **Scalability Design**: 1 character = ~5% tokens, 5 characters = ~20% tokens
+5. **Conversation First**: Reserve 70-80% of context for dialogue flow
+
+**This is why**: The technical decisions in sections above (character injection, reinforcement, world info matching) all stem from this core philosophy: maximize narrative richness within finite token constraints through intelligent, context-aware content management.
+
+---
 
 ### Why SQLite Instead of JSON Files?
 
