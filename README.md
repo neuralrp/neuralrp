@@ -1,10 +1,19 @@
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
 # NeuralRP
+When I discovered Huggingface and tuned LLM's for roleplay, I quickly developed a love for experimenting with it. I love writing, and it quickly became a passion to create worlds and characters through written dialog with interesting, creative LLM's. 
 
-NeuralRP is a local AI roleplay application built around context hygiene. Most tools in this space dump full character cards into prompts every turn until you hit token limits. NeuralRP treats context as something to assemble intelligently from a SQLite database — inject what's needed when it's needed, reinforce periodically, and keep the bulk of your tokens for actual conversation.
+However, when I started (with Ollama) I noticed something: once I hit about 12k tokens (happens quickly), LLM's completely changed: output became repetitive and garbled, it forgot the situation and world I had carefully detailed in the system prompt, and characters became all the same. Rather than accepting this as a fundamental limitation of small, local LLM's, I decided to move on to other frontends.
 
-The result: multi-character chats that last hundreds of turns without context overflow, character drift, or world inconsistency. This isn't a SillyTavern frontend. It's a different approach to the same problem.
+Oobabooga was marginially better, but when I tried SillyTavern it opened up my eyes to prompt control: you could inject whatever you wanted into the prompt at a set number of turns. You could use character and world cards to enforce your vision, so the LLM wouldn't forget as easily. I began to obsess over dialing in the perfect settings, investigating what worked well and what didn't.
+
+What I found was this: I could never get the underlying control I needed because the architecture is fundamentally flawed, and the SD generation extension just wasn't cutting it. That needed to be native to work the way I wanted to. Not to mention, I was sick of all the knobs. I just wanted to find *my* setting, for *my* 12GB vRAM card, that worked for me.
+
+Hence, NeuralRP was born. 
+
+It's engineered from the ground up with context window in mind, every decision, every feature. No full character card dump every turn. No token leakage from SD generation. Use of a database backend, compatible with SillyTavern character cards, that semantically finds and injects what matters, when it matters.
+
+The fact is, there are certain limitations with 7B-12B LLM's that you simply can't get past. But this app I built, in my opinion, maximizes what locally runnable LLM's offer for roleplay. 
 
 ## What Makes the Architecture Different
 
@@ -16,11 +25,11 @@ The result: multi-character chats that last hundreds of turns without context ov
 
 - Relationships between entities track across five emotional dimensions (trust, bond, conflict, power, fear) and update automatically via semantic analysis. Not manually managed or forgotten by turn 20.
 
-- NPCs exist as chat-scoped entities with their own relationship states, and can be promoted to global characters mid-conversation.
+- NPCs exist as chat-scoped entities with their own relationship states, and can be promoted to global characters mid-conversation. And you can create the cards using AI.
 
 - Summarization trades old context for new when the budget nears 85%, preserving story continuity without losing relationship state.
 
-The outcome: 5+ character group chats that last 100+ turns. NPCs that emerge naturally. Alternate timelines that branch with independent relationship states. All on 12-16GB VRAM.
+The outcome: Relationship status tracked through summarizations. NPCs that emerge naturally without breaking immersion. Alternate timelines that branch with independent relationship states.
 
 ## Core Philosophy: Conversation First
 
@@ -34,13 +43,14 @@ The outcome: 5+ character group chats that last 100+ turns. NPCs that emerge nat
 
 - **Scalability by design** — 1 character = 5-8% of context. 5 characters = 15-20% of context. The rest is conversation.
 
-The difference between a 3-character chat that breaks at turn 30 and a 6-character chat that sustains through turn 200.
+Short, strong statements make an outsized impact on smaller, less intelligent LLMs. This is the stuff that keeps small LLM's rolling past 30k+ tokens worth of conversation.
 
 ## Built for SillyTavern Ecosystem Compatibility
 
 NeuralRP was designed to work with SillyTavern cards, not replace them. Every compatibility decision prioritizes preserving your existing work.
 
 ### Bidirectional Sync Without Data Loss
+A fundamental principle of NeuralRP is character and world cards. You should be able to bring your old ones in, edit them in app or in the JSON, and have it automatically sync. And those of you with a hundred of them, there's tagging.
 
 - **Smart sync (v1.8.0)** — Timestamp-based conflict resolution. Edit cards in either NeuralRP or externally without losing changes.
 
@@ -50,7 +60,7 @@ NeuralRP was designed to work with SillyTavern cards, not replace them. Every co
 
 - **Forward and backward compatible** — Characters created in NeuralRP work in SillyTavern. Characters from SillyTavern work in NeuralRP. No conversion, no data loss.
 
-### Card Generation Machine (v1.1/v1.2 Original Thesis)
+### Card Generation Machine
 
 One of NeuralRP's original goals was to be a card generation tool for SillyTavern. You can create optimized character cards in two ways:
 
@@ -64,7 +74,7 @@ Both methods output SillyTavern V2-compatible JSON files. The idea was to protot
 
 ### Multi-Character Chats That Scale
 
-Run 5+ active characters with distinct voices and full personality tracking without context overflow. Capsules (compressed character summaries with dialog examples) enable group chats that other tools can't sustain past 2-3 characters.
+Optimized to run multiple active characters with distinct voices and full personality tracking without context overflow. Capsules (compressed character summaries with dialog examples) enable group chats that other tools can't sustain past 2-3 characters. I've literally never been able to do this effectively with another front end before.
 
 ### Emergent NPCs
 
@@ -72,7 +82,9 @@ Create background characters mid-chat (bartender, guard, merchant) with full per
 
 ### Semantic World Information
 
-World lore appears when contextually relevant via embedding-based search, not regex triggers or manual injection.
+A major question I faced is, how do you ensure your world card entries get injected at the right time? What if you have hundreds of entries? What if you want one of your entries injected at specific intervals, at different points in the coversation? And the trickiest one, what if you want your "Elf" entry to trigger for "elves, elven, the elf king, elf sanctuary" etc, but you don't want your "The Great Crash Landing" historical event entry to trigger on "this is a great bow!"? I think I've solved this problem.
+
+- **Semantic Search Engine with 
 
 - **Quoted keys** (`"Great Crash Landing"`) — Exact phrase match, prevents false positives
 
