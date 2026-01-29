@@ -5,9 +5,9 @@ When I discovered Huggingface and tuned LLM's for roleplay, I quickly developed 
 
 However, when I started (with Ollama) I noticed something: once I hit about 12k tokens (happens quickly), LLM's completely changed: output became repetitive and garbled, it forgot the situation and world I had carefully detailed in the system prompt, and characters became all the same. Rather than accepting this as a fundamental limitation of small, local LLM's, I decided to move on to other frontends.
 
-Oobabooga was marginially better, but when I tried SillyTavern it opened up my eyes to prompt control: you could inject whatever you wanted into the prompt at a set number of turns. You could use character and world cards to enforce your vision, so the LLM wouldn't forget as easily. I began to obsess over dialing in the perfect settings, investigating what worked well and what didn't.
+Oobabooga was marginally better, but when I tried SillyTavern it opened up my eyes to prompt control: you could inject whatever you wanted into the prompt at a set number of turns. You could use character and world cards to enforce your vision, so the LLM wouldn't forget as easily. I began to obsess over dialing in the perfect settings, investigating what worked well and what didn't.
 
-What I found was this: I could never get the underlying control I needed because the architecture is fundamentally flawed, and the SD generation extension just wasn't cutting it. That needed to be native to work the way I wanted to. Not to mention, I was sick of all the knobs. I just wanted to find *my* setting, for *my* 12GB vRAM card, that worked for me. And I was sick of SD gen work-arounds and editing poor LLM replies taking me out RP immersion.
+What I found was this: I could never get the underlying control I needed because the architecture is fundamentally flawed, and the SD generation extension just wasn't cutting it. That needed to be native to work the way I wanted it to. Not to mention, I was sick of all the knobs. I just wanted to find *my* setting, for *my* 12GB vRAM card that worked for me, rather than being taken out of RP immersion with workarounds and fixes. 
 
 Hence, NeuralRP was born. 
 
