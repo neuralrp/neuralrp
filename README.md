@@ -1,6 +1,14 @@
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-# NeuralRP
+**Local AI roleplay frontend that keeps characters, NPCs, and worlds coherent across 30k+ tokens on the GPU you bought in 2021 with your COVID stimulus check, with built-in SD and SillyTavern card support**
+
+**Simple out of the box. Just drop your cards in the folders, there isn't a million different things to configure. Just go.**
+
+**8 GB vRAM? Can't pay $4,000 for a sick GPU? Neither can I.**
+
+**No cloud subscriptions, no inference costs**
+
+# NeuralRP: Storytime
 When I discovered Huggingface and tuned LLM's for roleplay, I quickly developed a love for experimenting with it. I love writing, and it quickly became a passion to create worlds and characters through written dialog with interesting, creative LLM's. 
 
 However, when I started (with Ollama) I noticed something: once I hit about 12k tokens (happens quickly), LLM's completely changed: output became repetitive and garbled, it forgot the situation and world I had carefully detailed in the system prompt, and characters became all the same. Rather than accepting this as a fundamental limitation of small, local LLM's, I decided to move on to other frontends.
@@ -11,7 +19,7 @@ What I found was this: I could never get the underlying control I needed because
 
 Hence, NeuralRP was born. 
 
-It's engineered from the ground up with context window in mind, every decision, every feature. No full character card dump every turn. No token leakage from SD generation. Use of a database backend, compatible with SillyTavern character and world cards, that semantically finds and injects what matters, when it matters.
+It's engineered from the ground up with context window in mind, every decision, every feature. No full character card dump every turn. No token leakage from SD generation. Uses a SQLite backend which syncs intelligently with SillyTavern character and world cards, which semantically finds and injects what matters, when it matters, no matter how deep your world is.
 
 The fact is, there are certain limitations with 7B-12B LLM's that you simply can't get past. But this app I built, in my opinion, maximizes what locally runnable LLM's offer for roleplay. 
 
