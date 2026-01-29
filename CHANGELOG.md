@@ -5,6 +5,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.8.0] - 2026-01-28
+
+### Added
+- **Tag Management System**: Lightweight library-scale organization for characters and worlds
+  - Add tags to characters and worlds (e.g., "campaign", "fandom", "NSFW", "WIP")
+  - Filter character and world lists by tags with AND semantics (character must have ALL selected tags)
+  - Quick filter chips for most-used tags (top 5) for fast access
+  - Tag editor with autocomplete suggestions (shows existing tags as you type)
+  - Tags normalized on save (lowercase, trimmed, no duplicates)
+  - Integrated with existing search feature (filter by tags AND search by name/description)
+
+- **Smart Sync System**: Intelligent JSON import with timestamp-based conflict resolution
+  - Database now tracks `updated_at` timestamps for characters and world entries
+  - Character edits sync immediately to database with automatic conflict detection (newer wins)
+  - World info supports entry-level smart sync: new entries from JSON added, user additions preserved, conflicts resolved by timestamp
+  - Backfills existing records with timestamps on first startup
+  - API endpoints: `/api/reimport/worldinfo?smart_sync=true` for intelligent merge, `force=true` for complete reimport
+
+- **Automatic Tag Extraction**: Tags from SillyTavern cards automatically preserved on import/save
+  - Character tags extracted from `char.data.tags` array (SillyTavern V2 format)
+  - World tags extracted from `world.tags` array (JSON format)
+  - One-time migration script extracts tags from existing characters/worlds on startup
+  - No manual tag management required - just drop cards in folder and refresh
+
+### Changed
+- **Character Sidebar**: Added tag filter bar above character list
+- **World Info Sidebar**: Added tag filter bar above world list
+- **Character Edit Form**: Replaced simple text input with chip-based tag editor
+- **World Edit Form**: Added tag editor to world entry editing interface
+- **Auto-Import**: Now uses smart sync for world info (preserves user additions from UI)
+
+***
+
 ## [1.7.3] - 2026-01-28
 
 ### Added
@@ -161,7 +194,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
-## [1.4.0] - 2025-12-15
+## [1.4.0] - 2026-01-12
 
 ### Added
 - **Image Inpainting**: Full inpainting support via Stable Diffusion img2img API
@@ -174,7 +207,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
-## [1.3.0] - 2025-11-20
+## [1.3.0] - 2026-01-08
 
 ### Added
 - **In-Card Editing**: Full character and world info editing interface
@@ -185,7 +218,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
-## [1.2.0] - 2025-10-15
+## [1.2.0] - 2026-01-08
 
 ### Added
 - **Automatic Performance Mode**: Smart GPU resource management for LLM + SD
@@ -203,7 +236,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
-## [1.1.0] - 2025-09-10
+## [1.1.0] - 2026-01-07
 
 ### Added
 - **Branching System**: Fork from any message to create alternate timelines
@@ -213,7 +246,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
-## [1.0.0] - 2025-08-01
+## [1.0.0] - 2026-01-06
 
 ### Added
 - **KoboldCpp Integration**: Native and OpenAI-compatible API support
@@ -228,25 +261,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Token Counter**: Real-time context usage monitoring
 - **Chat Persistence**: Save/load sessions with characters, world, and images
 
-***
-
-## Key Changes from Original
-
-### Removed
-- **Performance tables**: Moved technical metrics to documentation, kept only headline numbers
-- **"Technical", "Performance", "Notes" subsections**: Consolidated into main sections or removed redundant info
-- **Verbose explanations**: Trimmed to essential information
-- **Design philosophy sections**: Moved to technical docs, kept only user-facing features
-
-### Improved
-- **Scannability**: Each version now fits on ~1 screen
-- **Hierarchy**: Clear Added/Changed/Fixed/Removed structure
-- **Focus**: Emphasizes what users can DO, not how it works internally
-- **Consistency**: Uniform formatting across all versions
-
-### Retained
-- **Technical depth**: Key implementation details for developers
-- **Breaking changes**: Migration notes for v1.5.0
-- **Version dates**: Full chronological history
 
 ***

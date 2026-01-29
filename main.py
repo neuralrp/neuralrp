@@ -24,21 +24,34 @@ logger = logging.getLogger(__name__)
 
 # Import the updated NPC functions with defensive lookup
 from app.database import (
-    db_get_all_characters, db_get_character, db_save_character, db_delete_character,
-    db_get_all_worlds, db_get_world, db_save_world, db_delete_world, db_update_world_entry,
-    db_get_all_chats, db_get_chat, db_save_chat, db_delete_chat,
+    # Core connection and initialization
+    init_db, get_connection,
+    # Character operations
+    db_get_character, db_get_all_characters, db_save_character, db_delete_character,
+    db_get_character_updated_at,
+    # World info operations
+    db_get_world, db_get_all_worlds, db_save_world, db_delete_world,
+    db_update_world_entry, db_get_world_entry_timestamps,
+    db_get_world_content_hash,
+    # Tag operations
+    db_get_character_tags, db_get_all_character_tags, db_get_popular_character_tags,
+    db_get_characters_by_tags, db_add_character_tags, db_remove_character_tags,
+    db_get_world_tags, db_get_all_world_tags, db_get_popular_world_tags,
+    db_get_worlds_by_tags, db_add_world_tags, db_remove_world_tags,
+    # Chat and message operations
+    db_get_chat, db_get_all_chats, db_save_chat, db_delete_chat,
+    db_get_message_context, db_cleanup_old_autosaved_chats, db_cleanup_empty_chats,
+    db_get_chat_npcs, db_create_npc_and_update_chat,
+    db_get_npc_by_id, db_update_npc, db_create_npc_with_entity_id,
+    db_delete_npc, db_set_npc_active,
+    # Image metadata operations
     db_save_image_metadata, db_get_image_metadata, db_get_all_image_metadata,
-    db_save_performance_metric, db_get_median_performance, db_cleanup_old_metrics,
-    db_get_recent_performance_metrics,
-    db_get_world_content_hash, db_get_world_entry_hash, db_update_world_entry_hash,
-    db_save_embedding, db_get_embedding, db_search_similar_embeddings,
-    db_delete_entry_embedding, db_create_entity,
-    # NPC functions (Phase 2.2)
-    db_create_npc, db_get_chat_npcs, db_get_npc_by_id, db_update_npc,
-    db_increment_npc_appearance, db_set_npc_active, db_delete_npc, 
-    db_promote_npc_to_character, db_copy_npcs_for_branch,
-    db_create_npc_and_update_chat,  # NEW: Atomic function for NPC creation
-    get_connection,
+    # sqlite-vec embedding operations
+    db_save_embedding, db_get_embedding, db_delete_entry_embedding,
+    db_search_similar_embeddings, db_delete_world_embeddings, db_count_embeddings,
+    # Performance metrics
+    db_save_performance_metric, db_get_recent_performance_metrics,
+    db_get_median_performance, db_cleanup_old_metrics,
     # Undo/Redo functions
     get_recent_changes, get_last_change, undo_last_delete, restore_version,
     # Search functions (FTS5 full-text search)
@@ -54,6 +67,8 @@ from app.database import (
     # Change log cleanup
     db_cleanup_old_changes,
 )
+
+from app.tag_manager import parse_tag_string
 
 # NPC helper functions are now integrated in load_character_profiles()
 
@@ -450,6 +465,11 @@ class WorldGenRequest(BaseModel):
 class WorldSaveRequest(BaseModel):
     world_name: str
     plist_text: str
+
+class WorldAddEntryRequest(BaseModel):
+    world_name: str
+    entry_data: dict
+    tags: Optional[List[str]] = None
 
 # Editing Models
 class CharacterEditRequest(BaseModel):
@@ -1424,392 +1444,275 @@ async def periodic_cleanup():
         except Exception as e:
             print(f"Periodic cleanup failed: {e}")
 
-# Auto-import JSON files on startup
-def auto_import_json_files():
-    """Scan JSON folders and import any new files not already in database."""
-    import_count = {"characters": 0, "worlds": 0, "chats": 0}
+# Helper functions for JSON sync
+def normalize_world_name(filename: str) -> str:
+    """Remove SillyTavern suffixes from world filename.
     
-    # Import characters
-    char_dir = os.path.join(DATA_DIR, "characters")
-    if os.path.exists(char_dir):
-        for f in os.listdir(char_dir):
-            if f.endswith(".json") and f != ".gitkeep":
-                file_path = os.path.join(char_dir, f)
-                try:
-                    # Check if already in database
-                    existing = db_get_character(f)
-                    if existing is None:
-                        # Load and import
-                        with open(file_path, "r", encoding="utf-8") as cf:
-                            char_data = json.load(cf)
-                        if db_save_character(char_data, f):
-                            import_count["characters"] += 1
-                            print(f"Auto-imported character: {f}")
-                except Exception as e:
-                    print(f"Failed to auto-import character {f}: {e}")
-    
-    # Import world info
-    wi_dir = os.path.join(DATA_DIR, "worldinfo")
-    if os.path.exists(wi_dir):
-        for f in os.listdir(wi_dir):
-            if f.endswith(".json") and f != ".gitkeep":
-                name = f.replace(".json", "")
-                # Remove ALL SillyTavern suffixes: _plist, _worldinfo, _json
-                # This handles files like "exampleworld_plist_worldinfo.json" -> "exampleworld"
-                for suffix in ["_plist", "_worldinfo", "_json"]:
-                    if name.endswith(suffix):
-                        name = name[:-len(suffix)]
-                        # Only remove one suffix to handle files with multiple suffixes
-                        break
-                file_path = os.path.join(wi_dir, f)
-                try:
-                    # Check if already in database
-                    existing = db_get_world(name)
-                    if existing is None:
-                        # Load and import
-                        with open(file_path, "r", encoding="utf-8") as wf:
-                            world_data = json.load(wf)
-                        # db_save_world expects entries dict, not -> full object
-                        entries = world_data.get("entries", world_data) if isinstance(world_data, dict) else {}
-                        if entries and db_save_world(name, entries):
-                            import_count["worlds"] += 1
-                            print(f"Auto-imported world info: {name}")
-                except Exception as e:
-                    print(f"Failed to auto-import world info {f}: {e}")
-    
-    # Import chats
-    chat_dir = os.path.join(DATA_DIR, "chats")
-    if os.path.exists(chat_dir):
-        for f in os.listdir(chat_dir):
-            if f.endswith(".json") and f != ".gitkeep":
-                name = f.replace(".json", "")
-                file_path = os.path.join(chat_dir, f)
-                try:
-                    # Check if already in database
-                    existing = db_get_chat(name)
-                    if existing is None:
-                        # Load and import
-                        with open(file_path, "r", encoding="utf-8") as cf:
-                            chat_data = json.load(cf)
-                        if db_save_chat(name, chat_data):
-                            import_count["chats"] += 1
-                            print(f"Auto-imported chat: {name}")
-                except Exception as e:
-                    print(f"Failed to auto-import chat {f}: {e}")
-    
-    total = import_count["characters"] + import_count["worlds"] + import_count["chats"]
-    if total > 0:
-        print(f"Auto-import complete: {import_count['characters']} characters, {import_count['worlds']} worlds, {import_count['chats']} chats")
-    else:
-        print("Auto-import: No new JSON files to import")
-    
-    return import_count
+    'exampleworld_plist_worldinfo.json' → 'exampleworld'
+    """
+    name = filename.replace(".json", "")
+    for suffix in ["_plist", "_worldinfo", "_json"]:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+    return name
 
-# Separate import functions for targeted reimport
-def import_characters_json_files():
-    """Import only character JSON files not already in database."""
-    import_count = 0
+
+def find_world_json_path(world_name: str) -> Optional[str]:
+    """Find JSON file path for a world, handling SillyTavern suffixes."""
+    wi_dir = os.path.join(DATA_DIR, "worldinfo")
     
+    if not os.path.exists(wi_dir):
+        return None
+    
+    # Try exact match first
+    exact_path = os.path.join(wi_dir, f"{world_name}.json")
+    if os.path.exists(exact_path):
+        return exact_path
+    
+    # Try with suffixes
+    for suffix in ["_worldinfo", "_plist", "_json"]:
+        path = os.path.join(wi_dir, f"{world_name}{suffix}.json")
+        if os.path.exists(path):
+            return path
+    
+    return None
+
+
+def entries_content_equal(entry_a: Dict, entry_b: Dict) -> bool:
+    """Compare two world entries for content equality (ignoring metadata)."""
+    return (
+        entry_a.get("content") == entry_b.get("content") and
+        entry_a.get("key") == entry_b.get("key") and
+        entry_a.get("keysecondary") == entry_b.get("keysecondary") and
+        entry_a.get("is_canon_law") == entry_b.get("is_canon_law")
+    )
+
+
+def sync_character_from_json(filename: str) -> Dict[str, Any]:
+    """Sync a character from JSON file to database.
+    
+    Used after editing character JSON to update database copy.
+    Uses timestamp-based conflict resolution: newer wins.
+    
+    Args:
+        filename: Character filename (e.g., "Alice.json")
+    
+    Returns:
+        {"success": True/False, "action": "created"|"updated"|"unchanged", "message": str}
+    """
+    try:
+        json_path = os.path.join(DATA_DIR, "characters", filename)
+        if not os.path.exists(json_path):
+            return {"success": False, "action": "error", "message": "JSON file not found"}
+        
+        # Load JSON file
+        json_mtime = int(os.path.getmtime(json_path))
+        with open(json_path, "r", encoding="utf-8") as f:
+            json_data = json.load(f)
+        
+        # Check database
+        db_char = db_get_character(filename)
+        
+        if db_char is None:
+            # New character - just save it
+            db_save_character(json_data, filename)
+            return {"success": True, "action": "created", "message": "Character imported to database"}
+        
+        # Character exists - check timestamps
+        db_updated = db_get_character_updated_at(filename) or 0
+        
+        if json_mtime > db_updated:
+            # JSON is newer - update database
+            db_save_character(json_data, filename)
+            return {"success": True, "action": "updated", "message": "Database updated from JSON (newer)"}
+        else:
+            # Database is newer or same - no action needed
+            return {"success": True, "action": "unchanged", "message": "Database version is current"}
+    
+    except Exception as e:
+        return {"success": False, "action": "error", "message": str(e)}
+
+
+def sync_world_from_json(world_name: str) -> Dict[str, int]:
+    """Smart sync a world from JSON file to database.
+    
+    Entry-level granularity with timestamp-based conflict resolution:
+    - New entries in JSON → ADD to database
+    - Entries only in DB → KEEP (user additions via UI)
+    - Same UID, different content → NEWER WINS
+    
+    Args:
+        world_name: World name (without .json extension)
+    
+    Returns:
+        {"added": N, "updated": N, "unchanged": N, "kept": N}
+    """
+    result = {"added": 0, "updated": 0, "unchanged": 0, "kept": 0}
+    
+    # Find JSON file (handle SillyTavern suffixes)
+    json_path = find_world_json_path(world_name)
+    if not json_path or not os.path.exists(json_path):
+        return result
+    
+    json_mtime = int(os.path.getmtime(json_path))
+    
+    with open(json_path, "r", encoding="utf-8") as f:
+        json_data = json.load(f)
+    
+    json_entries = json_data.get("entries", json_data) if isinstance(json_data, dict) else {}
+    json_tags = json_data.get("tags", [])
+    
+    # Get database state
+    db_world = db_get_world(world_name)
+    
+    if db_world is None:
+        # New world - import entirely
+        if db_save_world(world_name, json_entries, json_tags):
+            result["added"] = len(json_entries)
+        return result
+    
+    db_entries = db_world.get("entries", {})
+    db_timestamps = db_get_world_entry_timestamps(world_name)
+    
+    # Track which entries we've processed
+    processed_uids = set()
+    
+    # Process JSON entries
+    for uid, json_entry in json_entries.items():
+        processed_uids.add(uid)
+        
+        if uid not in db_entries:
+            # New entry from JSON
+            result["added"] += 1
+        else:
+            db_entry = db_entries[uid]
+            if entries_content_equal(json_entry, db_entry):
+                result["unchanged"] += 1
+            else:
+                # Content differs - check timestamps
+                db_updated = db_timestamps.get(uid, 0)
+                if json_mtime > db_updated:
+                    result["updated"] += 1
+                else:
+                    result["kept"] += 1  # DB version is newer, keep it
+    
+    # Entries only in DB (user additions) - keep them
+    for uid in db_entries:
+        if uid not in processed_uids:
+            result["kept"] += 1
+    
+    # If any changes, rebuild and save
+    if result["added"] > 0 or result["updated"] > 0:
+        # Merge: start with DB entries, overlay JSON entries where JSON is newer
+        merged_entries = dict(db_entries)  # Keep DB entries
+        for uid, json_entry in json_entries.items():
+            if uid not in db_entries:
+                merged_entries[uid] = json_entry  # Add new
+            elif uid in db_entries:
+                db_updated = db_timestamps.get(uid, 0)
+                if json_mtime > db_updated:
+                    merged_entries[uid] = json_entry  # JSON is newer
+                # else: keep db version (already in merged_entries)
+        
+        db_save_world(world_name, merged_entries, json_tags)
+    
+    return result
+
+
+def import_characters_json_files(force: bool = False) -> int:
+    """Import character JSON files to database.
+    
+    Args:
+        force: If True, reimport even if character exists (overwrites DB)
+    
+    Returns:
+        Number of characters imported
+    """
+    import_count = 0
     char_dir = os.path.join(DATA_DIR, "characters")
-    if os.path.exists(char_dir):
-        for f in os.listdir(char_dir):
-            if f.endswith(".json") and f != ".gitkeep":
-                file_path = os.path.join(char_dir, f)
-                try:
-                    # Check if already in database
-                    existing = db_get_character(f)
-                    if existing is None:
-                        # Load and import
-                        with open(file_path, "r", encoding="utf-8") as cf:
-                            char_data = json.load(cf)
-                        if db_save_character(char_data, f):
-                            import_count += 1
-                            print(f"Imported character: {f}")
-                except Exception as e:
-                    print(f"Failed to import character {f}: {e}")
+    
+    if not os.path.exists(char_dir):
+        return 0
+    
+    for f in os.listdir(char_dir):
+        if f.endswith(".json") and f != ".gitkeep":
+            file_path = os.path.join(char_dir, f)
+            try:
+                existing = db_get_character(f)
+                if existing is None or force:
+                    with open(file_path, "r", encoding="utf-8") as cf:
+                        char_data = json.load(cf)
+                    if db_save_character(char_data, f):
+                        import_count += 1
+                        print(f"Imported character: {f}")
+            except Exception as e:
+                print(f"Failed to import character {f}: {e}")
     
     if import_count > 0:
         print(f"Character import complete: {import_count} characters")
-    else:
-        print("Character import: No new JSON files to import")
     
     return import_count
 
-def sync_world_from_json(world_name):
-    """Intelligently merge a single JSON world with its database entries.
-    
-    Compares JSON entries vs database entries and merges them:
-    - New JSON entries: Add to database (they don't exist yet)
-    - Deleted database entries: Remove from result (gone from JSON)
-    - Existing entries: Keep whichever was modified more recently
-    
-    Returns:
-        dict with 'added' (int), 'removed' (int), 'merged' (int) counts
-    """
-    # Load JSON file
-    file_path = os.path.join(DATA_DIR, "worldinfo", f"{world_name}.json")
-    
-    if not os.path.exists(file_path):
-        print(f"World info JSON not found: {file_path}")
-        return {"added": 0, "removed": 0, "merged": 0}
-    
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            json_data = json.load(f)
-            json_entries = json_data.get("entries", json_data) if isinstance(json_data, dict) else {}
-    except Exception as e:
-        print(f"Failed to load world info JSON {world_name}: {e}")
-        return {"added": 0, "removed": 0, "merged": 0}
-    
-    # Load database entries
-    db_world = db_get_world(world_name)
-    if db_world is None:
-        # No world in database - just import JSON
-        entries = json_entries
-        if db_save_world(world_name, entries):
-            print(f"Sync: Imported {len(entries)} entries from JSON (no existing DB world)")
-            return {"added": len(entries), "removed": 0, "merged": 0}
-        return {"added": 0, "removed": 0, "merged": 0}
-    
-    db_entries = db_world.get("entries", {})
-    
-    # Track modification times (JSON file modification time as fallback)
-    json_mtime = os.path.getmtime(file_path)
-    
-    # Perform intelligent merge
-    merged_entries = {}
-    added_count = 0
-    removed_count = 0
-    merged_count = 0
-    
-    # 1. Start with all database entries (they have modification times if edited)
-    for uid, db_entry in db_entries.items():
-        # Check if this entry still exists in JSON
-        if uid in json_entries:
-            json_entry = json_entries[uid]
-            # Entry exists in both - keep the more recently modified
-            # Use db_get_world_entry_hash to get hash for comparison
-            db_hash = db_get_world_entry_hash(world_name, uid)
-            
-            # If we have hash info and it matches, consider it same
-            if db_hash and json_entry.get("content") == db_entry.get("content"):
-                # Same content - keep DB version (user might have edited it)
-                merged_entries[uid] = db_entry
-                merged_count += 1
-            else:
-                # Different content - prefer JSON (more recent)
-                merged_entries[uid] = json_entry
-                merged_count += 1
-        else:
-            # Entry in DB but not in JSON - remove it
-            removed_count += 1
-            print(f"Sync: Removed entry '{uid}' (deleted from JSON)")
-    
-    # 2. Add new JSON entries (not in database)
-    for uid, json_entry in json_entries.items():
-        if uid not in db_entries:
-            merged_entries[uid] = json_entry
-            added_count += 1
-            print(f"Sync: Added new entry '{uid}' from JSON")
-    
-    # 3. Add entries that exist in both but JSON is newer
-    for uid, json_entry in json_entries.items():
-        if uid in db_entries:
-            db_entry = db_entries[uid]
-            # If content differs, use JSON version
-            db_hash = db_get_world_entry_hash(world_name, uid)
-            if not db_hash or json_entry.get("content") != db_entry.get("content"):
-                merged_entries[uid] = json_entry
-                merged_count += 1
-                print(f"Sync: Updated entry '{uid}' from JSON (newer version)")
-    
-    # Save merged result to database and JSON
-    if merged_entries:
-        if db_save_world(world_name, merged_entries):
-            # Update JSON file with merged result
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump({"entries": merged_entries}, f, indent=2, ensure_ascii=False)
-            print(f"Sync: Saved {len(merged_entries)} entries to DB and JSON")
-        else:
-            print(f"Sync: Failed to save merged world info to database")
-    else:
-        print(f"Sync: No changes to merge for world '{world_name}'")
-    
-    print(f"Sync Summary for '{world_name}': Added {added_count}, Removed {removed_count}, Merged {merged_count} entries")
-    return {"added": added_count, "removed": removed_count, "merged": merged_count}
 
-def sync_character_from_json(filename):
-    """Sync a single character JSON file to the database.
-    
-    Loads the character JSON and saves it to the database, updating existing entries.
-    This is similar to sync_world_from_json but simpler since characters are atomic.
+def import_world_info_json_files(force: bool = False) -> int:
+    """Import world info JSON files to database.
     
     Args:
-        filename: The character JSON filename (e.g., "Alice.json")
+        force: If True, reimport even if world exists (overwrites DB)
     
     Returns:
-        dict with 'success' (bool) and 'message' (str)
-    """
-    file_path = os.path.join(DATA_DIR, "characters", filename)
-    
-    if not os.path.exists(file_path):
-        print(f"Character JSON not found: {file_path}")
-        return {"success": False, "message": f"Character file not found: {filename}"}
-    
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            char_data = json.load(f)
-        
-        # Save to database (updates existing if present)
-        if db_save_character(char_data, filename):
-            print(f"Synced character to database: {filename}")
-            return {"success": True, "message": f"Character synced: {filename}"}
-        else:
-            print(f"Failed to save character to database: {filename}")
-            return {"success": False, "message": f"Failed to save character to database: {filename}"}
-    except Exception as e:
-        print(f"Failed to sync character {filename}: {e}")
-        return {"success": False, "message": f"Error syncing character: {str(e)}"}
-
-def cleanup_world_info_filenames():
-    """Rename world info JSON files with SillyTavern suffixes to clean names.
-    
-    This is a one-time cleanup to ensure all world info files use standard naming:
-    - exampleworld_plist_worldinfo.json -> exampleworld.json
-    - exampleworld_plist.json -> exampleworld.json
-    - etc.
-    """
-    wi_dir = os.path.join(DATA_DIR, "worldinfo")
-    if not os.path.exists(wi_dir):
-        return
-    
-    renamed_count = 0
-    for f in os.listdir(wi_dir):
-        if f.endswith(".json") and f != ".gitkeep":
-            name = f.replace(".json", "")
-            original_name = name
-            
-            # Remove ALL SillyTavern suffixes (keep removing until none left)
-            while True:
-                removed = False
-                for suffix in ["_plist", "_worldinfo", "_json"]:
-                    if name.endswith(suffix):
-                        name = name[:-len(suffix)]
-                        removed = True
-                        break
-                if not removed:
-                    break
-            
-            if name != original_name:
-                # File has a suffix, rename it
-                old_path = os.path.join(wi_dir, f)
-                new_name = f"{name}.json"
-                new_path = os.path.join(wi_dir, new_name)
-                
-                # Check if target file already exists
-                if os.path.exists(new_path):
-                    print(f"Skipping rename: {f} -> {new_name} (target already exists)")
-                else:
-                    try:
-                        os.rename(old_path, new_path)
-                        renamed_count += 1
-                        print(f"Renamed world info: {f} -> {new_name}")
-                    except Exception as e:
-                        print(f"Failed to rename {f}: {e}")
-    
-    if renamed_count > 0:
-        print(f"World info filename cleanup complete: {renamed_count} files renamed")
-
-def import_world_info_json_files(force=False, smart_sync=True):
-    """Import world info JSON files with intelligent merging.
-    
-    Args:
-        force: If True, delete existing worlds before importing (useful for fixing corrupted entries)
-               DEPRECATED: Smart sync is now the default and recommended approach.
-        smart_sync: If True (default), performs intelligent merge of JSON and database entries.
-                    If False, uses legacy behavior (force parameter).
+        Number of worlds imported
     """
     import_count = 0
-    
     wi_dir = os.path.join(DATA_DIR, "worldinfo")
-    if os.path.exists(wi_dir):
-        for f in os.listdir(wi_dir):
-            if f.endswith(".json") and f != ".gitkeep":
-                name = f.replace(".json", "")
-                original_name = name
-                
-                # Remove ALL SillyTavern suffixes (keep removing until none left)
-                while True:
-                    removed = False
-                    for suffix in ["_plist", "_worldinfo", "_json"]:
-                        if name.endswith(suffix):
-                            name = name[:-len(suffix)]
-                            removed = True
-                            break
-                    if not removed:
-                        break
-                
-                file_path = os.path.join(wi_dir, f)
-                
-                # Rename file to clean name if it had any suffixes
-                if name != original_name:
-                    clean_filename = f"{name}.json"
-                    clean_path = os.path.join(wi_dir, clean_filename)
-                    try:
-                        if os.path.exists(clean_path):
-                            # Target already exists, use the existing clean file
-                            file_path = clean_path
-                            print(f"Using existing clean file: {clean_filename}")
-                        else:
-                            # Rename to clean filename
-                            os.rename(file_path, clean_path)
-                            file_path = clean_path
-                            print(f"Renamed world info: {f} -> {clean_filename}")
-                    except Exception as e:
-                        print(f"Failed to rename {f}: {e}")
-                        # Continue with original path if rename fails
-                        file_path = os.path.join(wi_dir, f)
-                
-                try:
-                    if force:
-                        # Force reimport mode (legacy behavior)
-                        db_delete_world(name)
-                        print(f"Force reimport: Deleted existing world '{name}'")
-                        
-                        # Load and import
-                        with open(file_path, "r", encoding="utf-8") as wf:
-                            world_data = json.load(wf)
-                        # db_save_world expects entries dict, not -> full object
-                        entries = world_data.get("entries", world_data) if isinstance(world_data, dict) else {}
-                        if entries and db_save_world(name, entries):
-                            import_count += 1
-                            print(f"Imported world info: {name}")
-                    elif smart_sync:
-                        # Smart sync mode (new default)
-                        result = sync_world_from_json(name)
-                        import_count += result.get("added", 0) + result.get("merged", 0)
-                    else:
-                        # Legacy mode: check if already in database
-                        existing = db_get_world(name)
-                        if existing is None:
-                            # Load and import
-                            with open(file_path, "r", encoding="utf-8") as wf:
-                                world_data = json.load(wf)
-                            # db_save_world expects entries dict, not -> full object
-                            entries = world_data.get("entries", world_data) if isinstance(world_data, dict) else {}
-                            if entries and db_save_world(name, entries):
-                                import_count += 1
-                                print(f"Imported world info: {name}")
-                except Exception as e:
-                    print(f"Failed to import world info {f}: {e}")
+    
+    if not os.path.exists(wi_dir):
+        return 0
+    
+    for f in os.listdir(wi_dir):
+        if f.endswith(".json") and f != ".gitkeep":
+            name = normalize_world_name(f)
+            file_path = os.path.join(wi_dir, f)
+            try:
+                existing = db_get_world(name)
+                if existing is None or force:
+                    with open(file_path, "r", encoding="utf-8") as wf:
+                        world_data = json.load(wf)
+                    entries = world_data.get("entries", world_data) if isinstance(world_data, dict) else {}
+                    tags = world_data.get("tags", [])
+                    if entries and db_save_world(name, entries, tags):
+                        import_count += 1
+                        print(f"Imported world info: {name}")
+            except Exception as e:
+                print(f"Failed to import world info {f}: {e}")
     
     if import_count > 0:
         print(f"World info import complete: {import_count} worlds")
-    else:
-        print("World info import: No new JSON files to import")
     
     return import_count
 
+
+# Auto-import JSON files on startup
+def auto_import_json_files() -> Dict[str, int]:
+    """Scan JSON folders and import any new files not already in database.
+
+    Returns:
+        Dict with counts: {"characters": N, "worlds": N, "chats": N}
+    """
+    result = {
+        "characters": import_characters_json_files(),
+        "worlds": import_world_info_json_files(),
+        "chats": import_chats_json_files()
+    }
+    
+    total = sum(result.values())
+    if total > 0:
+        print(f"Auto-import complete: {result['characters']} characters, {result['worlds']} worlds, {result['chats']} chats")
+    else:
+        print("Auto-import: No new JSON files to import")
+    
+    return result
+ 
 def import_chats_json_files():
     """Import only chat JSON files not already in database."""
     import_count = 0
@@ -1850,10 +1753,6 @@ async def startup_event():
     if not verify_database_health():
         print("⚠️  Database health check failed - app may not function correctly")
         print("   Try running: python migrate_to_sqlite.py")
-    
-    # Clean up world info filenames with SillyTavern suffixes
-    print("Cleaning up world info filenames...")
-    cleanup_world_info_filenames()
     
     # Auto-import any new JSON files dropped into folders
     print("Scanning for new JSON files to import...")
@@ -2876,6 +2775,16 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
     """Extract PList-formatted content from LLM output and ensure proper format."""
     import re
     
+    # Handle XML plist format (fallback if LLM uses XML instead of bracketed format)
+    if '<plist>' in result or '<key>' in result:
+        # Extract content from <string> tags within <dict> structures
+        string_matches = re.findall(r'<string>([^<]+)</string>', result)
+        if string_matches:
+            # Format extracted content as bracketed PList entries
+            lines = [f'[Content: {text.strip()}]' for text in string_matches if text.strip()]
+            if lines:
+                return '\n'.join(lines)
+    
     # If result already starts with bracket, it's likely PList formatted
     if result.strip().startswith('['):
         # Extract all bracketed entries
@@ -3098,16 +3007,16 @@ async def edit_character_field(req: CharacterEditRequest):
         # Save the updated character
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(char_data, f, indent=2, ensure_ascii=False)
+
+        # Sync to database so changes take effect immediately in active chats
+        sync_result = sync_character_from_json(req.filename)
+        if not sync_result["success"]:
+            print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
         
-            # Sync to database so changes take effect immediately in active chats
-            sync_result = sync_character_from_json(req.filename)
-            if not sync_result["success"]:
-                print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
-            
-            # Record recent edit for immediate context injection
-            add_recent_edit('character', req.filename, req.field, req.new_value)
-            
-            return {"success": True, "message": f"Field '{req.field}' updated successfully"}
+        # Record recent edit for immediate context injection
+        add_recent_edit('character', req.filename, req.field, req.new_value)
+        
+        return {"success": True, "message": f"Field '{req.field}' updated successfully"}
         
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -3133,7 +3042,7 @@ async def edit_character_capsule(req: CharacterEditRequest):
         # Save the updated character
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(char_data, f, indent=2, ensure_ascii=False)
-        
+
         # Sync to database so changes take effect immediately in active chats
         sync_result = sync_character_from_json(req.filename)
         if not sync_result["success"]:
@@ -3181,7 +3090,7 @@ async def edit_character_capsule_ai(req: CharacterEditFieldRequest):
             # Save the updated character
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(char_data, f, indent=2, ensure_ascii=False)
-            
+
             # Sync to database so changes take effect immediately in active chats
             sync_result = sync_character_from_json(req.filename)
             if not sync_result["success"]:
@@ -3200,28 +3109,28 @@ async def edit_character_capsule_ai(req: CharacterEditFieldRequest):
 # World Info Generation Logic (Ported from world-gen-app)
 WORLD_PROMPTS = {
     "history": {
-        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory mentioned. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects)]\n\nRules:\n- One entry per line\n- Keep entries concise\n- Use parentheses for nested attributes\n- Output ONLY the PList entries, no explanations\n- Match the tone and maturity level of the provided context naturally",
-        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory mentioned in the chat. Use this exact format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects)]\n\nRules:\n- One entry per line\n- Keep entries concise\n- Use parentheses for nested attributes\n- Output ONLY the PList entries, no explanations",
-        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature/suggestive themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory. Include mature themes where appropriate. Use this format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects), intimate_aspects(relationships, desires, power dynamics)]\n\nRules:\n- One entry per line\n- Include suggestive details naturally\n- Output ONLY the PList entries",
-        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event or backstory. Include explicit adult themes naturally. Use this format:\n[EventName: type(event/era/myth), time(when), actors(who), result(what happened), legacy(effects), sexual_culture(attitudes, practices, taboos)]\n\nRules:\n- One entry per line\n- Include explicit adult content where relevant\n- Output ONLY the PList entries"
+        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory mentioned. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects)]\n\nRules:\n- One entry per line\n- Keep entries concise\n- Use parentheses for nested attributes\n- Output ONLY PList entries in bracketed format [Name: type(...)], no explanations\n- DO NOT use XML plist format or <plist> tags\n- Match the tone and maturity level of the provided context naturally",
+        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory mentioned in the chat. Use this exact format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects)]\n\nRules:\n- One entry per line\n- Keep entries concise\n- Use parentheses for nested attributes\n- Output ONLY PList entries in bracketed format [Name: type(...)], no explanations\n- DO NOT use XML plist format or <plist> tags",
+        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature/suggestive themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event, era, or piece of backstory. Include mature themes where appropriate. Use this format:\n[EventName: type(event/era/myth), time(when it happened), actors(who was involved), result(what happened), legacy(lasting effects), intimate_aspects(relationships, desires, power dynamics)]\n\nRules:\n- One entry per line\n- Include suggestive details naturally\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags",
+        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each historical event or backstory. Include explicit adult themes naturally. Use this format:\n[EventName: type(event/era/myth), time(when), actors(who), result(what happened), legacy(effects), sexual_culture(attitudes, practices, taboos)]\n\nRules:\n- One entry per line\n- Include explicit adult content where relevant\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags"
     },
     "locations": {
-        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each location, room, town, or area mentioned. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[LocationName(nickname if any): type(room/town/area), features(physical details), atmosphere(mood/feeling), purpose(what happens here), inhabitants(who is usually here)]\n\nRules:\n- One entry per line\n- Output ONLY the PList entries\n- Match the tone and maturity level of the provided context naturally",
-        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location, room, town, or area mentioned. Use this format:\n[LocationName(nickname if any): type(room/town/area), features(physical details), atmosphere(mood/feeling), purpose(what happens here), inhabitants(who is usually here)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
-        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location. Include suggestive atmosphere and uses. Use this format:\n[LocationName(nickname): type, features, atmosphere(mood), purpose(what happens), inhabitants(who), intimate_uses(private activities)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
-        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location. Include explicit adult themes naturally. Format:\n[LocationName(nickname): type, features, atmosphere, purpose, inhabitants, sexual_activities(what happens), kinks_associated(themes)]\n\nRules:\n- One entry per line- Output ONLY the PList entries"
+        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each location, room, town, or area mentioned. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[LocationName(nickname if any): type(room/town/area), features(physical details), atmosphere(mood/feeling), purpose(what happens here), inhabitants(who is usually here)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags\n- Match tone and maturity level of the provided context naturally",
+        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location, room, town, or area mentioned. Use this format:\n[LocationName(nickname if any): type(room/town/area), features(physical details), atmosphere(mood/feeling), purpose(what happens here), inhabitants(who is usually here)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags",
+        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location. Include suggestive atmosphere and uses. Use this format:\n[LocationName(nickname): type, features, atmosphere(mood), purpose(what happens), inhabitants(who), intimate_uses(private activities)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags",
+        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each location. Include explicit adult themes naturally. Format:\n[LocationName(nickname): type, features, atmosphere, purpose, inhabitants, sexual_activities(what happens), kinks_associated(themes)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags"
     },
     "creatures": {
-        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each creature, monster, or character archetype. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[CreatureName: type(creature/archetype), appearance(visual traits), behavior(typical actions), culture(social norms, beliefs), habitat(where found), attitude_toward_user(how they treat {{user}})]\n\nRules:\n- One entry per line\n- Output ONLY the PList entries\n- Match the tone and maturity level of the provided context naturally",
-        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each creature, monster, or character archetype. Use this format:\n[CreatureName: type(creature/archetype), appearance(visual traits), behavior(typical actions), culture(social norms, beliefs), habitat(where found), attitude_toward_user(how they treat {{user}})]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
-        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries for creatures or archetypes. Include suggestive behavior and interactions. Format:\n[CreatureName: type, appearance, behavior, culture, habitat, attitude_toward_user, flirtation_style(how they seduce/interact)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
-        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries including explicit adult content. Format:\n[CreatureName: type, appearance, behavior, culture, attitude_toward_user, sexual_behavior(explicit details), kinks(preferences), consent_culture(boundaries)]\n\nRules:\n- One entry per line- Output ONLY the PList entries"
+        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each creature, monster, or character archetype. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[CreatureName: type(creature/archetype), appearance(visual traits), behavior(typical actions), culture(social norms, beliefs), habitat(where found), attitude_toward_user(how they treat {{user}})]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags\n- Match tone and maturity level of the provided context naturally",
+        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each creature, monster, or character archetype. Use this format:\n[CreatureName: type(creature/archetype), appearance(visual traits), behavior(typical actions), culture(social norms, beliefs), habitat(where found), attitude_toward_user(how they treat {{user}})]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags",
+        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries for creatures or archetypes. Include suggestive behavior and interactions. Format:\n[CreatureName: type, appearance, behavior, culture, habitat, attitude_toward_user, flirtation_style(how they seduce/interact)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags",
+        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries including explicit adult content. Format:\n[CreatureName: type, appearance, behavior, culture, attitude_toward_user, sexual_behavior(explicit details), kinks(preferences), consent_culture(boundaries)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags"
     },
     "factions": {
-        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each faction, group, or organization. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[FactionName: type(faction/guild/house/clique), members(who belongs), reputation(public image), goals(what they want), methods(how they operate), attitude_toward_user(how they treat {{user}}), rivals(opposing factions)]\n\nRules:\n- One entry per line\n- Output ONLY the PList entries\n- Match the tone and maturity level of the provided context naturally",
-        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each faction, group, or organization. Use this format:\n[FactionName: type(faction/guild/house/clique), members(who belongs), reputation(public image), goals(what they want), methods(how they operate), attitude_toward_user(how they treat {{user}}), rivals(opposing factions)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
-        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries for factions. Include suggestive motivations and interactions. Format:\n[FactionName: type, members, reputation, goals, methods, attitude_toward_user, social_dynamics(power, romance, rivalries), intimate_culture(dating norms, boundaries)]\n\nRules:\n- One entry per line- Output ONLY the PList entries",
-        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries including explicit adult content. Format:\n[FactionName: type, members, reputation, goals, methods, attitude_toward_user, sexual_culture(practices, rituals), kinks_favored(group preferences), initiation(how to join)]\n\nRules:\n- One entry per line- Output ONLY the PList entries"
+        "neutral": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nContext:\n{input}\n\nCreate PList-format World Info entries for each faction, group, or organization. Adapt naturally to the content tone (SFW or NSFW as appropriate). Use this format:\n[FactionName: type(faction/guild/house/clique), members(who belongs), reputation(public image), goals(what they want), methods(how they operate), attitude_toward_user(how they treat {{user}}), rivals(opposing factions)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags\n- Match tone and maturity level of the provided context naturally",
+        "sfw": "You are creating World Info entries in PList format for SillyTavern roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format World Info entries for each faction, group, or organization. Use this format:\n[FactionName: type(faction/guild/house/clique), members(who belongs), reputation(public image), goals(what they want), methods(how they operate), attitude_toward_user(how they treat {{user}}), rivals(opposing factions)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags",
+        "spicy": "You are creating World Info entries in PList format for SillyTavern roleplays with mature themes.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries for factions. Include suggestive motivations and interactions. Format:\n[FactionName: type, members, reputation, goals, methods, attitude_toward_user, social_dynamics(power, romance, rivalries), intimate_culture(dating norms, boundaries)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags",
+        "veryspicy": "You are creating World Info entries in PList format for SillyTavern ERP/NSFW roleplays.\n\nWorld name: {worldName}\n\nChat Context:\n{input}\n\nCreate PList-format entries including explicit adult content. Format:\n[FactionName: type, members, reputation, goals, methods, attitude_toward_user, sexual_culture(practices, rituals), kinks_favored(group preferences), initiation(how to join)]\n\nRules:\n- One entry per line\n- Output ONLY PList entries in bracketed format [Name: type(...)]\n- DO NOT use XML plist format or <plist> tags"
     }
 }
 
@@ -3293,7 +3202,8 @@ async def save_generated_world_info(req: WorldSaveRequest):
                     "probability": 100,
                     "useProbability": True,
                     "displayIndex": uid_counter,
-                    "depth": 5
+                    "depth": 5,
+                    "is_canon_law": False
                 }
                 uid_counter += 1
         
@@ -3302,6 +3212,15 @@ async def save_generated_world_info(req: WorldSaveRequest):
         file_path = os.path.join(DATA_DIR, "worldinfo", f"{req.world_name}.json")
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump({"entries": entries}, f, indent=2, ensure_ascii=False)
+        
+        # Sync to database
+        try:
+            db_save_world(req.world_name, entries)
+        except Exception as db_error:
+            print(f"Warning: Failed to sync world gen to database: {db_error}")
+        
+        # Clear caches to reflect the change
+        WORLD_INFO_CACHE.clear()
             
         return {"success": True, "name": req.world_name}
     except Exception as e:
@@ -3953,8 +3872,9 @@ async def reimport_world_info(request: dict = None):
             wi_dir = os.path.join(DATA_DIR, "worldinfo")
             if os.path.exists(wi_dir):
                 total_added = 0
-                total_removed = 0
-                total_merged = 0
+                total_updated = 0
+                total_unchanged = 0
+                total_kept = 0
                 
                 for f in os.listdir(wi_dir):
                     if f.endswith(".json") and f != ".gitkeep":
@@ -3967,17 +3887,24 @@ async def reimport_world_info(request: dict = None):
                         
                         result = sync_world_from_json(name)
                         total_added += result.get("added", 0)
-                        total_removed += result.get("removed", 0)
-                        total_merged += result.get("merged", 0)
+                        total_kept += result.get("kept", 0)
+                        total_updated += result.get("updated", 0)
+                        total_unchanged += result.get("unchanged", 0)
                 
-                message = f"Synced: {total_added} added, {total_removed} removed, {total_merged} merged entries from JSON files"
+                total_changes = total_added + total_updated
+                message = f"Synced: {total_added} added, {total_updated} updated, {total_kept} kept, {total_unchanged} unchanged entries from JSON files"
+                
+                # Clear world info cache after sync
+                WORLD_INFO_CACHE.clear()
+                
                 return {
                     "success": True,
                     "synced": {
                         "added": total_added,
-                        "removed": total_removed,
-                        "merged": total_merged,
-                        "total": total_added + total_removed + total_merged
+                        "updated": total_updated,
+                        "kept": total_kept,
+                        "unchanged": total_unchanged,
+                        "total": total_changes
                     },
                     "message": message
                 }
@@ -4012,10 +3939,14 @@ async def reimport_chats():
         return {"success": False, "error": str(e)}
 
 @app.get("/api/characters")
-async def list_characters():
-    """Get all characters from database."""
+async def list_characters(tags: Optional[str] = None):
+    """Get all characters from database, optionally filtered by tags (AND semantics)."""
     try:
-        chars = db_get_all_characters()
+        if tags:
+            tag_list = parse_tag_string(tags)
+            chars = db_get_characters_by_tags(tag_list)
+        else:
+            chars = db_get_all_characters()
         return chars
     except Exception as e:
         print(f"Error loading characters from database: {e}")
@@ -4070,11 +4001,71 @@ async def delete_character(filename: str):
         print(f"Error deleting character: {e}")
         return {"error": str(e)}
 
-@app.get("/api/world-info")
-async def list_world_info():
-    """Get all world info from database."""
+@app.get("/api/characters/tags")
+async def get_character_tags(limit: Optional[int] = None):
+    """Get all unique character tags, optionally limited."""
     try:
-        worlds = db_get_all_worlds()
+        tags = db_get_all_character_tags(limit)
+        return {"tags": tags}
+    except Exception as e:
+        print(f"Error getting character tags: {e}")
+        return {"tags": []}
+
+@app.get("/api/characters/popular-tags")
+async def get_popular_character_tags(limit: int = 5):
+    """Get most-used character tags (for quick chips)."""
+    try:
+        tags = db_get_popular_character_tags(limit)
+        return [{"tag": t, "count": c} for t, c in tags]
+    except Exception as e:
+        print(f"Error getting popular character tags: {e}")
+        return []
+
+@app.get("/api/characters/{filename}/tags")
+async def get_character_tags_for_character(filename: str):
+    """Get all tags for a specific character."""
+    try:
+        tags = db_get_character_tags(filename)
+        return {"tags": tags}
+    except Exception as e:
+        print(f"Error getting character tags for {filename}: {e}")
+        return {"tags": []}
+
+@app.post("/api/characters/{filename}/tags")
+async def update_character_tags(filename: str, request: dict):
+    """Replace all tags for a character (normalized on save)."""
+    try:
+        raw_tags = request.get("tags", [])
+        
+        # Normalize: lowercase, trim, remove empty, remove duplicates
+        normalized_tags = []
+        for tag in raw_tags:
+            parsed = parse_tag_string(tag)
+            normalized_tags.extend(parsed)
+        normalized_tags = list(set(normalized_tags))  # Remove duplicates
+        normalized_tags = [t for t in normalized_tags if t]  # Remove empty
+        
+        # Clear existing tags
+        db_remove_character_tags(filename, [])
+        
+        # Add new tags
+        if normalized_tags:
+            db_add_character_tags(filename, normalized_tags)
+        
+        return {"success": True, "tags": normalized_tags}
+    except Exception as e:
+        print(f"Error updating character tags: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.get("/api/world-info")
+async def list_world_info(tags: Optional[str] = None):
+    """Get all world info from database, optionally filtered by tags (AND semantics)."""
+    try:
+        if tags:
+            tag_list = parse_tag_string(tags)
+            worlds = db_get_worlds_by_tags(tag_list)
+        else:
+            worlds = db_get_all_worlds()
         return worlds
     except Exception as e:
         print(f"Error loading world info from database: {e}")
@@ -4148,10 +4139,68 @@ async def delete_world_info_endpoint(world_name: str):
         
         print(f"World info deleted: {world_name}")
         return {"success": True, "name": world_name}
-        
     except Exception as e:
         print(f"Error deleting world info: {e}")
         return {"error": str(e)}
+
+@app.get("/api/world-info/tags")
+async def get_world_tags(limit: Optional[int] = None):
+    """Get all unique world tags, optionally limited."""
+    try:
+        tags = db_get_all_world_tags(limit)
+        return {"tags": tags}
+    except Exception as e:
+        print(f"Error getting world tags: {e}")
+        return {"tags": []}
+
+@app.get("/api/world-info/popular-tags")
+async def get_popular_world_tags(limit: int = 5):
+    """Get most-used world tags (for quick chips)."""
+    try:
+        tags = db_get_popular_world_tags(limit)
+        return [{"tag": t, "count": c} for t, c in tags]
+    except Exception as e:
+        print(f"Error getting popular world tags: {e}")
+        return []
+
+@app.get("/api/world-info/{world_name}/tags")
+async def get_world_tags_for_world(world_name: str):
+    """Get all tags for a specific world."""
+    try:
+        tags = db_get_world_tags(world_name)
+        return {"tags": tags}
+    except Exception as e:
+        print(f"Error getting world tags for {world_name}: {e}")
+        return {"tags": []}
+
+@app.post("/api/world-info/{world_name}/tags")
+async def update_world_tags(world_name: str, request: dict):
+    """Replace all tags for a world (normalized on save)."""
+    try:
+        raw_tags = request.get("tags", [])
+        
+        # Normalize: lowercase, trim, remove empty, remove duplicates
+        normalized_tags = []
+        for tag in raw_tags:
+            parsed = parse_tag_string(tag)
+            normalized_tags.extend(parsed)
+        normalized_tags = list(set(normalized_tags))  # Remove duplicates
+        normalized_tags = [t for t in normalized_tags if t]  # Remove empty
+        
+        # Clear existing tags
+        db_remove_world_tags(world_name, [])
+        
+        # Add new tags
+        if normalized_tags:
+            db_add_world_tags(world_name, normalized_tags)
+        
+        # Clear world info cache to reflect tag changes
+        WORLD_INFO_CACHE.clear()
+        
+        return {"success": True, "tags": normalized_tags}
+    except Exception as e:
+        print(f"Error updating world tags: {e}")
+        return {"success": False, "error": str(e)}
 
 # Chat session management
 @app.get("/api/chats")
@@ -4576,7 +4625,6 @@ async def update_npc(chat_id: str, npc_id: str, request: Request):
         else:
             # NPC only in metadata - sync to database with SAME entity_id
             print(f"[NPC_UPDATE] NPC {npc_id} only in metadata, syncing to database with same entity_id")
-            from app.database import db_create_npc_with_entity_id
             success, error = db_create_npc_with_entity_id(chat_id, npc_id, npc_data)
             if not success:
                 print(f"[NPC_UPDATE] Failed to sync NPC to database: {error}")
@@ -5187,10 +5235,10 @@ async def delete_world_entry(world_name: str, entry_uid: str):
         return {"success": False, "error": str(e)}
 
 @app.post("/api/world-info/add-entry")
-async def add_world_entry(world_name: str, entry_data: dict):
+async def add_world_entry(req: WorldAddEntryRequest):
     """Add a new world info entry."""
     try:
-        file_path = os.path.join(DATA_DIR, "worldinfo", f"{world_name}.json")
+        file_path = os.path.join(DATA_DIR, "worldinfo", f"{req.world_name}.json")
         
         # Load existing world info or create new
         if os.path.exists(file_path):
@@ -5199,28 +5247,44 @@ async def add_world_entry(world_name: str, entry_data: dict):
         else:
             world_data = {"entries": {}}
         
+        # Get existing tags from JSON (or DB if no tags in JSON)
+        existing_tags = world_data.get("tags", [])
+        if not existing_tags:
+            # Fallback to DB for existing tags
+            world_db = db_get_world(req.world_name)
+            if world_db:
+                existing_tags = db_get_world_tags(req.world_name)
+        
+        # Merge new tags with existing tags
+        new_tags = req.tags if req.tags else []
+        merged_tags = list(set(existing_tags + new_tags))
+        
+        # Update tags in world_data
+        world_data["tags"] = merged_tags
+        
         # Generate new UID
         uid_counter = max([int(k) for k in world_data["entries"].keys()] + [0]) + 1
         
         # Create new entry
         new_entry = {
             "uid": uid_counter,
-            "key": entry_data.get("key", []),
+            "key": req.entry_data.get("key", []),
             "keysecondary": [],
-            "comment": entry_data.get("comment", ""),
-            "content": entry_data.get("content", ""),
-            "constant": entry_data.get("constant", False),
-            "selective": entry_data.get("selective", True),
-            "selectiveLogic": entry_data.get("selectiveLogic", 0),
-            "addMemo": entry_data.get("addMemo", True),
-            "order": entry_data.get("order", 100),
-            "position": entry_data.get("position", 4),
-            "disable": entry_data.get("disable", False),
-            "excludeRecursion": entry_data.get("excludeRecursion", False),
-            "probability": entry_data.get("probability", 100),
-            "useProbability": entry_data.get("useProbability", True),
+            "comment": req.entry_data.get("comment", ""),
+            "content": req.entry_data.get("content", ""),
+            "constant": req.entry_data.get("constant", False),
+            "selective": req.entry_data.get("selective", True),
+            "selectiveLogic": req.entry_data.get("selectiveLogic", 0),
+            "addMemo": req.entry_data.get("addMemo", True),
+            "order": req.entry_data.get("order", 100),
+            "position": req.entry_data.get("position", 4),
+            "disable": req.entry_data.get("disable", False),
+            "excludeRecursion": req.entry_data.get("excludeRecursion", False),
+            "probability": req.entry_data.get("probability", 100),
+            "useProbability": req.entry_data.get("useProbability", True),
             "displayIndex": uid_counter,
-            "depth": entry_data.get("depth", 5)
+            "depth": req.entry_data.get("depth", 5),
+            "is_canon_law": req.entry_data.get("is_canon_law", False)
         }
         
         # Add the entry
@@ -5230,9 +5294,9 @@ async def add_world_entry(world_name: str, entry_data: dict):
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(world_data, f, indent=2, ensure_ascii=False)
         
-        # Sync to database
+        # Sync to database (with tags)
         try:
-            db_save_world(world_name, world_data.get("entries", {}))
+            db_save_world(req.world_name, world_data.get("entries", {}), merged_tags)
         except Exception as db_error:
             print(f"Warning: Failed to sync world add to database: {db_error}")
         

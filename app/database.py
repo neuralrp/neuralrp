@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from contextlib import contextmanager
 import numpy as np
 import struct
+from app.tag_manager import parse_tag_string
 
 # Global database path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -131,6 +132,40 @@ def init_db():
             print("Added summarized column to messages table")
         except:
             pass  # Column already exists
+        
+        # Add updated_at column to characters table (v1.8.0+ for smart sync)
+        try:
+            cursor.execute("ALTER TABLE characters ADD COLUMN updated_at INTEGER")
+            print("Added updated_at column to characters table")
+        except:
+            pass  # Column already exists
+        
+        # Add updated_at column to world_entries table (v1.8.0+ for smart sync)
+        try:
+            cursor.execute("ALTER TABLE world_entries ADD COLUMN updated_at INTEGER")
+            print("Added updated_at column to world_entries table")
+        except:
+            pass  # Column already exists
+        
+        # Backfill updated_at for existing characters (set to created_at if null)
+        try:
+            cursor.execute("UPDATE characters SET updated_at = created_at WHERE updated_at IS NULL")
+            conn.commit()
+            print("Backfilled updated_at for existing characters")
+        except Exception as e:
+            print(f"Warning: Failed to backfill updated_at for characters: {e}")
+        
+        # Backfill updated_at for existing world entries (set to last_embedded_at or current time if null)
+        try:
+            cursor.execute("""
+                UPDATE world_entries 
+                SET updated_at = COALESCE(last_embedded_at, ?) 
+                WHERE updated_at IS NULL
+            """, (int(time.time()),))
+            conn.commit()
+            print("Backfilled updated_at for existing world entries")
+        except Exception as e:
+            print(f"Warning: Failed to backfill updated_at for world entries: {e}")
         
         # Image metadata table
         cursor.execute("""
@@ -299,19 +334,142 @@ def init_db():
             ON entities(entity_type)
         """)
         
+        # Character tags table (junction table for many-to-many relationship)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS character_tags (
+                char_id TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (char_id, tag),
+                FOREIGN KEY (char_id) REFERENCES characters(filename) ON DELETE CASCADE
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_character_tags_tag 
+            ON character_tags(tag)
+        """)
+        
+        # World tags table (junction table for many-to-many relationship)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS world_tags (
+                world_name TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (world_name, tag),
+                FOREIGN KEY (world_name) REFERENCES worlds(name) ON DELETE CASCADE
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_world_tags_tag 
+            ON world_tags(tag)
+        """)
+        
         conn.commit()
-
-
-# ============================================================================
-# CHARACTER OPERATIONS
-# ============================================================================
+        
+        # ============================================================================  
+        # TAG MIGRATION (v1.8.0+)
+        # ============================================================================  
+        
+        def check_and_migrate_tags():
+            """Migrate existing tags from character/world data to junction tables.
+            
+            One-time migration that runs when tag tables are empty.
+            Extracts tags from character['data']['tags'] and world['tags'] arrays
+            and saves them to character_tags/world_tags junction tables.
+            """
+            # Check if tags already exist in junction tables
+            cursor.execute("SELECT COUNT(*) FROM character_tags")
+            char_tag_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM world_tags")
+            world_tag_count = cursor.fetchone()[0]
+            
+            # Skip migration if tags already exist
+            if char_tag_count > 0 or world_tag_count > 0:
+                return False
+            
+            print("[MIGRATION] Checking for tags to migrate...")
+            
+            # Migrate character tags
+            char_migrated = 0
+            cursor.execute("SELECT filename, data FROM characters")
+            for row in cursor.fetchall():
+                filename = row['filename']
+                try:
+                    char_data = json.loads(row['data'])
+                    # Extract tags from top level (SillyTavern V2 format)
+                    tags = char_data.get('tags', [])
+                    if tags:
+                        # Normalize tags
+                        normalized_tags = []
+                        for tag in tags:
+                            parsed = parse_tag_string(tag)
+                            normalized_tags.extend(parsed)
+                        normalized_tags = [t for t in normalized_tags if t]
+                        
+                        # Add to junction table
+                        for tag in normalized_tags:
+                            cursor.execute("""
+                                INSERT OR IGNORE INTO character_tags (char_id, tag)
+                                VALUES (?, ?)
+                            """, (filename, tag))
+                        char_migrated += 1
+                except Exception as e:
+                    print(f"[MIGRATION] Failed to migrate tags for {filename}: {e}")
+            
+            # Migrate world tags
+            world_migrated = 0
+            cursor.execute("SELECT name FROM worlds")
+            for row in cursor.fetchall():
+                world_name = row['name']
+                try:
+                    # World data is stored differently - need to check JSON file
+                    world_file = os.path.join(BASE_DIR, "app", "data", "worldinfo", f"{world_name}.json")
+                    if os.path.exists(world_file):
+                        with open(world_file, "r", encoding="utf-8") as f:
+                            world_data = json.load(f)
+                        # Extract tags from world['tags'] (top level)
+                        tags = world_data.get('tags', [])
+                        if tags:
+                            # Normalize tags
+                            normalized_tags = []
+                            for tag in tags:
+                                parsed = parse_tag_string(tag)
+                                normalized_tags.extend(parsed)
+                            normalized_tags = [t for t in normalized_tags if t]
+                            
+                            # Add to junction table
+                            for tag in normalized_tags:
+                                cursor.execute("""
+                                    INSERT OR IGNORE INTO world_tags (world_name, tag)
+                                    VALUES (?, ?)
+                                """, (world_name, tag))
+                            world_migrated += 1
+                except Exception as e:
+                    print(f"[MIGRATION] Failed to migrate tags for {world_name}: {e}")
+            
+            conn.commit()
+            
+            if char_migrated > 0 or world_migrated > 0:
+                print(f"[MIGRATION] Migration complete: {char_migrated} character tags, {world_migrated} world tags")
+            else:
+                print("[MIGRATION] No tags found to migrate")
+            
+            return True
+        
+        # Run migration on startup
+        check_and_migrate_tags()
+        
+        # ============================================================================  
+        # CHARACTER OPERATIONS
+        # ============================================================================
 
 def db_get_all_characters() -> List[Dict[str, Any]]:
     """Get all characters from the database."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT filename, data, danbooru_tag, capsule, created_at
+            SELECT filename, data, danbooru_tag, capsule, created_at, updated_at
             FROM characters
             ORDER BY created_at DESC
         """)
@@ -341,7 +499,7 @@ def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT filename, data, danbooru_tag, capsule
+            SELECT filename, data, danbooru_tag, capsule, updated_at
             FROM characters
             WHERE filename = ?
         """, (filename,))
@@ -392,15 +550,33 @@ def db_save_character(char_data: Dict[str, Any], filename: str) -> bool:
             # Insert or replace
             cursor.execute("""
                 INSERT OR REPLACE INTO characters 
-                (filename, name, data, danbooru_tag, capsule, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (filename, name, data_json, danbooru_tag, capsule, timestamp))
+                (filename, name, data, danbooru_tag, capsule, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (filename, name, data_json, danbooru_tag, capsule, timestamp, timestamp))
             
             conn.commit()
             
             # Log the change (characters are always significant)
             operation = 'CREATE' if is_create else 'UPDATE'
             log_change('character', filename, operation, old_char, save_data)
+            
+            # Automatic tag extraction (v1.8.0+)
+            # Extract tags from character data and save to junction table
+            tags = char_data.get('data', {}).get('tags', [])
+            if tags:
+                # Normalize tags
+                normalized_tags = []
+                for tag in tags:
+                    parsed = parse_tag_string(tag)
+                    normalized_tags.extend(parsed)
+                normalized_tags = [t for t in normalized_tags if t]
+                
+                # Clear existing tags (in case of update)
+                db_remove_character_tags(filename, [])
+                
+                # Add new tags
+                if normalized_tags:
+                    db_add_character_tags(filename, normalized_tags)
             
             return True
     except Exception as e:
@@ -428,6 +604,289 @@ def db_delete_character(filename: str) -> bool:
     except Exception as e:
         print(f"Error deleting character from database: {e}")
         return False
+
+
+# ============================================================================
+# TAG OPERATIONS
+# ============================================================================
+
+def db_add_character_tags(filename: str, tags: List[str]) -> bool:
+    """Add tags to a character in the database."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            for tag in tags:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO character_tags (char_id, tag)
+                    VALUES (?, ?)
+                """, (filename, tag.lower().strip()))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error adding character tags: {e}")
+        return False
+
+
+def db_remove_character_tags(filename: str, tags: List[str]) -> bool:
+    """Remove specific tags from a character."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            normalized_tags = [tag.lower().strip() for tag in tags]
+            if not normalized_tags:
+                cursor.execute("DELETE FROM character_tags WHERE char_id = ?", (filename,))
+            else:
+                placeholders = ','.join(['?'] * len(normalized_tags))
+                cursor.execute(f"""
+                    DELETE FROM character_tags
+                    WHERE char_id = ? AND tag IN ({placeholders})
+                """, [filename] + normalized_tags)
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error removing character tags: {e}")
+        return False
+
+
+def db_get_character_tags(filename: str) -> List[str]:
+    """Get all tags for a specific character."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tag FROM character_tags
+            WHERE char_id = ?
+            ORDER BY tag
+        """, (filename,))
+        return [row['tag'] for row in cursor.fetchall()]
+
+
+def db_get_all_character_tags(limit: Optional[int] = None) -> List[str]:
+    """Get all unique character tags (alphabetical order)."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if limit:
+            cursor.execute("""
+                SELECT DISTINCT tag
+                FROM character_tags
+                ORDER BY tag
+                LIMIT ?
+            """, (limit,))
+        else:
+            cursor.execute("""
+                SELECT DISTINCT tag
+                FROM character_tags
+                ORDER BY tag
+            """)
+        return [row['tag'] for row in cursor.fetchall()]
+
+
+def db_get_popular_character_tags(limit: int = 5) -> List[Tuple[str, int]]:
+    """Get top N tags by usage count."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tag, COUNT(*) as count
+            FROM character_tags
+            GROUP BY tag
+            ORDER BY count DESC
+            LIMIT ?
+        """, (limit,))
+        return [(row['tag'], row['count']) for row in cursor.fetchall()]
+
+
+def db_get_characters_by_tags(tags: List[str]) -> List[Dict[str, Any]]:
+    """Get characters matching ALL specified tags (AND semantics)."""
+    if not tags:
+        return []
+    
+    normalized_tags = [tag.lower().strip() for tag in tags if tag.strip()]
+    if not normalized_tags:
+        return []
+    
+    placeholders = ','.join(['?'] * len(normalized_tags))
+    query = f"""
+        SELECT c.filename, c.data, c.danbooru_tag, c.capsule, c.created_at
+        FROM characters c
+        JOIN character_tags t ON t.char_id = c.filename
+        WHERE t.tag IN ({placeholders})
+        GROUP BY c.filename
+        HAVING COUNT(DISTINCT t.tag) = ?
+    """
+    
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, normalized_tags + [len(normalized_tags)])
+        
+        characters = []
+        for row in cursor.fetchall():
+            char_data = json.loads(row['data'])
+            char_data['_filename'] = row['filename']
+            
+            # Inject extensions if they exist
+            if 'data' in char_data and 'extensions' not in char_data['data']:
+                char_data['data']['extensions'] = {}
+            
+            # Add danbooru_tag and capsule to extensions
+            if row['danbooru_tag']:
+                char_data['data']['extensions']['danbooru_tag'] = row['danbooru_tag']
+            if row['capsule']:
+                char_data['data']['extensions']['multi_char_summary'] = row['capsule']
+            
+            characters.append(char_data)
+        
+        return characters
+
+
+def db_add_world_tags(world_name: str, tags: List[str]) -> bool:
+    """Add tags to a world in the database."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            for tag in tags:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO world_tags (world_name, tag)
+                    VALUES (?, ?)
+                """, (world_name, tag.lower().strip()))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error adding world tags: {e}")
+        return False
+
+
+def db_remove_world_tags(world_name: str, tags: List[str]) -> bool:
+    """Remove specific tags from a world."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            normalized_tags = [tag.lower().strip() for tag in tags]
+            if not normalized_tags:
+                cursor.execute("DELETE FROM world_tags WHERE world_name = ?", (world_name,))
+            else:
+                placeholders = ','.join(['?'] * len(normalized_tags))
+                cursor.execute(f"""
+                    DELETE FROM world_tags
+                    WHERE world_name = ? AND tag IN ({placeholders})
+                """, [world_name] + normalized_tags)
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error removing world tags: {e}")
+        return False
+
+
+def db_get_world_tags(world_name: str) -> List[str]:
+    """Get all tags for a specific world."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tag FROM world_tags
+            WHERE world_name = ?
+            ORDER BY tag
+        """, (world_name,))
+        return [row['tag'] for row in cursor.fetchall()]
+
+
+def db_get_all_world_tags(limit: Optional[int] = None) -> List[str]:
+    """Get all unique world tags (alphabetical order)."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if limit:
+            cursor.execute("""
+                SELECT DISTINCT tag
+                FROM world_tags
+                ORDER BY tag
+                LIMIT ?
+            """, (limit,))
+        else:
+            cursor.execute("""
+                SELECT DISTINCT tag
+                FROM world_tags
+                ORDER BY tag
+            """)
+        return [row['tag'] for row in cursor.fetchall()]
+
+
+def db_get_popular_world_tags(limit: int = 5) -> List[Tuple[str, int]]:
+    """Get top N tags by usage count for worlds."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tag, COUNT(*) as count
+            FROM world_tags
+            GROUP BY tag
+            ORDER BY count DESC
+            LIMIT ?
+        """, (limit,))
+        return [(row['tag'], row['count']) for row in cursor.fetchall()]
+
+
+def db_get_worlds_by_tags(tags: List[str]) -> List[Dict[str, Any]]:
+    """Get worlds matching ALL specified tags (AND semantics)."""
+    if not tags:
+        return []
+    
+    normalized_tags = [tag.lower().strip() for tag in tags if tag.strip()]
+    if not normalized_tags:
+        return []
+    
+    placeholders = ','.join(['?'] * len(normalized_tags))
+    query = f"""
+        SELECT w.id, w.name
+        FROM worlds w
+        JOIN world_tags t ON t.world_name = w.name
+        WHERE t.tag IN ({placeholders})
+        GROUP BY w.name
+        HAVING COUNT(DISTINCT t.tag) = ?
+    """
+    
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, normalized_tags + [len(normalized_tags)])
+        
+        worlds = []
+        for row in cursor.fetchall():
+            world_id = row['id']
+            world_name = row['name']
+            
+            # Get entries for this world
+            cursor.execute("""
+                SELECT uid, content, keys, secondary_keys, is_canon_law, 
+                       probability, use_probability, depth, metadata, updated_at
+                FROM world_entries
+                WHERE world_id = ?
+                ORDER BY sort_order, uid
+            """, (world_id,))
+            
+            entries = {}
+            for entry_row in cursor.fetchall():
+                uid = entry_row['uid']
+                
+                # Parse keys
+                keys = entry_row['keys'].split(',') if entry_row['keys'] else []
+                secondary_keys = entry_row['secondary_keys'].split(',') if entry_row['secondary_keys'] else []
+                
+                # Parse metadata
+                metadata = json.loads(entry_row['metadata']) if entry_row['metadata'] else {}
+                
+                entries[uid] = {
+                    'uid': int(uid) if uid.isdigit() else uid,
+                    'content': entry_row['content'],
+                    'key': keys,
+                    'keysecondary': secondary_keys,
+                    'is_canon_law': bool(entry_row['is_canon_law']),
+                    'probability': entry_row['probability'],
+                    'useProbability': bool(entry_row['use_probability']),
+                    'depth': entry_row['depth'],
+                    **metadata
+                }
+            
+            worlds.append({
+                'name': world_name,
+                'entries': entries
+            })
+        
+        return worlds
 
 
 # ============================================================================
@@ -500,7 +959,7 @@ def db_get_world(name: str) -> Optional[Dict[str, Any]]:
         # Get entries
         cursor.execute("""
             SELECT uid, content, keys, secondary_keys, is_canon_law,
-                   probability, use_probability, depth, metadata
+                   probability, use_probability, depth, metadata, updated_at
             FROM world_entries
             WHERE world_id = ?
             ORDER BY sort_order, uid
@@ -532,15 +991,20 @@ def db_get_world(name: str) -> Optional[Dict[str, Any]]:
         return {'entries': entries}
 
 
-def db_save_world(name: str, entries: Dict[str, Any]) -> bool:
+def db_save_world(name: str, entries: Dict[str, Any], tags: Optional[List[str]] = None) -> bool:
     """Save or update a world info with all its entries.
     
     Note: This function deletes and re-inserts all entries. This automatically
-    invalidates the content hash (used for embedding cache invalidation) since
+    invalidates content hash (used for embedding cache invalidation) since
     db_get_world_content_hash() generates a hash based on current content.
     
     The semantic search engine uses this content hash to detect changes and
-    will recompute embeddings when the hash changes.
+    will recompute embeddings when hash changes.
+    
+    Args:
+        name: World name
+        entries: Dictionary of world entries
+        tags: Optional list of tags to save (v1.8.0+)
     """
     try:
         # Get old state before saving (for change logging)
@@ -569,6 +1033,7 @@ def db_save_world(name: str, entries: Dict[str, Any]) -> bool:
                 pass  # sqlite-vec may not be available
             
             # Insert new entries
+            entry_timestamp = int(time.time())
             for uid, entry in entries.items():
                 keys = ','.join(entry.get('key', []))
                 secondary_keys = ','.join(entry.get('keysecondary', []))
@@ -590,17 +1055,34 @@ def db_save_world(name: str, entries: Dict[str, Any]) -> bool:
                 cursor.execute("""
                     INSERT INTO world_entries 
                     (world_id, uid, content, keys, secondary_keys, is_canon_law,
-                     probability, use_probability, depth, sort_order, metadata)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     probability, use_probability, depth, sort_order, metadata, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (world_id, uid, content, keys, secondary_keys, is_canon_law,
                       probability, use_probability, depth, int(uid) if uid.isdigit() else 999,
-                      metadata_json))
+                      metadata_json, entry_timestamp))
             
             conn.commit()
             
             # Log the change (world info changes are always significant)
             operation = 'CREATE' if is_create else 'UPDATE'
             log_change('world_info', name, operation, old_world, {'entries': entries})
+            
+            # Automatic tag extraction (v1.8.0+)
+            # Save tags to junction table if provided (used by import functions)
+            if tags:
+                # Normalize tags
+                normalized_tags = []
+                for tag in tags:
+                    parsed = parse_tag_string(tag)
+                    normalized_tags.extend(parsed)
+                normalized_tags = [t for t in normalized_tags if t]
+                
+                # Clear existing tags (in case of update)
+                db_remove_world_tags(name, [])
+                
+                # Add new tags
+                if normalized_tags:
+                    db_add_world_tags(name, normalized_tags)
             
             return True
     except Exception as e:
@@ -628,6 +1110,32 @@ def db_delete_world(name: str) -> bool:
     except Exception as e:
         print(f"Error deleting world from database: {e}")
         return False
+
+
+def db_get_character_updated_at(filename: str) -> Optional[int]:
+    """Get the updated_at timestamp for a character."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT updated_at FROM characters WHERE filename = ?", (filename,))
+        row = cursor.fetchone()
+        return row['updated_at'] if row else None
+
+
+def db_get_world_entry_timestamps(world_name: str) -> Dict[str, int]:
+    """Get {uid: updated_at} for all entries in a world."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM worlds WHERE name = ?", (world_name,))
+        row = cursor.fetchone()
+        if not row:
+            return {}
+        
+        world_id = row['id']
+        cursor.execute("""
+            SELECT uid, updated_at FROM world_entries WHERE world_id = ?
+        """, (world_id,))
+        
+        return {entry_row['uid']: entry_row['updated_at'] for entry_row in cursor.fetchall()}
 
 
 def db_update_world_entry(world_name: str, entry_uid: str, updates: Dict[str, Any]) -> bool:
