@@ -7,11 +7,11 @@ However, when I started (with Ollama) I noticed something: once I hit about 12k 
 
 Oobabooga was marginially better, but when I tried SillyTavern it opened up my eyes to prompt control: you could inject whatever you wanted into the prompt at a set number of turns. You could use character and world cards to enforce your vision, so the LLM wouldn't forget as easily. I began to obsess over dialing in the perfect settings, investigating what worked well and what didn't.
 
-What I found was this: I could never get the underlying control I needed because the architecture is fundamentally flawed, and the SD generation extension just wasn't cutting it. That needed to be native to work the way I wanted to. Not to mention, I was sick of all the knobs. I just wanted to find *my* setting, for *my* 12GB vRAM card, that worked for me.
+What I found was this: I could never get the underlying control I needed because the architecture is fundamentally flawed, and the SD generation extension just wasn't cutting it. That needed to be native to work the way I wanted to. Not to mention, I was sick of all the knobs. I just wanted to find *my* setting, for *my* 12GB vRAM card, that worked for me. And I was sick of SD gen work-arounds and editing poor LLM replies taking me out RP immersion.
 
 Hence, NeuralRP was born. 
 
-It's engineered from the ground up with context window in mind, every decision, every feature. No full character card dump every turn. No token leakage from SD generation. Use of a database backend, compatible with SillyTavern character cards, that semantically finds and injects what matters, when it matters.
+It's engineered from the ground up with context window in mind, every decision, every feature. No full character card dump every turn. No token leakage from SD generation. Use of a database backend, compatible with SillyTavern character and world cards, that semantically finds and injects what matters, when it matters.
 
 The fact is, there are certain limitations with 7B-12B LLM's that you simply can't get past. But this app I built, in my opinion, maximizes what locally runnable LLM's offer for roleplay. 
 
@@ -19,13 +19,13 @@ The fact is, there are certain limitations with 7B-12B LLM's that you simply can
 
 **Context assembly, not context dumping.** Every piece of story data is managed:
 
-- Characters inject in full on first appearance, then reinforce with 50-200 token capsules or PList constraints every few turns. Not repeated in full every turn.
+- Character cards inject in full on first appearance, then reinforce with 50-200 token capsules or PList constraints every few turns. Not repeated in full every turn.
 
-- World information uses semantic search (sqlite-vec embeddings) to inject only lore relevant to the last 5 messages. Not dumped wholesale or manually triggered.
+- World information uses semantic search via sqlite-vec embeddings to inject lore relevant to the last 5 messages. Not dumped wholesale or manually triggered.
 
-- Relationships between entities track across five emotional dimensions (trust, bond, conflict, power, fear) and update automatically via semantic analysis. Not manually managed or forgotten by turn 20.
+- Relationships between entities track across five emotional dimensions (trust, bond, conflict, power, fear). These update and trigger automatically via semantic analysis. Not manually managed, dumped in context recklessly, or forgotten by turn 20.
 
-- NPCs exist as chat-scoped entities with their own relationship states, and can be promoted to global characters mid-conversation. And you can create the cards using AI.
+- NPCs exist as chat-scoped entities with their own relationship states, and can be promoted to global characters mid-conversation. And you can create their cards using AI in-app.
 
 - Summarization trades old context for new when the budget nears 85%, preserving story continuity without losing relationship state.
 
@@ -33,9 +33,9 @@ The outcome: Relationship status tracked through summarizations. NPCs that emerg
 
 ## Core Philosophy: Conversation First
 
-70-80% of your context budget should be dialogue, not metadata. Characters, world info, and relationships exist to support conversation, not dominate the prompt.
+70-80% of your context budget should be dialogue, not metadata. Characters, world info, and relationships exist to support conversation, not dominate the prompt. AND, this is supported by both experience and studies: a short, strongly worded prompt beats a meandering, unfocused one. Why should't RP optimize for that?
 
-- **Inject once, reinforce minimally** — Full character cards on first appearance, then 50-200 token capsules every N turns
+- **Inject once, reinforce minimally** — Full character cards on first appearance, then 50-200 token PList statements or character capsules every N turns
 
 - **Just-in-time grounding** — World lore appears when semantically relevant, not before
 
@@ -47,12 +47,9 @@ Short, strong statements make an outsized impact on smaller, less intelligent LL
 
 ## Built for SillyTavern Ecosystem Compatibility
 
-NeuralRP was designed to work with SillyTavern cards, not replace them. Every compatibility decision prioritizes preserving your existing work.
+NeuralRP was designed to work with SillyTavern cards, not replace them. Every compatibility decision prioritizes preserving your existing work. This was a core feature since v1.0.0, and it's continued through all the feature updates. The JSON and SQLite sync is intelligent and just makes sense. 
 
-### Bidirectional Sync Without Data Loss
-A fundamental principle of NeuralRP is character and world cards. You should be able to bring your old ones in, edit them in app or in the JSON, and have it automatically sync. And those of you with a hundred of them, there's tagging.
-
-- **Smart sync (v1.8.0)** — Timestamp-based conflict resolution. Edit cards in either NeuralRP or externally without losing changes.
+- **Bi-Directional Smart sync** — Timestamp-based conflict resolution between JSON cards and the NeuralRP database. Edit cards in either NeuralRP or externally without losing changes.
 
 - **Automatic tag preservation** — Import a card with tags? They're extracted and stored. Export it? Tags are included.
 
@@ -62,13 +59,13 @@ A fundamental principle of NeuralRP is character and world cards. You should be 
 
 ### Card Generation Machine
 
-One of NeuralRP's original goals was to be a card generation tool for SillyTavern. You can create optimized character cards in two ways:
+One of my original goals for NeuralRP was to in part be a card generation tool for SillyTavern. I did tons of research and experimentation on what made a good card, another obsession of mine. I created multiple python apps for this very purpose before NeuralRP, then merged it in. These tools I built bring in all my learnings. You can create optimized character cards in two ways:
 
 - **From context** — Generate PList-optimized character definitions directly from conversation history. The AI analyzes how a character actually behaved in chat and extracts personality traits, speech patterns, and behavioral rules into clean PList format.
 
 - **From natural language** — Write plain-text sentences describing a character and NeuralRP converts it into PList format optimized for LLM consumption.
 
-Both methods output SillyTavern V2-compatible JSON files. The idea was to prototype characters in conversation, then formalize them into reusable cards.
+Both methods output SillyTavern V2-compatible JSON files. Prototype NPC's/characters in conversation, then formalize them into reusable cards. OR, just write "Ben: a grizzled bartender with a heart of gold". The LLM and python does the rest.
 
 ## What This Enables
 
@@ -84,7 +81,7 @@ Create background characters mid-chat (bartender, guard, merchant) with full per
 
 A major question I faced is, how do you ensure your world card entries get injected at the right time? What if you have hundreds of entries? What if you want one of your entries injected at specific intervals, at different points in the coversation? And the trickiest one, what if you want your "Elf" entry to trigger for "elves, elven, the elf king, elf sanctuary" etc, but you don't want your "The Great Crash Landing" historical event entry to trigger on "this is a great bow!"? I think I've solved this problem.
 
-- **Semantic Search Engine with 
+- **Semantic Search Engine** - Remember when I said SillyTavern's architecture was fundamentally flawed? This is what I mean. NeuralRP is powered by all-mpnet-base-v2 for vector database semantic search, using sentence-transformers to understand meaning, not just keywords. And it stays just as fast for 10 entries or 1000 entries. SQLite-vec just came out in 2024. This is new stuff.
 
 - **Quoted keys** (`"Great Crash Landing"`) — Exact phrase match, prevents false positives
 
@@ -102,13 +99,15 @@ Five emotional dimensions tracked between all entities (characters, NPCs, user) 
 
 - Only injected when relationships deviate significantly from neutral and are semantically relevant to the current scene
 
-- No LLM calls required — uses embeddings for sub-20ms updates
+- No LLM calls required — uses embeddings for sub-20ms updates. Tight, pre-worded sentences ensure maximum impact for minimal token use.
+
+This is powerful for one reason: it keeps relationships tracked through auto-summarization, which can "mush-ify" relationships real quick.
 
 ### Intelligent Summarization
 
 Continue conversations beyond context limits. When context approaches 85%:
 
-- Old messages are traded for summary versions
+- Oldest 10 turns are traded for summary versions
 
 - Relationship states are preserved
 
@@ -118,11 +117,11 @@ Continue conversations beyond context limits. When context approaches 85%:
 
 ### Branching Timelines
 
-Fork any message to create alternate storylines. All characters, NPCs, world info, and relationships are copied. NPC entity IDs are remapped — so "Guard Marcus" in Branch A evolves independently from "Guard Marcus" in Branch B.
+Fork any message to create alternate storylines. All characters, NPCs, world info, and relationships are copied. NPC entity IDs are remapped, so they can develop independently with each story arc.
 
 ## Library-Scale Organization (v1.8.0)
 
-Tag management for 100+ character and world cards:
+Tag management for character and world cards:
 
 - **AND semantics** — Filter by multiple tags (must have ALL selected tags)
 
@@ -136,7 +135,11 @@ Tag management for 100+ character and world cards:
 
 ## Image Generation with AUTOMATIC1111 Integration
 
-Most RP tools bolt on image generation as an afterthought. NeuralRP integrates AUTOMATIC1111 WebUI deeper than any other RP application.
+Most RP tools bolt on image generation as an afterthought. NeuralRP integrates it deeper than any other RP application I've tried. It's native, takes full advantage of A1111, and run alongside your LLM using in-built optimization tools designed for this very purpose.
+
+### Performance-Aware Presets
+
+If your chat context is large (>12K tokens), NeuralRP automatically reduces SD steps/resolution to prevent VRAM crashes. You get feedback when image generation is slow due to context size, with a suggestion to summarize.
 
 ### Inpainting with Actual Features
 
@@ -174,10 +177,6 @@ Click any image, click "Regenerate" — exact reproduction. Or tweak parameters 
 
 SD prompts are kept separate from LLM conversation context. Image generation doesn't pollute your chat history or confuse the LLM with Danbooru syntax.
 
-### Performance-Aware Presets
-
-If your chat context is large (>12K tokens), NeuralRP automatically reduces SD steps/resolution to prevent VRAM crashes. You get feedback when image generation is slow due to context size, with a suggestion to summarize.
-
 ## Additional Capabilities
 
 - **Multi-mode chat** — Narrator (third-person), Focus (first-person), Auto modes
@@ -190,83 +189,6 @@ If your chat context is large (>12K tokens), NeuralRP automatically reduces SD s
 
 - **Export for training** — Export chats to JSON in Alpaca/ShareGPT/ChatML formats optimized for Unsloth
 
-## The Problem: Attention Decay, Not Token Overflow
-
-With modern LLMs (Llama 3, Nemo) and 12GB+ VRAM, you can run 8192+ token contexts with image generation simultaneously. Token overflow isn't the crisis it was 2 years ago.
-
-Context hygiene still matters:
-
-- **Attention decay** — Even with 8k tokens, content from turns 1-10 receives less attention than turns 80-90. Character definitions fade over long conversations.
-
-- **Quality vs quantity** — Just because you can fit 5 full character cards (5000 tokens) doesn't mean you should. Redundant repetition wastes context space.
-
-- **Scalability** — Larger contexts enable richer experiences, but intelligent injection is what makes them viable.
-
-- **Character drift** — Without reinforcement, Alice starts using slang, Bob becomes aggressive, and characters blend together after 50+ turns.
-
-## Context Hygiene in Practice
-
-### Smart Character Injection
-
-**Single character chats:**
-
-- Full card on turn 1 (500-2000 tokens)
-
-- PList reinforcement every 5 turns (50-200 tokens)
-
-- Result: ~8% of context for character, ~80% for conversation
-
-**Multi-character chats:**
-
-- Capsule summaries on first appearance (50-100 tokens each)
-
-- Capsule reinforcement every 5 turns (voice examples with dialog)
-
-- Result: ~15% of context for 5 characters, ~75% for conversation
-
-Without hygiene: 60%+ of tokens consumed by redundant character definitions.
-
-### First Appearance Detection
-
-Characters and NPCs are only defined when they enter the scene. A character added at turn 50 gets their capsule injected immediately — not pre-defined 50 turns prior.
-
-### Adaptive Canon Law
-
-Core world info reinforces every N turns (default: 3) instead of every turn. Canon law is always included, while triggered lore appears only when semantically relevant.
-
-### Relationship Context Filtering
-
-Five emotional dimensions tracked, but only injected when:
-
-- Relationships deviate meaningfully from neutral (>15 points)
-
-- They're semantically relevant to the current conversation
-
-A fight scene won't get "Alice trusts Bob" injected unless trust is relevant to the conflict.
-
-## Real-World Impact
-
-**Without context hygiene:**
-
-- Characters blend into identical voices after 50+ turns
-
-- Character drift: Alice starts using slang, Bob becomes aggressive
-
-- Relationship context bloats prompts with irrelevant dimensions
-
-- Group chat quality degrades with 5+ characters
-
-**With context hygiene:**
-
-- 6+ character group chats work
-
-- Characters stay in character for 200+ turns
-
-- Distinct voices maintained throughout
-
-- Relationships inject only when semantically relevant
-
-- World rules maintained throughout 100+ turn conversations
 
 ## Built for Local Deployment
 
@@ -278,21 +200,7 @@ NeuralRP assumes you're running:
 
 - 12-16GB VRAM with performance mode to queue heavy operations and prevent crashes
 
-All data lives in a single SQLite database (neuralrp.db) with ACID guarantees. No cloud sync, no external dependencies beyond your local inference stack.
-
-### Why SQLite?
-
-- **ACID guarantees** — Atomic, consistent, isolated, durable operations
-
-- **Single file** — Easier backup, no file fragmentation
-
-- **Indexed queries** — Scale to 10,000+ entries without performance loss
-
-- **Smart sync** — Auto-exports to SillyTavern V2 JSON format for compatibility
-
-- **Change history** — 30-day retention with browse/restore functionality
-
-- **Soft delete** — Messages archived, not deleted
+All data lives in a single SQLite database (neuralrp.db) with ACID guarantees. No cloud sync, no external dependencies beyond your local inference stack. And it syncs back to your JSON cards.
 
 ## Hardware Requirements
 
@@ -359,24 +267,6 @@ All data stored in SQLite but automatically exported to JSON files for SillyTave
 - [Technical Documentation](docs/TECHNICAL.md) — Deep dive into implementation details, context assembly logic, and design decisions
 
 - [Changelog](CHANGELOG.md) — Full version history
-
-## Version 1.8.0 — Tag Management
-
-- Tag management for characters and worlds with AND semantics filtering
-
-- Quick filter chips for top 5 most-used tags
-
-- Tag editor with autocomplete suggestions
-
-- Automatic tag extraction from SillyTavern V2 cards
-
-- Normalized tags (lowercase, trimmed, deduplicated)
-
-- Junction table design for many-to-many relationships
-
-- Smart sync with timestamp-based conflict resolution
-
-- Handles 100+ cards without performance degradation
 
 ## Credits
 
