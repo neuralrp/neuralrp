@@ -5,6 +5,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.8.2] - 2026-01-30
+
+### Added
+- **Chat-Scoped Capsule System**: Capsules stored in `chat.metadata.characterCapsules` and regenerated on-demand for multi-character chats
+  - Captures character edits automatically, eliminates JSON/database persistence
+  - Capsule fallback to description + personality for missing capsules
+- **Demo folder and Quickstart guide** - Get started right away with demo cards and with pertinent info on the app
+
+### Changed
+- **Database Migration**: Removed `capsule` column from `characters` table
+- **Capsule Generation**: Removed creation-time generation; capsules generated on-demand for multi-char chats only
+- **Multi-Character Logic**: Unified capsule system for global characters and NPCs
+
+### Fixed
+- **Alpaca Export Context Missing**: Character context now included in every training example (not just first)
+- **New Chat First Turn Persistence**: `characterFirstTurns` now saved correctly for new unsaved chats
+- **Auto-First Message Suppressed**: Characters no longer auto-add `first_mes`; users always go first
+
+### Removed
+- **Multi-Char Capsule Editing UI**: Manual capsule editing section from character menu
+- **Capsule API Endpoints**: Manual capsule generation/editing endpoints (`/api/card-gen/generate-capsule`, `/api/characters/edit-capsule*`)
+- **JSON File Writing for Capsules**: Capsules no longer written to character JSON files
+- **Database Capsule Column**: Removed from character queries (`db_save_character`, `db_get_character`)
+- **World Info Probability UI**: Removed probability checkbox and input (SillyTavern compatibility only)
+
+ ***
+
 ## [1.8.1] - 2026-01-29
 
 ### Added

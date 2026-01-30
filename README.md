@@ -8,6 +8,8 @@
 
 **No cloud subscriptions, no inference costs**
 
+**[Quickstart Guide](docs/QUICKSTART.md)**
+
 # NeuralRP: Storytime
 When I discovered Huggingface and tuned LLM's for roleplay, I quickly developed a love for experimenting with it. I love writing, and it quickly became a passion to create worlds and characters through written dialog with interesting, creative LLM's. 
 
@@ -27,7 +29,11 @@ The fact is, there are certain limitations with 7B-12B LLM's that you simply can
 
 **Context assembly, not context dumping.** Every piece of story data is managed:
 
-- Character cards inject in full on first appearance, then reinforce with 50-200 token capsules or PList constraints every few turns. Not repeated in full every turn.
+- **Sticky first 3 turns** — Character cards (single char) or capsules (multi-char) injected on turns 1, 2, 3 to maintain early-conversation consistency and voice differentiation
+
+- **Unified reinforcement** — Description + personality reinforced every N turns for ALL characters (single and multi-char), simplified from previous dual-system
+
+- **No full card dumping** — After sticky window, only reinforcement chunks appear, keeping dialogue at 70-80% of context
 
 - World information uses semantic search via sqlite-vec embeddings to inject lore relevant to the last 5 messages. Not dumped wholesale or manually triggered.
 
@@ -43,13 +49,17 @@ The outcome: Relationship status tracked through summarizations. NPCs that emerg
 
 70-80% of your context budget should be dialogue, not metadata. Characters, world info, and relationships exist to support conversation, not dominate the prompt. AND, this is supported by both experience and studies: a short, strongly worded prompt beats a meandering, unfocused one. Why should't RP optimize for that?
 
-- **Inject once, reinforce minimally** — Full character cards on first appearance, then 50-200 token PList statements or character capsules every N turns
+- **Inject on first 3 turns** — Full character cards (single) or capsules (multi-char) on turns 1, 2, 3 for early-turn consistency
+
+- **Reinforce minimally** — Description + personality every N turns (default: 5) for ALL characters, unified logic
+
+- **Token budget** — ~20-25% character info, 75-80% dialogue (after sticky window)
 
 - **Just-in-time grounding** — World lore appears when semantically relevant, not before
 
 - **Directional relationships** — Alice→Bob ≠ Bob→Alice, tracked automatically via semantic embeddings
 
-- **Scalability by design** — 1 character = 5-8% of context. 5 characters = 15-20% of context. The rest is conversation.
+- **Scalability by design** — 1 character = ~4% (sticky window) to ~6% (reinforcement turn) of context. 5 characters = ~20-30% of context (group chat). After sticky window, character info drops to ~20% total, leaving 80% for dialogue.
 
 Short, strong statements make an outsized impact on smaller, less intelligent LLMs. This is the stuff that keeps small LLM's rolling past 30k+ tokens worth of conversation.
 
@@ -79,7 +89,7 @@ Both methods output SillyTavern V2-compatible JSON files. Prototype NPC's/charac
 
 ### Multi-Character Chats That Scale
 
-Optimized to run multiple active characters with distinct voices and full personality tracking without context overflow. Capsules (compressed character summaries with dialog examples) enable group chats that other tools can't sustain past 2-3 characters. I've literally never been able to do this effectively with another front end before.
+Optimized to run multiple active characters with distinct voices and full personality tracking without context overflow. Capsules (compressed character summaries with dialog examples, 50-100 tokens each) enable group chats with 5-6 active characters. Capsules injected on first 3 turns, then reinforced with description + personality every N turns. I've literally never been able to do this effectively with another front end before.
 
 ### Emergent NPCs
 
@@ -126,6 +136,12 @@ Continue conversations beyond context limits. When context approaches 85%:
 ### Branching Timelines
 
 Fork any message to create alternate storylines. All characters, NPCs, world info, and relationships are copied. NPC entity IDs are remapped, so they can develop independently with each story arc.
+
+## Context Hygiene Improvements (v1.8.1-v1.8.2)
+
+- **v1.8.1 (Reinforcement Simplification)** — Unified reinforcement logic uses description + personality for ALL characters (single and multi-chat), removed complex edit override system
+
+- **v1.8.2 (Sticky First 3 Turns)** — Character cards/capsules injected on turns 1, 2, 3 to maintain early-conversation consistency and voice differentiation
 
 ## Library-Scale Organization (v1.8.0)
 

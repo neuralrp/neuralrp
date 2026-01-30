@@ -167,6 +167,15 @@ def init_db():
         except Exception as e:
             print(f"Warning: Failed to backfill updated_at for world entries: {e}")
         
+        # Drop capsule column from characters table (v1.8.2+ - capsules now chat-scoped)
+        # Capsules are now stored in chat.metadata.characterCapsules instead
+        try:
+            cursor.execute("ALTER TABLE characters DROP COLUMN capsule")
+            conn.commit()
+            print("Dropped capsule column from characters table (capsules now chat-scoped)")
+        except:
+            pass  # Column doesn't exist or already dropped
+        
         # Image metadata table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS image_metadata (
@@ -469,7 +478,7 @@ def db_get_all_characters() -> List[Dict[str, Any]]:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT filename, data, danbooru_tag, capsule, created_at, updated_at
+            SELECT filename, data, danbooru_tag, created_at, updated_at
             FROM characters
             ORDER BY created_at DESC
         """)
@@ -483,11 +492,9 @@ def db_get_all_characters() -> List[Dict[str, Any]]:
             if 'data' in char_data and 'extensions' not in char_data['data']:
                 char_data['data']['extensions'] = {}
             
-            # Add danbooru_tag and capsule to extensions
+            # Add danbooru_tag to extensions
             if row['danbooru_tag']:
                 char_data['data']['extensions']['danbooru_tag'] = row['danbooru_tag']
-            if row['capsule']:
-                char_data['data']['extensions']['multi_char_summary'] = row['capsule']
             
             characters.append(char_data)
         
@@ -499,7 +506,7 @@ def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT filename, data, danbooru_tag, capsule, updated_at
+            SELECT filename, data, danbooru_tag, updated_at
             FROM characters
             WHERE filename = ?
         """, (filename,))
@@ -517,8 +524,6 @@ def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
         
         if row['danbooru_tag']:
             char_data['data']['extensions']['danbooru_tag'] = row['danbooru_tag']
-        if row['capsule']:
-            char_data['data']['extensions']['multi_char_summary'] = row['capsule']
         
         return char_data
 
@@ -537,7 +542,6 @@ def db_save_character(char_data: Dict[str, Any], filename: str) -> bool:
             name = char_data.get('data', {}).get('name', 'Unknown')
             extensions = char_data.get('data', {}).get('extensions', {})
             danbooru_tag = extensions.get('danbooru_tag', '')
-            capsule = extensions.get('multi_char_summary', '')
             
             # Remove _filename from data before saving
             save_data = char_data.copy()
@@ -550,9 +554,9 @@ def db_save_character(char_data: Dict[str, Any], filename: str) -> bool:
             # Insert or replace
             cursor.execute("""
                 INSERT OR REPLACE INTO characters 
-                (filename, name, data, danbooru_tag, capsule, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (filename, name, data_json, danbooru_tag, capsule, timestamp, timestamp))
+                (filename, name, data, danbooru_tag, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (filename, name, data_json, danbooru_tag, timestamp, timestamp))
             
             conn.commit()
             
@@ -726,11 +730,9 @@ def db_get_characters_by_tags(tags: List[str]) -> List[Dict[str, Any]]:
             if 'data' in char_data and 'extensions' not in char_data['data']:
                 char_data['data']['extensions'] = {}
             
-            # Add danbooru_tag and capsule to extensions
+            # Add danbooru_tag to extensions
             if row['danbooru_tag']:
                 char_data['data']['extensions']['danbooru_tag'] = row['danbooru_tag']
-            if row['capsule']:
-                char_data['data']['extensions']['multi_char_summary'] = row['capsule']
             
             characters.append(char_data)
         
@@ -1323,6 +1325,19 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
             metadata["activeWI"] = data.get("activeWI", metadata.get("activeWI"))
             metadata["settings"] = data.get("settings", metadata.get("settings", {}))
             metadata["localnpcs"] = data.get("metadata", {}).get("localnpcs", metadata.get("localnpcs", {}))
+
+            # Preserve backend-managed metadata (characterFirstTurns, characterCapsules)
+            # These are set by /api/chat and should not be overwritten by frontend autosave
+            incoming_metadata = data.get("metadata", {})
+            if "characterFirstTurns" not in incoming_metadata:
+                metadata["characterFirstTurns"] = metadata.get("characterFirstTurns", {})
+            else:
+                metadata["characterFirstTurns"] = incoming_metadata["characterFirstTurns"]
+
+            if "characterCapsules" not in incoming_metadata:
+                metadata["characterCapsules"] = metadata.get("characterCapsules", {})
+            else:
+                metadata["characterCapsules"] = incoming_metadata["characterCapsules"]
 
             # Critical: Ensure localnpcs exists (preserves NPCs from atomic creation)
             if "localnpcs" not in metadata:

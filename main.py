@@ -421,7 +421,6 @@ class PromptRequest(BaseModel):
     mode: Optional[str] = "narrator"  # "narrator" or "focus:{CharacterName}"
     metadata: Optional[Dict[str, Any]] = None
     chat_id: Optional[str] = None  # For autosave tracking
-    edited_characters: List[str] = []  # Character/NPC IDs edited this turn
 
 class SDParams(BaseModel):
     prompt: str
@@ -662,11 +661,6 @@ Output ONLY the body line, nothing else."""
 
     result = await call_llm_helper(system, prompt, 300)
     return result.strip()
-
-class CapsuleGenRequest(BaseModel):
-    char_name: str
-    description: str
-    depth_prompt: str = ""
 
 class WorldGenRequest(BaseModel):
     world_name: str
@@ -1911,20 +1905,6 @@ async def import_characters_json_files_async(force: bool = False) -> int:
                     # Normalize to V2 spec
                     char_data = normalize_character_v2(char_data)
                     
-                    # Auto-generate capsule if missing
-                    extensions = char_data.get('data', {}).get('extensions', {})
-                    if not extensions.get('multi_char_summary'):
-                        name = char_data.get('data', {}).get('name', 'Unknown')
-                        description = char_data.get('data', {}).get('description', '')
-                        depth_prompt = extensions.get('depth_prompt', {}).get('prompt', '')
-                        
-                        try:
-                            capsule = await generate_capsule_for_character(name, description, depth_prompt)
-                            char_data['data']['extensions']['multi_char_summary'] = capsule
-                            print(f"Auto-generated capsule for {name}")
-                        except Exception as e:
-                            print(f"Failed to generate capsule for {name}: {e}")
-                    
                     if db_save_character(char_data, f):
                         import_count += 1
                         print(f"Imported character: {f}")
@@ -1940,9 +1920,9 @@ async def import_characters_json_files_async(force: bool = False) -> int:
 def import_characters_json_files(force: bool = False) -> int:
     """Sync wrapper for async import (for startup compatibility).
     
-    Note: Capsule generation is skipped during synchronous startup import
-    to avoid slow startup. Capsules will be generated on-demand during
-    context assembly if needed.
+    Note: Capsules are no longer generated during import. They are
+    generated on-demand during multi-character chats and stored in
+    chat metadata.
     """
     import_count = 0
     char_dir = os.path.join(DATA_DIR, "characters")
@@ -2396,7 +2376,9 @@ def is_first_message_auto_added(messages: List[ChatMessage], char_obj: dict) -> 
     return content_matches
 
 # Prompt Construction Engine
-def construct_prompt(request: PromptRequest):
+def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, int] = None):
+    if character_first_turns is None:
+        character_first_turns = {}
     settings = request.settings
     system_prompt = settings.get("system_prompt", CONFIG["system_prompt"])
     user_persona = settings.get("user_persona", "")
@@ -2451,7 +2433,7 @@ def construct_prompt(request: PromptRequest):
     
     # === 4. USER PERSONA ===
     if user_persona:
-        full_prompt += f"### Your Character Description:\n{user_persona}\n"
+        full_prompt += f"### User Description:\n{user_persona}\n"
 
     # === 5. WORLD KNOWLEDGE (moved up - world context frames characters) ===
     canon_law_entries = []
@@ -2552,12 +2534,12 @@ def construct_prompt(request: PromptRequest):
     if recent_updates:
         full_prompt += "\n### Recent Updates:\n" + "\n\n".join(recent_updates) + "\n"
     
+    # Calculate current turn number (turn = message_count // 2, each turn = user + assistant message)
+    current_turn = len(request.messages) // 2
+    
     # === 6. CHARACTER PROFILES (characters exist in the world context) ===
     reinforcement_chunks = []
     chars_injected_this_turn = set()  # Track characters injected this turn to avoid duplication with reinforcement
-    
-    # Build set of edited character references from request
-    edited_char_refs = set(request.edited_characters) if request.edited_characters else set()
     
     # Determine chat mode DYNAMICALLY (based on current active characters, not first turn)
     # This handles mid-chat character additions/removals
@@ -2573,9 +2555,6 @@ def construct_prompt(request: PromptRequest):
         mes_example = data.get("mes_example", "")
         multi_char_summary = data.get("extensions", {}).get("multi_char_summary", "")
         
-        # Get character reference for edit checking
-        char_ref = char_obj.get("_filename") or char_obj.get("entity_id")
-        
         # Check if this character is an NPC
         is_npc = char_obj.get("is_npc", False)
         
@@ -2586,11 +2565,27 @@ def construct_prompt(request: PromptRequest):
         # This handles both single-message and multi-message cases (e.g., [first_mes, user_msg])
         is_auto_first_mes_only = is_first_message_auto_added(request.messages, char_obj)
         
-        # Check if this character was edited this turn
-        is_edited_this_turn = char_ref in edited_char_refs
+        # === STICKY FIRST 3 TURNS LOGIC ===
+        # Get character reference for tracking (filename for chars, entity_id for NPCs)
+        char_ref = char_obj.get("_filename") or char_obj.get("entity_id")
+        
+        # Record first turn if character just appeared (or was just added to chat)
+        if char_ref and char_ref not in character_first_turns:
+            character_first_turns[char_ref] = current_turn
+        
+        # Check sticky window (first 3 turns: 1, 2, 3)
+        first_turn = character_first_turns.get(char_ref) if char_ref else None
+        turns_since_first = current_turn - first_turn if first_turn is not None else None
+        
+        # Sticky injection window: first appearance + 2 more turns (total 3)
+        is_in_sticky_window = (
+            first_turn is not None and
+            turns_since_first is not None and
+            turns_since_first <= 2
+        )
         
         # Determine if injection is needed
-        needs_injection = (not char_has_appeared) or is_auto_first_mes_only or is_edited_this_turn
+        needs_injection = (not char_has_appeared) or is_auto_first_mes_only or is_in_sticky_window
         
         # === CHARACTER INJECTION LOGIC ===
         if needs_injection:
@@ -2600,28 +2595,11 @@ def construct_prompt(request: PromptRequest):
                 injection_reason.append("first_appearance")
             if is_auto_first_mes_only:
                 injection_reason.append("auto_first_mes")
-            if is_edited_this_turn:
-                injection_reason.append("edited")
+            if is_in_sticky_window:
+                injection_reason.append(f"sticky_window(turn_{turns_since_first})")
             print(f"[CONTEXT] {name} injection needed: {', '.join(injection_reason)}")
             
-            if is_edited_this_turn:
-                # EDIT OVERRIDE: Always inject full card regardless of chat mode
-                label = "[NPC]" if is_npc else "[Character]"
-                print(f"[CONTEXT] {label} {name} full card injection (EDITED)")
-                
-                full_prompt += f"### Character Profile: {name}\n"
-                if description:
-                    full_prompt += f"{description}\n"
-                if personality:
-                    full_prompt += f"{personality}\n"
-                if scenario:
-                    full_prompt += f"{scenario}\n"
-                if mes_example:
-                    full_prompt += f"Example dialogue:\n{mes_example}\n"
-                
-                chars_injected_this_turn.add(name)
-                
-            elif is_single_char:
+            if is_single_char:
                 # Single character: full card injection
                 label = "[NPC]" if is_npc else "[Character]"
                 print(f"[CONTEXT] {label} {name} full card injection")
@@ -2647,79 +2625,57 @@ def construct_prompt(request: PromptRequest):
                 chars_injected_this_turn.add(name)
                 
             elif is_group_chat and not multi_char_summary:
-                # Group chat but character has no capsule - skip with warning
-                print(f"[CONTEXT] Warning: {name} in group chat but has no capsule, skipping injection")
+                # Group chat but character has no capsule - use description + personality as fallback
+                label = "[NPC]" if is_npc else "[Character]"
+                print(f"[CONTEXT] {label} {name} using fallback (description + personality)")
+                
+                fallback_content = ""
+                if description:
+                    fallback_content += description
+                if personality:
+                    if fallback_content:
+                        fallback_content += " "
+                    fallback_content += personality
+                
+                if fallback_content:
+                    full_prompt += f"### [{name}]: {fallback_content}\n"
+                    chars_injected_this_turn.add(name)
+                else:
+                    print(f"[CONTEXT] Warning: {name} has no description or personality, skipping injection")
         else:
             # Character not injected - log reason for debugging
-            print(f"[CONTEXT] {name} NOT injected (char_has_appeared={char_has_appeared}, auto_first_mes={is_auto_first_mes_only}, edited={is_edited_this_turn})")
+            print(f"[CONTEXT] {name} NOT injected (char_has_appeared={char_has_appeared}, auto_first_mes={is_auto_first_mes_only}, is_in_sticky_window={is_in_sticky_window})")
         
         # === REINFORCEMENT CHUNK PREPARATION ===
-        if is_group_chat:
-            # Group chat: always use capsules for reinforcement
-            if multi_char_summary:
-                reinforcement_chunks.append(f"[{name}]: {multi_char_summary}")
-            else:
-                print(f"[REINFORCEMENT] Warning: {name} has no capsule, skipping reinforcement")
+        # Unified: description + personality for ALL characters (single or multi-chat)
+        reinforcement_parts = []
+        if description:
+            reinforcement_parts.append(description)
+        if personality:
+            reinforcement_parts.append(personality)
+        
+        if reinforcement_parts:
+            reinforcement_content = " ".join(reinforcement_parts)
+            reinforcement_chunks.append(reinforcement_content)
         else:
-            # Single character: use personality + description
-            reinforcement_parts = []
-            if personality:
-                reinforcement_parts.append(personality)
-            if description:
-                reinforcement_parts.append(description)
-            
-            if reinforcement_parts:
-                reinforcement_content = " ".join(reinforcement_parts)
-                reinforcement_chunks.append(reinforcement_content)
+            print(f"[REINFORCEMENT] Warning: {name} has no description or personality, skipping")
 
     # === 7. CHAT HISTORY (with reinforcement) ===
     full_prompt += "\n### Chat History:\n"
     reinforce_freq = settings.get("reinforce_freq", 5)
     world_reinforce_freq = settings.get("world_info_reinforce_freq", 3)  # Default to every 3 turns
     
-    # Calculate current turn number (turn = message_count // 2 + 1, since each turn has user + assistant message)
-    current_turn = len(request.messages) // 2 + 1
-    
     # Character reinforcement logic every X turns
     if reinforce_freq > 0 and current_turn > 0 and current_turn % reinforce_freq == 0:
         print(f"[REINFORCEMENT] Turn {current_turn}: Reinforcing character profiles")
         
         if reinforcement_chunks:
-            # Filter out characters that were just injected this turn to avoid duplication
-            filtered_chunks = []
-            for chunk in reinforcement_chunks:
-                # Extract character name from chunk
-                # Format: "[{name}]: {summary}" for capsules
-                # Format: "personality description" for single char (no name prefix)
-                if chunk.startswith("["):
-                    # Capsule format: extract name
-                    name_match = chunk.split("]:")[0].replace("[", "")
-                    char_name = name_match.strip()
-                else:
-                    # Single char format: skip filtering (no name prefix)
-                    char_name = None
-                
-                # Skip reinforcement if character was just injected this turn
-                if char_name and char_name in chars_injected_this_turn:
-                    print(f"[REINFORCEMENT] Skipping {char_name} (injected this turn)")
-                    continue
-                
-                filtered_chunks.append(chunk)
-                
-                # Determine if this is an NPC based on chunk format
-                # NPCs are in format "[{name}]: {summary}" from capsules
-                # or depth_prompt from full profiles
-                is_npc_reinforcement = any(
-                    char.get('is_npc', False) and 
-                    char.get('data', {}).get('name', 'Unknown') in chunk
-                    for char in request.characters
-                )
-                
-                label = "[NPC]" if is_npc_reinforcement else "[Character]"
-                print(f"[REINFORCEMENT] {label} profile reinforced: {chunk[:80]}...")
-            
-            if filtered_chunks:
-                full_prompt += "[REINFORCEMENT: " + " | ".join(filtered_chunks) + "]\n"
+            # Skip reinforcement if any character was just injected this turn to avoid duplication
+            if chars_injected_this_turn:
+                print(f"[REINFORCEMENT] Skipping reinforcement (characters injected this turn: {', '.join(chars_injected_this_turn)})")
+            else:
+                print(f"[REINFORCEMENT] Reinforcing {len(reinforcement_chunks)} character profiles")
+                full_prompt += "[REINFORCEMENT: " + " | ".join(reinforcement_chunks) + "]\n"
         elif is_narrator_mode:
             # Narrator reinforcement
             print(f"[REINFORCEMENT] Narrator mode reinforced")
@@ -3078,7 +3034,8 @@ async def generate_card_field(req: CardGenRequest):
                         "prompt": "",
                         "depth": 4
                     },
-                    "talkativeness": 100
+                    "talkativeness": 100,
+                    "multi_char_summary": ""
                 }
             }
             print(f"[NPC_CREATE] Step 7h: Character data structure built, keys: {list(character_data.keys())}")
@@ -3385,75 +3342,6 @@ Output only the capsule summary line, nothing else."""
     result = await call_llm_helper(system, prompt, 200)
     return result.strip()
 
-# Mode Classification Request Model
-class ModeClassifyRequest(BaseModel):
-    user_message: str
-    character_names: List[str]
-
-@app.post("/api/classify-mode")
-async def classify_mode(req: ModeClassifyRequest):
-    """Auto-classify which mode should be used based on the user's message."""
-    if len(req.character_names) < 2:
-        # Single or no characters - use simple rules
-        if len(req.character_names) == 1:
-            return {"success": True, "mode": f"focus:{req.character_names[0]}"}
-        return {"success": True, "mode": "narrator"}
-    
-    # Multiple characters - use LLM to classify
-    char_list = ", ".join(req.character_names)
-    system = "You are a classifier that determines who should respond in a roleplay scene."
-    
-    prompt = f"""Given this user message in a roleplay with multiple characters, determine who should respond.
-
-Active characters: {char_list}
-
-User message: "{req.user_message}"
-
-Rules:
-- If the user directly addresses a character by name (e.g., "Alice, what do you think?"), output: focus:CharacterName
-- If the user asks a question that could be answered by any character, or describes an action affecting multiple characters, output: narrator
-- If the context suggests an intimate or personal moment with a specific character, output: focus:CharacterName
-- When in doubt, default to: narrator
-
-Output ONLY one of these options, nothing else:
-- narrator
-- focus:{char_list.split(', ')[0]}
-- focus:{char_list.split(', ')[1] if len(req.character_names) > 1 else char_list.split(', ')[0]}
-{('- focus:' + char_list.split(', ')[2] if len(req.character_names) > 2 else '')}
-
-Your answer:"""
-
-    try:
-        result = await call_llm_helper(system, prompt, 30)
-        result = result.strip().lower()
-        
-        # Validate the result
-        if result == "narrator":
-            return {"success": True, "mode": "narrator"}
-        elif result.startswith("focus:"):
-            char_name = result.split(":", 1)[1].strip()
-            # Find matching character (case insensitive)
-            for name in req.character_names:
-                if name.lower() == char_name.lower():
-                    return {"success": True, "mode": f"focus:{name}"}
-            # If no exact match, fall back to narrator
-            return {"success": True, "mode": "narrator"}
-        else:
-            # Unrecognized output, default to narrator
-            return {"success": True, "mode": "narrator"}
-    except Exception as e:
-        print(f"Mode classification failed: {e}")
-        return {"success": True, "mode": "narrator"}
-
-@app.post("/api/card-gen/generate-capsule")
-async def generate_capsule(req: CapsuleGenRequest):
-    """API endpoint to generate a capsule summary for a character."""
-    try:
-        capsule = await generate_capsule_for_character(req.char_name, req.description, req.depth_prompt)
-        return {"success": True, "text": capsule}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
 # Character Editing Endpoints
 @app.post("/api/characters/edit-field")
 async def edit_character_field(req: CharacterEditRequest):
@@ -3493,91 +3381,6 @@ async def edit_character_field(req: CharacterEditRequest):
         add_recent_edit('character', req.filename, req.field, req.new_value)
         
         return {"success": True, "message": f"Field '{req.field}' updated successfully"}
-        
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-@app.post("/api/characters/edit-capsule")
-async def edit_character_capsule(req: CharacterEditRequest):
-    """Edit the multi-character capsule for a character."""
-    try:
-        file_path = os.path.join(DATA_DIR, "characters", req.filename)
-        if not os.path.exists(file_path):
-            return {"success": False, "error": "Character file not found"}
-        
-        with open(file_path, "r", encoding="utf-8") as f:
-            char_data = json.load(f)
-        
-        # Ensure extensions object exists
-        if "extensions" not in char_data["data"]:
-            char_data["data"]["extensions"] = {}
-        
-        # Update the capsule
-        char_data["data"]["extensions"]["multi_char_summary"] = req.new_value
-        
-        # Save the updated character
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(char_data, f, indent=2, ensure_ascii=False)
-
-        # Sync to database so changes take effect immediately in active chats
-        sync_result = sync_character_from_json(req.filename)
-        if not sync_result["success"]:
-            print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
-        
-        # Record recent edit for immediate context injection
-        add_recent_edit('character', req.filename, 'multi_char_summary', req.new_value)
-        
-        return {"success": True, "message": "Capsule updated successfully"}
-        
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-@app.post("/api/characters/edit-capsule-ai")
-async def edit_character_capsule_ai(req: CharacterEditFieldRequest):
-    """Use AI to generate or improve the multi-character capsule."""
-    try:
-        file_path = os.path.join(DATA_DIR, "characters", req.filename)
-        if not os.path.exists(file_path):
-            return {"success": False, "error": "Character file not found"}
-        
-        with open(file_path, "r", encoding="utf-8") as f:
-            char_data = json.load(f)
-        
-        char_name = char_data["data"]["name"]
-        description = char_data["data"]["description"]
-        depth_prompt = char_data["data"]["extensions"].get("depth_prompt", {}).get("prompt", "")
-        
-        # Use existing capsule generation logic
-        capsule_req = CapsuleGenRequest(
-            char_name=char_name,
-            description=description,
-            depth_prompt=depth_prompt
-        )
-        
-        result = await generate_capsule(capsule_req)
-        
-        if result["success"]:
-            # Update the character with the generated capsule
-            if "extensions" not in char_data["data"]:
-                char_data["data"]["extensions"] = {}
-            
-            char_data["data"]["extensions"]["multi_char_summary"] = result["text"]
-            
-            # Save the updated character
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(char_data, f, indent=2, ensure_ascii=False)
-
-            # Sync to database so changes take effect immediately in active chats
-            sync_result = sync_character_from_json(req.filename)
-            if not sync_result["success"]:
-                print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
-            
-            # Record recent edit for immediate context injection
-            add_recent_edit('character', req.filename, 'multi_char_summary', result['text'])
-            
-            return {"success": True, "text": result["text"]}
-        else:
-            return {"success": False, "error": result["error"]}
         
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -4025,81 +3828,92 @@ async def chat(request: PromptRequest):
 
 
     
-    # Auto-generate capsules for group chats (2+ characters) AND single character mode (for dynamic switching)
-    updated_characters = []
-    chars_needing_capsules = []
+    # === CAPSULE SYSTEM FOR MULTI-CHARACTER CHATS ===
+    # Capsules are now chat-scoped (stored in metadata.characterCapsules)
+    # Generated on-demand for multi-char chats, saved per-chat
     
-    # Determine if capsules are needed based on current chat state
     is_group_chat = len(request.characters) >= 2
-    is_single_char = len(request.characters) == 1
     
-    # Generate capsules for any character that doesn't have one (if capsules would be used)
-    if is_group_chat or is_single_char:
+    # Load existing capsules from chat metadata
+    chat_capsules = {}
+    if chat_data and "metadata" in chat_data:
+        chat_capsules = chat_data.get("metadata", {}).get("characterCapsules", {})
+        if chat_capsules:
+            print(f"[CAPSULE] Loaded {len(chat_capsules)} capsules from chat metadata")
+    
+    # Inject capsules into character objects
+    for char_obj in request.characters:
+        if char_obj.get("_filename") and char_obj["_filename"] in chat_capsules:
+            if "extensions" not in char_obj["data"]:
+                char_obj["data"]["extensions"] = {}
+            char_obj["data"]["extensions"]["multi_char_summary"] = chat_capsules[char_obj["_filename"]]
+        elif char_obj.get("entity_id") and char_obj["entity_id"] in chat_capsules:
+            if "extensions" not in char_obj["data"]:
+                char_obj["data"]["extensions"] = {}
+            char_obj["data"]["extensions"]["multi_char_summary"] = chat_capsules[char_obj["entity_id"]]
+    
+    # Load character first turn numbers from chat metadata
+    character_first_turns = {}
+    if chat_data and "metadata" in chat_data:
+        metadata_raw = chat_data.get("metadata", {})
+        metadata_obj = metadata_raw if isinstance(metadata_raw, dict) else {}
+        character_first_turns = metadata_obj.get("characterFirstTurns", {})
+    
+    # Generate capsules for multi-char chats only
+    if is_group_chat:
+        chars_needing_capsules = []
         for char_obj in request.characters:
             data = char_obj.get("data", {})
             extensions = data.get("extensions", {})
             multi_char_summary = extensions.get("multi_char_summary", "")
             
-            if not multi_char_summary:
-                # Character needs a capsule generated
+            if not multi_char_summary or multi_char_summary.strip() == '':
                 chars_needing_capsules.append(char_obj)
-            updated_characters.append(char_obj)
         
         # Generate capsules for characters that need them
-        for char_obj in chars_needing_capsules:
-            data = char_obj.get("data", {})
-            name = data.get("name", "Unknown")
-            description = data.get("description", "")
-            depth_prompt = data.get("extensions", {}).get("depth_prompt", {}).get("prompt", "")
-            
-            try:
-                print(f"AUTO-GENERATING capsule for {name} (group chat detected)")
-                capsule = await generate_capsule_for_character(name, description, depth_prompt)
-                
-                # Update the character object in memory
-                if "extensions" not in data:
-                    data["extensions"] = {}
-                data["extensions"]["multi_char_summary"] = capsule
-                
-                # Save the updated capsule to the character file or NPC data
-                filename = char_obj.get("_filename")
-                if filename:
-                    file_path = os.path.join(DATA_DIR, "characters", filename)
-                    save_data = char_obj.copy()
-                    if "_filename" in save_data:
-                        del save_data["_filename"]
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        json.dump(save_data, f, indent=2, ensure_ascii=False)
-                    print(f"SAVED capsule for {name}: {capsule[:80]}...")
-                elif char_obj.get("is_npc", False):
-                    npc_id = char_obj.get("entity_id")
-                    if npc_id and request.chat_id:
+        if chars_needing_capsules:
+            if request.chat_id:
+                chat = db_get_chat(request.chat_id)
+                if chat:
+                    metadata = chat.get("metadata", {}) or {}
+                    if "characterCapsules" not in metadata:
+                        metadata["characterCapsules"] = {}
+                    
+                    for char_obj in chars_needing_capsules:
+                        data = char_obj.get("data", {})
+                        name = data.get("name", "Unknown")
+                        description = data.get("description", "")
+                        personality = data.get("personality", "")
+                        depth_prompt = data.get("extensions", {}).get("depth_prompt", {}).get("prompt", "")
+                        
                         try:
-                            npc_data = data.copy()
-                            db_update_npc(request.chat_id, npc_id, npc_data)
-                            chat = db_get_chat(request.chat_id)
-                            if chat:
-                                metadata = chat.get("metadata", {}) or {}
-                                localnpcs = metadata.get("localnpcs", {}) or {}
-                                if npc_id in localnpcs:
-                                    localnpcs[npc_id]["data"] = npc_data
-                                    metadata["localnpcs"] = localnpcs
-                                    chat["metadata"] = metadata
-                                    db_save_chat(request.chat_id, chat)
-                                    print(f"SAVED capsule for NPC {name}: {capsule[:80]}...")
-                                else:
-                                    print(f"[WARNING] NPC {npc_id} not found in metadata, capsule not saved")
+                            # Include both description and personality in capsule
+                            capsule_source = f"{description} {personality}".strip()
+                            capsule = await generate_capsule_for_character(name, capsule_source, depth_prompt)
+                            
+                            # Update in memory
+                            if "extensions" not in data:
+                                data["extensions"] = {}
+                            data["extensions"]["multi_char_summary"] = capsule
+                            
+                            # Save to chat metadata
+                            capsule_key = char_obj.get("_filename") or char_obj.get("entity_id")
+                            if capsule_key:
+                                metadata["characterCapsules"][capsule_key] = capsule
+                                print(f"[CAPSULE] Generated and saved for {name}: {capsule[:80]}...")
                             else:
-                                print(f"[WARNING] Chat {request.chat_id} not found, NPC capsule not saved")
+                                print(f"[CAPSULE] WARNING: No capsule key for {name}, not saved to metadata")
                         except Exception as e:
-                            print(f"Failed to save NPC capsule for {name}: {e}")
+                            print(f"[CAPSULE] ERROR: Failed to generate capsule for {name}: {e}")
+                    
+                    # Save updated metadata to chat
+                    chat["metadata"] = metadata
+                    db_save_chat(request.chat_id, chat)
+                    print(f"[CAPSULE] Saved {len(chars_needing_capsules)} capsules to chat metadata")
                 else:
-                    print(f"[WARNING] Character {name} has no _filename and is not NPC, capsule not saved")
-            except Exception as e:
-                print(f"Failed to auto-generate capsule for {name}: {e}")
-        
-        # Update the request with the modified characters
-        request.characters = updated_characters
+                    print(f"[CAPSULE] WARNING: Chat {request.chat_id} not found, capsules not saved")
+            else:
+                print(f"[CAPSULE] WARNING: No chat_id, capsules not saved to metadata")
     
     # Check for summarization need
     max_ctx = request.settings.get("max_context", 4096)
@@ -4109,7 +3923,7 @@ async def chat(request: PromptRequest):
     new_summary = request.summary or ""
     
     # Initial token check
-    prompt = construct_prompt(current_request)
+    prompt = construct_prompt(current_request, character_first_turns)
     tokens = await get_token_count(prompt)
     
     # Summarization loop
@@ -4149,7 +3963,7 @@ async def chat(request: PromptRequest):
                 # Rebuild request with new summary and fewer messages
                 current_request.messages = remaining_messages
                 current_request.summary = new_summary
-                prompt = construct_prompt(current_request)
+                prompt = construct_prompt(current_request, character_first_turns)
                 tokens = await get_token_count(prompt)
             except Exception as e:
                 print(f"Summarization failed: {e}")
@@ -4167,6 +3981,29 @@ async def chat(request: PromptRequest):
             characters=active_character_names,
             user_name=user_name
         )
+    
+    # === SAVE CHARACTER FIRST TURNS TO METADATA ===
+    # Save updated character first turn numbers to chat metadata
+    if request.chat_id and character_first_turns:
+        try:
+            chat = db_get_chat(request.chat_id)
+            if not chat:
+                # Chat doesn't exist yet - create minimal record
+                # This happens on first message of a new chat
+                chat = {
+                    "messages": [],
+                    "metadata": {},
+                    "summary": ""
+                }
+                db_save_chat(request.chat_id, chat)
+            
+            # Now update with characterFirstTurns
+            metadata = chat.get("metadata", {}) or {}
+            metadata["characterFirstTurns"] = character_first_turns
+            chat["metadata"] = metadata
+            db_save_chat(request.chat_id, chat)
+        except Exception as e:
+            print(f"[STICKY] ERROR: Failed to save character first turns: {e}")
 
     print(f"Generated Prompt ({tokens} tokens):\n{prompt}")
     
@@ -4534,6 +4371,9 @@ async def save_character(char: dict):
             char_data = char.get("data", char)
             name = char_data.get("name", "NewCharacter")
             filename = f"{name}.json"
+        else:
+            char_data = char.get("data", {})
+            name = char_data.get("name", "Unknown")
         
         # Save to database
         if not db_save_character(char, filename):
@@ -6566,7 +6406,7 @@ def format_alpaca(messages: list, character_context: list, world_context: list,
         if role == 'user':
             # User message - create instruction
             instruction = content
-            input_text = system_prompt if i == 0 else ""
+            input_text = system_prompt
             output = ""
             
             # Find the next assistant response

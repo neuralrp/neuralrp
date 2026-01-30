@@ -444,35 +444,6 @@
                                         placeholder="Example dialogue showing character's voice..."></textarea>
                                 </div>
 
-                                <!-- Multi-Character Capsule -->
-                                <div class="border-t border-slate-700 pt-3 mt-2">
-                                    <div class="flex justify-between items-center mb-1">
-                                        <label class="text-[9px] text-purple-400 font-black uppercase">Multi-Char
-                                            Capsule</label>
-                                        <div class="flex gap-2">
-                                            <button @click="editCapsuleAI()"
-                                                class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase"
-                                                :disabled="isEditingCapsule">
-                                                <i class="fa-solid mr-1"
-                                                    :class="isEditingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>AI
-                                                Generate
-                                            </button>
-                                            <button @click="generateCapsule()"
-                                                class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase"
-                                                :disabled="isGeneratingCapsule">
-                                                <i class="fa-solid mr-1"
-                                                    :class="isGeneratingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Auto
-                                                Generate
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <textarea x-model="editingChar.data.extensions.multi_char_summary"
-                                        class="w-full bg-slate-950 border border-purple-900/50 rounded-lg px-2 py-1.5 text-[10px] h-16 outline-none focus:ring-1 focus:ring-purple-500"
-                                        placeholder="Compact capsule for group chats..."></textarea>
-                                    <p class="text-[8px] text-slate-600 mt-1">Used instead of full description when
-                                        2+ characters are active.</p>
-                                </div>
-
                                 <!-- Fixed Save/Cancel Buttons -->
                                 <div
                                     class="sticky bottom-0 bg-slate-900 border-t border-slate-700 p-3 -mx-3 -mb-3 rounded-b-xl">
@@ -722,25 +693,10 @@
                                         placeholder="World lore entry content..."></textarea>
                                 </div>
 
-                                <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                    <div class="flex items-center gap-2">
-                                        <input type="checkbox" x-model="editingWorldEntry.entry.is_canon_law"
-                                            class="w-4 h-4 text-red-600 bg-slate-900 border-slate-700 rounded focus:ring-red-500">
-                                        <label class="text-[9px] text-slate-500 font-black uppercase">Canon Law</label>
-                                    </div>
-                                    <div class="flex items-center gap-2">
-                                        <input type="checkbox" x-model="editingWorldEntry.entry.useProbability"
-                                            class="w-4 h-4 text-blue-600 bg-slate-900 border-slate-700 rounded focus:ring-blue-500">
-                                        <label class="text-[9px] text-slate-500 font-black uppercase">Use
-                                            Probability</label>
-                                    </div>
-                                    <div>
-                                        <label
-                                            class="text-[9px] text-slate-500 font-black uppercase">Probability</label>
-                                        <input type="number" x-model.number="editingWorldEntry.entry.probability"
-                                            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] outline-none focus:ring-1 focus:ring-blue-500"
-                                            placeholder="0-100">
-                                    </div>
+                                <div class="flex items-center gap-2">
+                                    <input type="checkbox" x-model="editingWorldEntry.entry.is_canon_law"
+                                        class="w-4 h-4 text-red-600 bg-slate-900 border-slate-700 rounded focus:ring-red-500">
+                                    <label class="text-[9px] text-slate-500 font-black uppercase">Canon Law</label>
                                 </div>
 
                                 <!-- AI-Assisted Editing Section -->
@@ -809,9 +765,10 @@
                                      </div>
                                  </div>
  
-                                 <!-- Tag Editor for World Entry -->
-                                 <div class="space-y-2 border-t border-slate-700 pt-3">
-                                     <label class="text-[9px] text-slate-500 font-black uppercase">World Tags</label>
+                                  <!-- Tag Editor for World Entry -->
+                                  <div class="space-y-2 border-t border-slate-700 pt-3">
+                                      <label class="text-[9px] text-slate-500 font-black uppercase">World-Level Tags</label>
+                                      <p class="text-[9px] text-amber-500/80">⚠️ These tags apply to ALL entries in this world</p>
                                      
                                      <!-- Current tags as chips -->
                                      <div class="flex flex-wrap gap-2 mb-2">
@@ -867,16 +824,16 @@
                                             title="Delete World">
                                             <i class="fa-solid fa-trash text-[10px]"></i>
                                         </button>
-                                        <button @click="activeWI = activeWI?.name === wi.name ? null : wi"
+                                        <button @click="toggleWorldExpansion(wi.name)"
                                             class="flex-1 text-left font-black text-[10px] tracking-widest uppercase p-3 transition-all hover:bg-slate-700/30 flex justify-between items-center"
-                                            :class="activeWI?.name === wi.name ? 'text-green-400 bg-green-500/10' : 'text-slate-500'">
+                                            :class="expandedWorlds.has(wi.name) ? 'text-green-400 bg-green-500/10' : 'text-slate-500'">
                                             <span x-text="wi.name"></span>
                                             <i class="fa-solid"
-                                                :class="activeWI?.name === wi.name ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+                                                :class="expandedWorlds.has(wi.name) ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
                                         </button>
                                     </div>
 
-                                    <div x-show="activeWI?.name === wi.name" class="p-3 pt-0 space-y-3">
+                                    <div x-show="expandedWorlds.has(wi.name)" class="p-3 pt-0 space-y-3">
                                         <template x-for="(entry, uid) in wi.entries" :key="uid">
                                             <div
                                                 class="p-2 bg-slate-800 rounded-lg border border-slate-700 transition-all hover:border-slate-600">
@@ -2546,7 +2503,6 @@
             isLoading: false,
             isCountingTokens: false,
             tokenCount: 0,
-            editedCharactersThisTurn: [],
             showSidebar: 'none',
             showImagePanel: false,
             activeCharacters: [],
@@ -2570,6 +2526,7 @@
             showNPCDetailsModal: false,
             worldInfos: [],
             activeWI: null,
+            expandedWorlds: new Set(),
             currentChatId: null,
             newWIEntry: { keys: '', content: '' },
             editingMessageId: null,
@@ -2646,8 +2603,6 @@
             },
 
             // Character editing
-            isGeneratingCapsule: false,
-            isEditingCapsule: false,
             isEditingField: false,
             editContextMode: 'chat',
             editContextText: '',
@@ -3063,13 +3018,46 @@
                     const url = tagFilter ? `/api/world-info?tags=${tagFilter}` : '/api/world-info';
                     const res = await axios.get(url);
                     this.worldInfos = res.data;
-                    
+
+                    // Auto-expand all filtered worlds and clear activeWI
+                    if (tagFilter && this.worldInfos.length > 0) {
+                        this.expandedWorlds.clear();
+                        this.worldInfos.forEach(wi => this.expandedWorlds.add(wi.name));
+                        this.activeWI = null;
+                    } else {
+                        this.expandedWorlds.clear();
+                        this.activeWI = null;
+                    }
+
                     // Load all world tags when no filter is applied (for dropdown)
                     if (!tagFilter && !this.allWorldTags.length) {
                         await this.loadAllWorldTags();
                     }
                 } catch (e) {
                     console.error('Failed to fetch world info:', e);
+                }
+            },
+
+            toggleWorldExpansion(worldName) {
+                const world = this.worldInfos.find(w => w.name === worldName);
+                if (!world) return;
+
+                if (this.worldFilterTags.length > 0) {
+                    if (this.expandedWorlds.has(worldName)) {
+                        this.expandedWorlds.delete(worldName);
+                    } else {
+                        this.expandedWorlds.add(worldName);
+                    }
+                    this.activeWI = world;
+                } else {
+                    if (this.expandedWorlds.has(worldName)) {
+                        this.expandedWorlds.clear();
+                        this.activeWI = null;
+                    } else {
+                        this.expandedWorlds.clear();
+                        this.expandedWorlds.add(worldName);
+                        this.activeWI = world;
+                    }
                 }
             },
 
@@ -3382,16 +3370,18 @@
                     const res = await axios.post("/api/chats", {
                         name: this.currentChatId,   // null/undefined on first save
                         data: chatData,
-                    });
+                });
 
-                    // If backend returns a new id, adopt it for this session only
-                    if (res.data && res.data.id && !this.currentChatId) {
-                        this.currentChatId = res.data.id;
-                        // Do NOT persist to localStorage unless you explicitly want auto-reopen
-                        // localStorage.setItem("currentChatId", this.currentChatId);
-                    }
-                    
-                    // Sync message IDs with database-generated IDs
+                // Autosave saves chat data but doesn't update currentChatId anymore
+                // Backend now tracks chat ID via client-side generation and /api/chat response
+                // Commented out to prevent race condition where autosave overwrites chat ID from /api/chat
+                // if (res.data && res.data.id && !this.currentChatId) {
+                //     this.currentChatId = res.data.id;
+                //     // Do NOT persist to localStorage unless you explicitly want auto-reopen
+                //     // localStorage.setItem("currentChatId", this.currentChatId);
+                // }
+                 
+                // Sync message IDs with database-generated IDs
                     if (res.data && res.data.id_mapping) {
                         for (const msg of this.messages) {
                             const newId = res.data.id_mapping[msg.id.toString()];
@@ -3711,14 +3701,6 @@
                     this.activeCharacters.splice(index, 1);
                 } else {
                     this.activeCharacters.push(charRef);
-                    if (char.data?.first_mes && this.messages.length === 0) {
-                        this.messages.push({
-                            role: 'assistant',
-                            speaker: char.data.name,
-                            content: char.data.first_mes,
-                            id: Date.now()
-                        });
-                    }
                 }
 
                 await this.autosaveChat();
@@ -3743,12 +3725,11 @@
                         tags: [],
                         creator: '',
                         character_version: '',
-                        extensions: {
+                    extensions: {
                             depth_prompt: { depth: 4, prompt: '' },
                             label_description: '',
                             danbooru_tag: '',
-                            genre: '',
-                            multi_char_summary: ''
+                            genre: ''
                         }
                     }
                 };
@@ -3796,11 +3777,6 @@
                         );
 
                         if (res.data.success) {
-                            const npcRef = this.editingChar.npcId;
-                            if (npcRef && !this.editedCharactersThisTurn.includes(npcRef)) {
-                                this.editedCharactersThisTurn.push(npcRef);
-                                console.log(`[EDIT_TRACK] NPC ${npcRef} marked as edited`);
-                            }
                             this.editingChar = null;
                             await this.loadChatNPCs(chatId);
                             this.showNotification("NPC saved successfully!", "success");
@@ -3816,11 +3792,6 @@
                         // Save as global character
                         const res = await axios.post("/api/characters", this.editingChar);
                         if (res.data.success) {
-                            const charRef = this.editingChar._filename || res.data.filename;
-                            if (charRef && !this.editedCharactersThisTurn.includes(charRef)) {
-                                this.editedCharactersThisTurn.push(charRef);
-                                console.log(`[EDIT_TRACK] Character ${charRef} marked as edited`);
-                            }
                             this.editingChar = null;
                             await this.fetchCharacters();
                             this.showNotification("Character saved successfully!", "success");
@@ -3913,6 +3884,12 @@
             async sendMessage() {
                 if (!this.input.trim() || this.isLoading) return;
 
+                // Generate UUID for new chats if currentChatId is null/undefined
+                if (!this.currentChatId) {
+                    this.currentChatId = 'new_chat_' + crypto.randomUUID();
+                    console.log('[CHAT ID] Generated new client-side chat ID:', this.currentChatId);
+                }
+
                 const userMsg = { role: 'user', content: this.input, id: Date.now() };
                 this.messages.push(userMsg);
                 const currentInput = this.input;
@@ -3926,7 +3903,6 @@
                         messages: this.messages,
                         summary: this.summary,
                         characters: this.activeCharactersWithData(),
-                        edited_characters: this.editedCharactersThisTurn,
                         world_info: this.settings.world_info_enabled ? this.activeWI : null,
                         settings: this.settings,
                         mode: mode,
@@ -3940,9 +3916,12 @@
                         this.summary = res.data._updated_state.summary;
                     }
 
-                    if (res.data._chat_id && !this.currentChatId) {
+                    // Always use chat_id returned from backend (whether new or existing)
+                    if (res.data._chat_id) {
                         this.currentChatId = res.data._chat_id;
-                        localStorage.setItem('currentChatId', this.currentChatId);
+                        console.log('[CHAT ID] Updated currentChatId from /api/chat response:', this.currentChatId);
+                    } else {
+                        console.warn('[CHAT ID] No _chat_id returned from /api/chat');
                     }
 
                     let aiContent = '';
@@ -3974,7 +3953,6 @@
                     });
                 } finally {
                     this.isLoading = false;
-                    this.editedCharactersThisTurn = [];
                     this.scrollToBottom();
                     this.updateTokenCount();
                 }
@@ -3993,7 +3971,6 @@
                         messages: this.messages,
                         summary: this.summary,
                         characters: this.activeCharactersWithData(),
-                        edited_characters: this.editedCharactersThisTurn,
                         world_info: this.settings.world_info_enabled ? this.activeWI : null,
                         settings: this.settings,
                         mode: mode
@@ -4034,7 +4011,6 @@
                     });
                 } finally {
                     this.isLoading = false;
-                    this.editedCharactersThisTurn = [];
                     this.scrollToBottom();
                     this.updateTokenCount();
                 }
@@ -4497,9 +4473,7 @@
                         { field: 'key', value: this.editingWorldEntry.entry.key },
                         { field: 'comment', value: this.editingWorldEntry.entry.comment },
                         { field: 'content', value: this.editingWorldEntry.entry.content },
-                        { field: 'is_canon_law', value: this.editingWorldEntry.entry.is_canon_law },
-                        { field: 'useProbability', value: this.editingWorldEntry.entry.useProbability },
-                        { field: 'probability', value: this.editingWorldEntry.entry.probability }
+                        { field: 'is_canon_law', value: this.editingWorldEntry.entry.is_canon_law }
                     ];
 
                     const changedFields = [];
@@ -4550,6 +4524,7 @@
                             comment: this.editingWorldEntry.entry.comment,
                             content: this.editingWorldEntry.entry.content,
                             is_canon_law: this.editingWorldEntry.entry.is_canon_law,
+                            // Preserve probability fields for SillyTavern compatibility
                             useProbability: this.editingWorldEntry.entry.useProbability,
                             probability: this.editingWorldEntry.entry.probability
                         },
@@ -5044,37 +5019,6 @@
                 }
             },
 
-            async generateCapsule() {
-                if (!this.editingChar || !this.editingChar.data.name) {
-                    alert("Please enter a character name first.");
-                    return;
-                }
-
-                this.isGeneratingCapsule = true;
-
-                try {
-                    const res = await axios.post('/api/card-gen/generate-capsule', {
-                        char_name: this.editingChar.data.name,
-                        description: this.editingChar.data.description || '',
-                        depth_prompt: this.editingChar.data.extensions?.depth_prompt?.prompt || ''
-                    });
-
-                    if (res.data.success) {
-                        if (!this.editingChar.data.extensions) {
-                            this.editingChar.data.extensions = {};
-                        }
-                        this.editingChar.data.extensions.multi_char_summary = res.data.text;
-                    } else {
-                        alert(`Error: ${res.data.error}`);
-                    }
-                } catch (e) {
-                    console.error("Capsule generation failed", e);
-                    alert("Failed to generate capsule.");
-                } finally {
-                    this.isGeneratingCapsule = false;
-                }
-            },
-
             async editFieldAI(field) {
                 if (!this.editingChar || !this.editingChar.data.name) {
                     alert("Please save the character first.");
@@ -5125,57 +5069,6 @@
                     alert(`Connection error updating ${field}.`);
                 } finally {
                     this.isEditingField = false;
-                }
-            },
-
-            async editCapsuleAI() {
-                if (!this.editingChar || !this.editingChar.data.name) {
-                    alert("Please save the character first.");
-                    return;
-                }
-
-                this.isEditingCapsule = true;
-
-                let contextText = "";
-                if (this.editContextMode === 'manual') {
-                    if (!this.editContextText.trim()) {
-                        alert("Please provide context.");
-                        this.isEditingCapsule = false;
-                        return;
-                    }
-                    contextText = this.editContextText;
-                } else {
-                    if (this.messages.length === 0) {
-                        alert("Start a conversation first.");
-                        this.isEditingCapsule = false;
-                        return;
-                    }
-                    contextText = this.messages.slice(-20).map(m => `${m.speaker || m.role}: ${m.content}`).join('\n');
-                }
-
-                try {
-                    const res = await axios.post('/api/characters/edit-capsule-ai', {
-                        filename: this.editingChar._filename || `${this.editingChar.data.name}.json`,
-                        context: contextText,
-                        source_mode: this.editContextMode
-                    });
-
-                    if (res.data.success) {
-                        if (!this.editingChar.data.extensions) {
-                            this.editingChar.data.extensions = {};
-                        }
-                        this.editingChar.data.extensions.multi_char_summary = res.data.text;
-                        alert("Capsule updated!");
-                        // Reload characters from backend to get updated data
-                        await this.fetchCharacters();
-                    } else {
-                        alert(`Error: ${res.data.error}`);
-                    }
-                } catch (e) {
-                    console.error("Capsule AI update failed", e);
-                    alert("Failed to update capsule.");
-                } finally {
-                    this.isEditingCapsule = false;
                 }
             },
 
