@@ -256,7 +256,7 @@
                 <template x-if="showSidebar === 'characters'">
                     <div class="space-y-4">
                         <div class="flex gap-2">
-                            <button @click="startNewCharacter()"
+                            <button @click="openCardGen()"
                                 class="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all">New
                                 Character</button>
                             <button @click="reimportAndRefreshCharacters()"
@@ -332,7 +332,7 @@
                                                     :class="isEditingField && isEditingField.body ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
                                             </button>
                                         </div>
-                                        <textarea x-model="editingChar.data.extensions.depth_prompt.prompt"
+                                        <textarea x-model="editingChar.data.description"
                                             class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-20 outline-none focus:ring-1 focus:ring-blue-500/50 resize-none font-mono"
                                             placeholder="Physical appearance..."></textarea>
                                     </div>
@@ -428,55 +428,49 @@
                                     </div>
                                 </div>
 
-                                <!-- Manual Editing Section -->
-                                <div class="border-t border-slate-700 pt-3">
-                                    <label class="text-[9px] text-slate-500 font-black uppercase mb-2 block">Manual
-                                        Editing</label>
-                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                        <div>
-                                            <label
-                                                class="text-[9px] text-slate-500 font-black uppercase">Description/Dialogue</label>
-                                            <textarea x-model="editingChar.data.description"
-                                                class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500"
-                                                placeholder="Description/Example Dialogue"></textarea>
-                                        </div>
-                                        <div>
-                                            <label class="text-[9px] text-slate-500 font-black uppercase">Reinforcement
-                                                Prompt</label>
-                                            <textarea x-model="editingChar.data.extensions.depth_prompt.prompt"
-                                                class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500"
-                                                placeholder="Personality/Scenario..."></textarea>
-                                        </div>
+                                <!-- Example Dialog -->
+                                <div class="space-y-1.5">
+                                    <div class="flex justify-between items-center">
+                                        <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">Example Dialog</label>
+                                        <button @click="editFieldAI('mes_example')"
+                                            class="text-[8px] text-blue-400 hover:text-blue-300 font-bold uppercase"
+                                            :disabled="isEditingField">
+                                            <i class="fa-solid mr-1"
+                                                :class="isEditingField && isEditingField.mes_example ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Gen
+                                        </button>
                                     </div>
+                                    <textarea x-model="editingChar.data.mes_example"
+                                        class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-32 outline-none focus:ring-1 focus:ring-blue-500/50 font-mono"
+                                        placeholder="Example dialogue showing character's voice..."></textarea>
+                                </div>
 
-                                    <!-- Multi-Character Capsule -->
-                                    <div class="border-t border-slate-700 pt-3 mt-2">
-                                        <div class="flex justify-between items-center mb-1">
-                                            <label class="text-[9px] text-purple-400 font-black uppercase">Multi-Char
-                                                Capsule</label>
-                                            <div class="flex gap-2">
-                                                <button @click="editCapsuleAI()"
-                                                    class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase"
-                                                    :disabled="isEditingCapsule">
-                                                    <i class="fa-solid mr-1"
-                                                        :class="isEditingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>AI
-                                                    Generate
-                                                </button>
-                                                <button @click="generateCapsule()"
-                                                    class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase"
-                                                    :disabled="isGeneratingCapsule">
-                                                    <i class="fa-solid mr-1"
-                                                        :class="isGeneratingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Auto
-                                                    Generate
-                                                </button>
-                                            </div>
+                                <!-- Multi-Character Capsule -->
+                                <div class="border-t border-slate-700 pt-3 mt-2">
+                                    <div class="flex justify-between items-center mb-1">
+                                        <label class="text-[9px] text-purple-400 font-black uppercase">Multi-Char
+                                            Capsule</label>
+                                        <div class="flex gap-2">
+                                            <button @click="editCapsuleAI()"
+                                                class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase"
+                                                :disabled="isEditingCapsule">
+                                                <i class="fa-solid mr-1"
+                                                    :class="isEditingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>AI
+                                                Generate
+                                            </button>
+                                            <button @click="generateCapsule()"
+                                                class="text-[8px] text-purple-400 hover:text-purple-300 font-bold uppercase"
+                                                :disabled="isGeneratingCapsule">
+                                                <i class="fa-solid mr-1"
+                                                    :class="isGeneratingCapsule ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>Auto
+                                                Generate
+                                            </button>
                                         </div>
-                                        <textarea x-model="editingChar.data.extensions.multi_char_summary"
-                                            class="w-full bg-slate-950 border border-purple-900/50 rounded-lg px-2 py-1.5 text-[10px] h-16 outline-none focus:ring-1 focus:ring-purple-500"
-                                            placeholder="Compact capsule for group chats..."></textarea>
-                                        <p class="text-[8px] text-slate-600 mt-1">Used instead of full description when
-                                            2+ characters are active.</p>
                                     </div>
+                                    <textarea x-model="editingChar.data.extensions.multi_char_summary"
+                                        class="w-full bg-slate-950 border border-purple-900/50 rounded-lg px-2 py-1.5 text-[10px] h-16 outline-none focus:ring-1 focus:ring-purple-500"
+                                        placeholder="Compact capsule for group chats..."></textarea>
+                                    <p class="text-[8px] text-slate-600 mt-1">Used instead of full description when
+                                        2+ characters are active.</p>
                                 </div>
 
                                 <!-- Fixed Save/Cancel Buttons -->
@@ -495,7 +489,7 @@
                         <!-- Tag Filter Bar -->
                         <div x-show="showSidebar === 'characters'" class="space-y-3">
                             <div class="flex gap-2 overflow-x-auto pb-2">
-                                <button @click="filterTags = []"
+                                <button @click="filterTags = []; fetchCharacters()"
                                         :class="filterTags.length === 0 ? 'bg-blue-600' : 'bg-slate-700'"
                                         class="px-3 py-1 rounded-full text-xs whitespace-nowrap hover:opacity-90 transition-all">
                                     All
@@ -671,7 +665,7 @@
                         <!-- Tag Filter Bar -->
                         <div x-show="showSidebar === 'world-info'" class="space-y-3">
                             <div class="flex gap-2 overflow-x-auto pb-2">
-                                <button @click="worldFilterTags = []"
+                                <button @click="worldFilterTags = []; fetchWorldInfo()"
                                         :class="worldFilterTags.length === 0 ? 'bg-green-600' : 'bg-slate-700'"
                                         class="px-3 py-1 rounded-full text-xs whitespace-nowrap hover:opacity-90 transition-all">
                                     All
@@ -2552,6 +2546,7 @@
             isLoading: false,
             isCountingTokens: false,
             tokenCount: 0,
+            editedCharactersThisTurn: [],
             showSidebar: 'none',
             showImagePanel: false,
             activeCharacters: [],
@@ -3731,13 +3726,23 @@
 
             startNewCharacter() {
                 this.editingChar = {
+                    spec: 'chara_card_v2',
+                    spec_version: '2.0',
                     data: {
                         name: 'New',
                         description: '',
-                        first_mes: '',
                         personality: '',
                         scenario: '',
+                        first_mes: '',
+                        mes_example: '',
+                        creator_notes: '',
+                        system_prompt: '',
+                        post_history_instructions: '',
+                        alternate_greetings: [],
+                        character_book: null,
                         tags: [],
+                        creator: '',
+                        character_version: '',
                         extensions: {
                             depth_prompt: { depth: 4, prompt: '' },
                             label_description: '',
@@ -3747,6 +3752,7 @@
                         }
                     }
                 };
+                this.editingTags = [];
             },
 
             startEditCharacter(char) {
@@ -3790,6 +3796,11 @@
                         );
 
                         if (res.data.success) {
+                            const npcRef = this.editingChar.npcId;
+                            if (npcRef && !this.editedCharactersThisTurn.includes(npcRef)) {
+                                this.editedCharactersThisTurn.push(npcRef);
+                                console.log(`[EDIT_TRACK] NPC ${npcRef} marked as edited`);
+                            }
                             this.editingChar = null;
                             await this.loadChatNPCs(chatId);
                             this.showNotification("NPC saved successfully!", "success");
@@ -3805,6 +3816,11 @@
                         // Save as global character
                         const res = await axios.post("/api/characters", this.editingChar);
                         if (res.data.success) {
+                            const charRef = this.editingChar._filename || res.data.filename;
+                            if (charRef && !this.editedCharactersThisTurn.includes(charRef)) {
+                                this.editedCharactersThisTurn.push(charRef);
+                                console.log(`[EDIT_TRACK] Character ${charRef} marked as edited`);
+                            }
                             this.editingChar = null;
                             await this.fetchCharacters();
                             this.showNotification("Character saved successfully!", "success");
@@ -3910,6 +3926,7 @@
                         messages: this.messages,
                         summary: this.summary,
                         characters: this.activeCharactersWithData(),
+                        edited_characters: this.editedCharactersThisTurn,
                         world_info: this.settings.world_info_enabled ? this.activeWI : null,
                         settings: this.settings,
                         mode: mode,
@@ -3957,6 +3974,7 @@
                     });
                 } finally {
                     this.isLoading = false;
+                    this.editedCharactersThisTurn = [];
                     this.scrollToBottom();
                     this.updateTokenCount();
                 }
@@ -3975,6 +3993,7 @@
                         messages: this.messages,
                         summary: this.summary,
                         characters: this.activeCharactersWithData(),
+                        edited_characters: this.editedCharactersThisTurn,
                         world_info: this.settings.world_info_enabled ? this.activeWI : null,
                         settings: this.settings,
                         mode: mode
@@ -4015,6 +4034,7 @@
                     });
                 } finally {
                     this.isLoading = false;
+                    this.editedCharactersThisTurn = [];
                     this.scrollToBottom();
                     this.updateTokenCount();
                 }
@@ -4731,8 +4751,8 @@
                 }
             },
 
-async generateAllFields() {
-                const fields = ['personality', 'body', 'genre', 'tags', 'scenario', 'first_message', 'dialogue_likes', 'dialogue_story'];
+            async generateAllFields() {
+                const fields = ['personality', 'body', 'genre', 'scenario', 'first_message', 'dialogue_likes', 'dialogue_story'];
 
                 if (!this.cardGen.char_name) {
                     alert("Please enter a character name first.");
@@ -4751,7 +4771,7 @@ async generateAllFields() {
 
                 this.isGenLoading = true;
                 this.cardGen.fields.dialogue = '';
-                
+
                 // Track successes and failures
                 let successCount = 0;
                 let failedFields = [];
@@ -4761,7 +4781,7 @@ async generateAllFields() {
                         // Set loading state for this specific field
                         if (!this.cardGen.loading) this.cardGen.loading = {};
                         this.cardGen.loading[f] = true;
-                        
+
                         let contextText = "";
                         if (this.cardGen.source_mode === 'manual') {
                             contextText = this.cardGen.manual_text;
@@ -4776,19 +4796,31 @@ async generateAllFields() {
                             source_mode: this.cardGen.source_mode
                         });
 
-                        if (res.data.success && res.data.text) {
-                            if (f.startsWith('dialogue')) {
-                                if (!this.cardGen.fields.dialogue.includes('<START>')) this.cardGen.fields.dialogue = '';
-                                this.cardGen.fields.dialogue += (this.cardGen.fields.dialogue ? '\n' : '') + '<START>\n' + res.data.text;
+                            if (res.data.success && res.data.text) {
+                                // Check if response is JSON (from 'full' field type)
+                                if (f === 'full' && res.data.text.startsWith('{')) {
+                                    // Parse structured data
+                                    const fullData = JSON.parse(res.data.text);
+
+                                    // Map to correct fields
+                                    this.cardGen.fields.personality = fullData.personality;
+                                    this.cardGen.fields.body = fullData.body;
+                                    this.cardGen.fields.description = fullData.description;
+                                    this.cardGen.fields.scenario = fullData.scenario;
+                                    this.cardGen.fields.first_message = fullData.first_message;
+                                    this.cardGen.fields.genre = fullData.genre;
+                                } else if (f.startsWith('dialogue')) {
+                                    if (!this.cardGen.fields.dialogue.includes('<START>')) this.cardGen.fields.dialogue = '';
+                                    this.cardGen.fields.dialogue += (this.cardGen.fields.dialogue ? '\n' : '') + '<START>\n' + res.data.text;
+                                } else {
+                                    this.cardGen.fields[f] = res.data.text;
+                                }
+                                successCount++;
+                                console.log(`Generated ${f} successfully`);
                             } else {
-                                this.cardGen.fields[f] = res.data.text;
+                                console.error(`Failed to generate ${f}: ${res.data.error || 'Unknown error'}`);
+                                failedFields.push(f);
                             }
-                            successCount++;
-                            console.log(`Generated ${f} successfully`);
-                        } else {
-                            console.error(`Failed to generate ${f}: ${res.data.error || 'Unknown error'}`);
-                            failedFields.push(f);
-                        }
                     } catch (e) {
                         console.error(`Exception generating ${f}:`, e);
                         failedFields.push(f);
@@ -4798,7 +4830,7 @@ async generateAllFields() {
                 }
 
                 this.isGenLoading = false;
-                
+
                 // Show summary notification
                 if (failedFields.length === 0) {
                     this.showNotification(`All ${successCount} fields generated successfully!`, 'success');
@@ -4811,12 +4843,9 @@ async generateAllFields() {
 
             async saveGeneratedCard() {
                 const character_note_parts = [];
-                if (this.cardGen.fields.personality) character_note_parts.push(this.cardGen.fields.personality);
-                if (this.cardGen.fields.body) character_note_parts.push(this.cardGen.fields.body);
 
                 const metadata = [];
                 if (this.cardGen.fields.genre) metadata.push(`Genre: ${this.cardGen.fields.genre}`);
-                if (this.cardGen.fields.tags) metadata.push(`Tags: ${this.cardGen.fields.tags}`);
                 if (metadata.length > 0) character_note_parts.push(`[${metadata.join('; ')}]`);
 
                 const character_note = character_note_parts.join('\n');
@@ -4826,11 +4855,11 @@ async generateAllFields() {
                     spec_version: "2.0",
                     data: {
                         name: this.cardGen.char_name,
-                        description: this.cardGen.fields.dialogue,
-                        personality: "",
+                        description: this.cardGen.fields.body || "",
+                        personality: this.cardGen.fields.personality || "",
                         scenario: this.cardGen.fields.scenario || "",
                         first_mes: this.cardGen.fields.first_message,
-                        mes_example: "",
+                        mes_example: this.cardGen.fields.dialogue || "",
                         creator_notes: character_note,
                         system_prompt: "",
                         post_history_instructions: "",
@@ -4840,7 +4869,7 @@ async generateAllFields() {
                         creator: "",
                         character_version: "",
                         extensions: {
-                            depth_prompt: { prompt: character_note, depth: 4 },
+                            depth_prompt: { prompt: "", depth: 4 },
                             danbooru_tag: '',
                             label_description: ''
                         }
@@ -5080,7 +5109,11 @@ async generateAllFields() {
                     });
 
                     if (res.data.success) {
-                        this.editingChar.data[field] = res.data.text;
+                        if (field === 'body') {
+                            this.editingChar.data.description = res.data.text;
+                        } else {
+                            this.editingChar.data[field] = res.data.text;
+                        }
                         alert(`${field} updated!`);
                         // Reload characters from backend to get updated data
                         await this.fetchCharacters();

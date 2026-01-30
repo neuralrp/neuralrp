@@ -361,6 +361,10 @@ def clean_llm_response(text: str) -> str:
     # Only if they're at the end and look like the start of a marker
     text = re.sub(r'\n?\[(?:REINFORCEMENT|WORLD)?\s*$', '', text, flags=re.IGNORECASE)
     
+    # Remove generation parameter metadata that may leak into response
+    # Matches patterns like "max_length": 400, "temperature": 0.85, "stop_sequence": [...]
+    text = re.sub(r'"(?:max_length|temperature|stop_sequence|top_p|top_k|repetition_penalty)".*$', '', text, flags=re.DOTALL)
+    
     # Clean up any resulting extra whitespace
     text = text.strip()
     
@@ -417,6 +421,7 @@ class PromptRequest(BaseModel):
     mode: Optional[str] = "narrator"  # "narrator" or "focus:{CharacterName}"
     metadata: Optional[Dict[str, Any]] = None
     chat_id: Optional[str] = None  # For autosave tracking
+    edited_characters: List[str] = []  # Character/NPC IDs edited this turn
 
 class SDParams(BaseModel):
     prompt: str
@@ -450,6 +455,214 @@ class CardGenRequest(BaseModel):
     chat_id: Optional[str] = None  # Chat ID for NPC creation
     save_as: Optional[str] = "global" # "global" (default) or "local_npc"
 
+async def generate_dialogue_for_edit(
+    char_name: str,
+    personality: str = "",
+    depth_prompt: str = "",
+    scenario: str = "",
+    current_example: str = ""
+) -> str:
+    """Generate example dialogue using existing prompt format from NPC generation.
+
+    Reuses DIALOGUE_EXAMPLES format that generates 2-3 dialogue exchanges
+    with <START> markers, {{char}}/{{user}} placeholders, and *actions*/"speech".
+
+    Args:
+        char_name: Character name for placeholder
+        personality: Personality traits for voice reference
+        depth_prompt: Additional traits/extensions
+        scenario: Character's scenario for context
+        current_example: Existing dialogue text (if any) to use as style reference
+
+    Returns:
+        Generated dialogue exchanges in DIALOGUE_EXAMPLES format
+    """
+    system = "You are a creative character designer. Generate detailed, engaging character information in a structured format."
+
+    prompt = f"""Create example dialogue for this character:
+
+Name: {char_name}
+"""
+    if personality:
+        prompt += f"Personality: {personality}\n"
+    if scenario:
+        prompt += f"Scenario: {scenario}\n"
+    if depth_prompt:
+        prompt += f"Additional Traits: {depth_prompt}\n"
+    if current_example:
+        prompt += f"\nCurrent Example (use as reference for style):\n{current_example}\n"
+
+    prompt += """
+Generate 2-3 dialogue exchanges in this exact format:
+
+DIALOGUE_EXAMPLES:
+<START>
+{{user}}: [ask a relevant question]
+{{char}}: *[action]* "[response in character]"
+
+<START>
+{{user}}: [ask another relevant question]
+{{char}}: *[action]* "[response in character]"
+
+Output ONLY DIALOGUE_EXAMPLES section, nothing else."""
+
+    result = await call_llm_helper(system, prompt, 600)
+    return result.strip()
+
+async def generate_personality_for_edit(
+    char_name: str,
+    current_personality: str,
+    depth_prompt: str = "",
+    scenario: str = ""
+) -> str:
+    """Generate or expand personality field using PList format.
+
+    Args:
+        char_name: Character name for PList label
+        current_personality: Existing personality traits (if any)
+        depth_prompt: Additional traits for reference
+        scenario: Character scenario for context
+
+    Returns:
+        PList-formatted personality string
+    """
+    system = "You are an expert at analyzing characters and writing roleplay personality traits."
+
+    prompt = f"""Generate personality traits for {char_name}:
+"""
+    if current_personality:
+        prompt += f"Current Personality: {current_personality}\n"
+    if scenario:
+        prompt += f"Scenario: {scenario}\n"
+    if depth_prompt:
+        prompt += f"Additional Traits: {depth_prompt}\n"
+
+    prompt += """
+Generate or expand personality traits in PList format:
+[{char_name}'s Personality= "trait1", "trait2", "trait3", ...]
+
+Include 4-6 traits. If current personality is provided, expand with additional compatible traits.
+Output ONLY personality line, nothing else."""
+
+    result = await call_llm_helper(system, prompt, 300)
+    return result.strip()
+
+async def generate_scenario_for_edit(
+    char_name: str,
+    current_scenario: str,
+    personality: str = "",
+    depth_prompt: str = ""
+) -> str:
+    """Generate or expand scenario field.
+
+    Args:
+        char_name: Character name
+        current_scenario: Existing scenario (if any)
+        personality: Personality traits for consistency
+        depth_prompt: Additional traits for context
+
+    Returns:
+        Single sentence scenario string
+    """
+    system = "You are an expert at writing roleplay scenarios."
+
+    prompt = f"""Generate a scenario for {char_name}:
+"""
+    if current_scenario:
+        prompt += f"Current Scenario: {current_scenario}\n"
+    if personality:
+        prompt += f"Personality: {personality}\n"
+    if depth_prompt:
+        prompt += f"Additional Traits: {depth_prompt}\n"
+
+    prompt += """
+Generate or expand scenario as a single sentence describing the situation.
+Make it engaging and relevant to character's traits.
+If current scenario is provided, improve or expand it.
+Output ONLY the scenario sentence, nothing else."""
+
+    result = await call_llm_helper(system, prompt, 200)
+    return result.strip()
+
+async def generate_first_message_for_edit(
+    char_name: str,
+    current_first_msg: str,
+    personality: str = "",
+    scenario: str = "",
+    depth_prompt: str = ""
+) -> str:
+    """Generate or expand first message.
+
+    Args:
+        char_name: Character name for placeholder
+        current_first_msg: Existing first message (if any)
+        personality: Personality traits for voice
+        scenario: Scenario context
+        depth_prompt: Additional traits for reference
+
+    Returns:
+        First message string with *actions* and "speech"
+    """
+    system = "You are an expert at writing engaging roleplay opening messages."
+
+    prompt = f"""Generate a first message for {char_name}:
+"""
+    if current_first_msg:
+        prompt += f"Current First Message: {current_first_msg}\n"
+    if personality:
+        prompt += f"Personality: {personality}\n"
+    if scenario:
+        prompt += f"Scenario: {scenario}\n"
+    if depth_prompt:
+        prompt += f"Additional Traits: {depth_prompt}\n"
+
+    prompt += """
+Generate or expand first message as 2-3 sentences that introduce the character and establish the scenario.
+Include actions in asterisks *like this* and dialogue in quotes.
+If current first message is provided, improve or expand it.
+Output ONLY the first message, nothing else."""
+
+    result = await call_llm_helper(system, prompt, 300)
+    return result.strip()
+
+async def generate_body_for_edit(
+    char_name: str,
+    current_body: str,
+    personality: str = "",
+    scenario: str = ""
+) -> str:
+    """Generate or expand physical description using PList format.
+
+    Args:
+        char_name: Character name for PList label
+        current_body: Existing physical description (if any)
+        personality: Personality traits for consistency
+        scenario: Scenario context
+
+    Returns:
+        PList-formatted physical description string
+    """
+    system = "You are an expert at analyzing characters and writing physical descriptions."
+
+    prompt = f"""Generate physical description for {char_name}:
+"""
+    if current_body:
+        prompt += f"Current Body: {current_body}\n"
+    if personality:
+        prompt += f"Personality: {personality}\n"
+    if scenario:
+        prompt += f"Scenario: {scenario}\n"
+
+    prompt += """
+Generate or expand physical body description in PList format:
+[{char_name}'s body= "feature1", "feature2", "feature3", ...]
+
+Include appearance, clothing, distinctive features. If current body is provided, expand with additional details.
+Output ONLY the body line, nothing else."""
+
+    result = await call_llm_helper(system, prompt, 300)
+    return result.strip()
+
 class CapsuleGenRequest(BaseModel):
     char_name: str
     description: str
@@ -474,7 +687,7 @@ class WorldAddEntryRequest(BaseModel):
 # Editing Models
 class CharacterEditRequest(BaseModel):
     filename: str
-    field: str  # personality, body, dialogue, genre, tags, scenario, first_message
+    field: str  # personality, body, dialogue, genre, tags, scenario, first_message, mes_example
     new_value: str
     context: Optional[str] = ""  # Optional context for AI-assisted editing
 
@@ -1619,8 +1832,60 @@ def sync_world_from_json(world_name: str) -> Dict[str, int]:
     return result
 
 
-def import_characters_json_files(force: bool = False) -> int:
-    """Import character JSON files to database.
+def normalize_character_v2(char_data: dict) -> dict:
+    """Ensure character card conforms to SillyTavern V2 spec.
+    Adds missing fields with proper defaults.
+    
+    Args:
+        char_data: Character dictionary (may or may not have spec wrapper)
+    
+    Returns:
+        Normalized character data with all V2 fields present.
+    """
+    # Ensure spec wrapper
+    if 'spec' not in char_data:
+        char_data['spec'] = 'chara_card_v2'
+    if 'spec_version' not in char_data:
+        char_data['spec_version'] = '2.0'
+    
+    data = char_data.setdefault('data', {})
+    
+    # Required string fields (empty string default)
+    string_fields = [
+        'name', 'description', 'personality', 'scenario', 
+        'first_mes', 'mes_example', 'creator_notes', 
+        'system_prompt', 'post_history_instructions',
+        'creator', 'character_version'
+    ]
+    for field in string_fields:
+        if field not in data or data[field] is None:
+            data[field] = ''
+    
+    # Required array fields
+    if 'alternate_greetings' not in data or data['alternate_greetings'] is None:
+        data['alternate_greetings'] = []
+    
+    if 'tags' not in data or data['tags'] is None:
+        data['tags'] = []
+    
+    # Required null field
+    if 'character_book' not in data:
+        data['character_book'] = None
+    
+    # Extensions (preserve existing, add defaults for missing)
+    extensions = data.setdefault('extensions', {})
+    if 'multi_char_summary' not in extensions:
+        extensions['multi_char_summary'] = ''
+    if 'depth_prompt' not in extensions:
+        extensions['depth_prompt'] = {'depth': 4, 'prompt': ''}
+    elif 'prompt' not in extensions['depth_prompt']:
+        extensions['depth_prompt']['prompt'] = ''
+    
+    return char_data
+
+
+async def import_characters_json_files_async(force: bool = False) -> int:
+    """Import character JSON files to database with capsule auto-generation.
     
     Args:
         force: If True, reimport even if character exists (overwrites DB)
@@ -1642,6 +1907,61 @@ def import_characters_json_files(force: bool = False) -> int:
                 if existing is None or force:
                     with open(file_path, "r", encoding="utf-8") as cf:
                         char_data = json.load(cf)
+                    
+                    # Normalize to V2 spec
+                    char_data = normalize_character_v2(char_data)
+                    
+                    # Auto-generate capsule if missing
+                    extensions = char_data.get('data', {}).get('extensions', {})
+                    if not extensions.get('multi_char_summary'):
+                        name = char_data.get('data', {}).get('name', 'Unknown')
+                        description = char_data.get('data', {}).get('description', '')
+                        depth_prompt = extensions.get('depth_prompt', {}).get('prompt', '')
+                        
+                        try:
+                            capsule = await generate_capsule_for_character(name, description, depth_prompt)
+                            char_data['data']['extensions']['multi_char_summary'] = capsule
+                            print(f"Auto-generated capsule for {name}")
+                        except Exception as e:
+                            print(f"Failed to generate capsule for {name}: {e}")
+                    
+                    if db_save_character(char_data, f):
+                        import_count += 1
+                        print(f"Imported character: {f}")
+            except Exception as e:
+                print(f"Failed to import character {f}: {e}")
+    
+    if import_count > 0:
+        print(f"Character import complete: {import_count} characters")
+    
+    return import_count
+
+
+def import_characters_json_files(force: bool = False) -> int:
+    """Sync wrapper for async import (for startup compatibility).
+    
+    Note: Capsule generation is skipped during synchronous startup import
+    to avoid slow startup. Capsules will be generated on-demand during
+    context assembly if needed.
+    """
+    import_count = 0
+    char_dir = os.path.join(DATA_DIR, "characters")
+    
+    if not os.path.exists(char_dir):
+        return 0
+    
+    for f in os.listdir(char_dir):
+        if f.endswith(".json") and f != ".gitkeep":
+            file_path = os.path.join(char_dir, f)
+            try:
+                existing = db_get_character(f)
+                if existing is None or force:
+                    with open(file_path, "r", encoding="utf-8") as cf:
+                        char_data = json.load(cf)
+                    
+                    # Normalize to V2 spec
+                    char_data = normalize_character_v2(char_data)
+                    
                     if db_save_character(char_data, f):
                         import_count += 1
                         print(f"Imported character: {f}")
@@ -1994,6 +2314,87 @@ def character_has_speaker(messages: List[ChatMessage], char_name: str) -> bool:
             return True
     return False
 
+def normalize_string_for_comparison(s: str) -> str:
+    """Normalize a string for robust comparison.
+    
+    Handles common formatting differences that can occur between
+    database storage and frontend message handling.
+    """
+    if not s:
+        return ""
+    
+    # Strip leading/trailing whitespace
+    normalized = s.strip()
+    
+    # Normalize line breaks (convert \r\n to \n)
+    normalized = normalized.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # Normalize multiple consecutive spaces to single space
+    normalized = ' '.join(normalized.split())
+    
+    return normalized
+
+def is_first_message_auto_added(messages: List[ChatMessage], char_obj: dict) -> bool:
+    """Check if the first assistant message is character's auto-added first_mes.
+    
+    This handles the edge case where frontend adds character's first_mes
+    to messages before any real inference has happened.
+    
+    Returns True if:
+    - Only one message exists AND it's the auto-added first_mes (original behavior), OR
+    - First assistant message exists AND it matches character's first_mes (new behavior for multi-message case)
+    
+    Uses normalized comparison to handle formatting differences while
+    maintaining speaker name precision.
+    """
+    if len(messages) == 0:
+        return False
+    
+    # Get character's first message and name
+    char_name = get_character_name(char_obj)
+    char_first_mes = char_obj.get("data", {}).get("first_mes", "")
+    
+    # Empty first_mes means it wasn't auto-added
+    if not char_first_mes:
+        return False
+    
+    # Find the first assistant message in the sequence
+    first_assistant_msg = None
+    for msg in messages:
+        if msg.role == "assistant":
+            first_assistant_msg = msg
+            break
+    
+    if not first_assistant_msg:
+        return False
+    
+    # Skip Visual System messages
+    if first_assistant_msg.speaker == "Visual System":
+        return False
+    
+    # Check if first assistant message has speaker matching character
+    speaker_matches = first_assistant_msg.speaker == char_name
+    if not speaker_matches:
+        return False
+    
+    # Normalize and compare content
+    normalized_msg_content = normalize_string_for_comparison(first_assistant_msg.content)
+    normalized_char_first_mes = normalize_string_for_comparison(char_first_mes)
+    
+    content_matches = normalized_msg_content == normalized_char_first_mes
+    
+    # Debug logging
+    if len(messages) == 1 and content_matches:
+        print(f"[AUTO_FIRST_MES] Single-message detection: {char_name}'s first_mes detected")
+    elif len(messages) > 1 and content_matches:
+        print(f"[AUTO_FIRST_MES] Extended detection: First assistant message matches {char_name}'s first_mes (total messages: {len(messages)})")
+    elif speaker_matches and not content_matches:
+        print(f"[DEBUG] First message detection: Speaker matched '{char_name}' but content mismatch")
+        print(f"[DEBUG]   Message content (first 100 chars): {normalized_msg_content[:100]}...")
+        print(f"[DEBUG]   Character first_mes (first 100 chars): {normalized_char_first_mes[:100]}...")
+    
+    return content_matches
+
 # Prompt Construction Engine
 def construct_prompt(request: PromptRequest):
     settings = request.settings
@@ -2153,41 +2554,123 @@ def construct_prompt(request: PromptRequest):
     
     # === 6. CHARACTER PROFILES (characters exist in the world context) ===
     reinforcement_chunks = []
+    chars_injected_this_turn = set()  # Track characters injected this turn to avoid duplication with reinforcement
+    
+    # Build set of edited character references from request
+    edited_char_refs = set(request.edited_characters) if request.edited_characters else set()
+    
+    # Determine chat mode DYNAMICALLY (based on current active characters, not first turn)
+    # This handles mid-chat character additions/removals
+    is_group_chat = len(request.characters) >= 2
+    is_single_char = len(request.characters) == 1
     
     for char_obj in request.characters:
         data = char_obj.get("data", {})
-        name = data.get("name", "Unknown")
+        name = get_character_name(char_obj)
         description = data.get("description", "")
-        depth_prompt = data.get("extensions", {}).get("depth_prompt", {}).get("prompt", "")
+        personality = data.get("personality", "")
+        scenario = data.get("scenario", "")
+        mes_example = data.get("mes_example", "")
         multi_char_summary = data.get("extensions", {}).get("multi_char_summary", "")
+        
+        # Get character reference for edit checking
+        char_ref = char_obj.get("_filename") or char_obj.get("entity_id")
         
         # Check if this character is an NPC
         is_npc = char_obj.get("is_npc", False)
         
-        # Check if character has already appeared in the chat
+        # Check if character has appeared in real conversation
         char_has_appeared = character_has_speaker(request.messages, name)
         
-        if is_group_chat and multi_char_summary:
-            # Group chat mode: use capsule on first appearance or turn 1 only
-            if not char_has_appeared or len(request.messages) == 0:
+        # Special case: if first assistant message is auto-added first_mes, treat as "not appeared"
+        # This handles both single-message and multi-message cases (e.g., [first_mes, user_msg])
+        is_auto_first_mes_only = is_first_message_auto_added(request.messages, char_obj)
+        
+        # Check if this character was edited this turn
+        is_edited_this_turn = char_ref in edited_char_refs
+        
+        # Determine if injection is needed
+        needs_injection = (not char_has_appeared) or is_auto_first_mes_only or is_edited_this_turn
+        
+        # === CHARACTER INJECTION LOGIC ===
+        if needs_injection:
+            # Log injection reason for debugging
+            injection_reason = []
+            if not char_has_appeared:
+                injection_reason.append("first_appearance")
+            if is_auto_first_mes_only:
+                injection_reason.append("auto_first_mes")
+            if is_edited_this_turn:
+                injection_reason.append("edited")
+            print(f"[CONTEXT] {name} injection needed: {', '.join(injection_reason)}")
+            
+            if is_edited_this_turn:
+                # EDIT OVERRIDE: Always inject full card regardless of chat mode
+                label = "[NPC]" if is_npc else "[Character]"
+                print(f"[CONTEXT] {label} {name} full card injection (EDITED)")
+                
+                full_prompt += f"### Character Profile: {name}\n"
+                if description:
+                    full_prompt += f"{description}\n"
+                if personality:
+                    full_prompt += f"{personality}\n"
+                if scenario:
+                    full_prompt += f"{scenario}\n"
+                if mes_example:
+                    full_prompt += f"Example dialogue:\n{mes_example}\n"
+                
+                chars_injected_this_turn.add(name)
+                
+            elif is_single_char:
+                # Single character: full card injection
+                label = "[NPC]" if is_npc else "[Character]"
+                print(f"[CONTEXT] {label} {name} full card injection")
+                
+                full_prompt += f"### Character Profile: {name}\n"
+                if description:
+                    full_prompt += f"{description}\n"
+                if personality:
+                    full_prompt += f"{personality}\n"
+                if scenario:
+                    full_prompt += f"{scenario}\n"
+                if mes_example:
+                    full_prompt += f"Example dialogue:\n{mes_example}\n"
+                
+                chars_injected_this_turn.add(name)
+                
+            elif is_group_chat and multi_char_summary:
+                # Group chat: capsule injection
                 label = "[NPC]" if is_npc else "[Character]"
                 print(f"[CONTEXT] {label} {name} introduced (capsule)")
                 full_prompt += f"### [{name}]: {multi_char_summary}\n"
-            
-            # Always add to reinforcement_chunks for periodic reinforcement
-            reinforcement_chunks.append(f"[{name}]: {multi_char_summary}")
+                
+                chars_injected_this_turn.add(name)
+                
+            elif is_group_chat and not multi_char_summary:
+                # Group chat but character has no capsule - skip with warning
+                print(f"[CONTEXT] Warning: {name} in group chat but has no capsule, skipping injection")
         else:
-            # Single character: full card on first turn only
-            if len(request.messages) == 0:
-                label = "[NPC]" if is_npc else "[Character]"
-                print(f"[CONTEXT] {label} {name} full card on first turn")
-                full_prompt += f"### Character Profile: {name}\n{description}\n"
-                if depth_prompt:
-                    full_prompt += f"### Context for {name}: {depth_prompt}\n"
+            # Character not injected - log reason for debugging
+            print(f"[CONTEXT] {name} NOT injected (char_has_appeared={char_has_appeared}, auto_first_mes={is_auto_first_mes_only}, edited={is_edited_this_turn})")
+        
+        # === REINFORCEMENT CHUNK PREPARATION ===
+        if is_group_chat:
+            # Group chat: always use capsules for reinforcement
+            if multi_char_summary:
+                reinforcement_chunks.append(f"[{name}]: {multi_char_summary}")
+            else:
+                print(f"[REINFORCEMENT] Warning: {name} has no capsule, skipping reinforcement")
+        else:
+            # Single character: use personality + description
+            reinforcement_parts = []
+            if personality:
+                reinforcement_parts.append(personality)
+            if description:
+                reinforcement_parts.append(description)
             
-            # Add depth_prompt to reinforcement_chunks for periodic reinforcement
-            if depth_prompt:
-                reinforcement_chunks.append(depth_prompt)
+            if reinforcement_parts:
+                reinforcement_content = " ".join(reinforcement_parts)
+                reinforcement_chunks.append(reinforcement_content)
 
     # === 7. CHAT HISTORY (with reinforcement) ===
     full_prompt += "\n### Chat History:\n"
@@ -2202,8 +2685,27 @@ def construct_prompt(request: PromptRequest):
         print(f"[REINFORCEMENT] Turn {current_turn}: Reinforcing character profiles")
         
         if reinforcement_chunks:
-            # Character reinforcement - reinforce both global characters AND active NPCs
+            # Filter out characters that were just injected this turn to avoid duplication
+            filtered_chunks = []
             for chunk in reinforcement_chunks:
+                # Extract character name from chunk
+                # Format: "[{name}]: {summary}" for capsules
+                # Format: "personality description" for single char (no name prefix)
+                if chunk.startswith("["):
+                    # Capsule format: extract name
+                    name_match = chunk.split("]:")[0].replace("[", "")
+                    char_name = name_match.strip()
+                else:
+                    # Single char format: skip filtering (no name prefix)
+                    char_name = None
+                
+                # Skip reinforcement if character was just injected this turn
+                if char_name and char_name in chars_injected_this_turn:
+                    print(f"[REINFORCEMENT] Skipping {char_name} (injected this turn)")
+                    continue
+                
+                filtered_chunks.append(chunk)
+                
                 # Determine if this is an NPC based on chunk format
                 # NPCs are in format "[{name}]: {summary}" from capsules
                 # or depth_prompt from full profiles
@@ -2216,7 +2718,8 @@ def construct_prompt(request: PromptRequest):
                 label = "[NPC]" if is_npc_reinforcement else "[Character]"
                 print(f"[REINFORCEMENT] {label} profile reinforced: {chunk[:80]}...")
             
-            full_prompt += "[REINFORCEMENT: " + " | ".join(reinforcement_chunks) + "]\n"
+            if filtered_chunks:
+                full_prompt += "[REINFORCEMENT: " + " | ".join(filtered_chunks) + "]\n"
         elif is_narrator_mode:
             # Narrator reinforcement
             print(f"[REINFORCEMENT] Narrator mode reinforced")
@@ -2426,10 +2929,10 @@ async def generate_card_field(req: CardGenRequest):
             Generate the following in this exact format:
 
             PERSONALITY_TRAITS:
-            [List 4-6 personality traits, comma-separated, like: "brave", "loyal", "gruff"]
+            [List 4-6 personality traits, comma-separated]
 
             PHYSICAL_TRAITS:
-            [List 4-6 physical/body traits, comma-separated, like: "tall", "muscular", "scarred"]
+            [List 4-6 physical/body traits, comma-separated]
 
             SCENARIO:
             [Write a scenario describing the setting/situation where you meet this character]
@@ -2437,14 +2940,19 @@ async def generate_card_field(req: CardGenRequest):
             FIRST_MESSAGE:
             [Write the character's first message/greeting using *asterisks* for actions and "quotes" for speech]
 
-            FULL_DESCRIPTION:
-            [Write a detailed description of the character's appearance, background, and mannerisms]
+            DIALOGUE_EXAMPLES:
+            [Write 2-3 dialogue exchanges using this exact format]
+
+            <START>
+            {{user}}: [ask a relevant question]
+            {{char}}: *[action]* "[response in character]"
+
+            <START>
+            {{user}}: [ask another relevant question]
+            {{char}}: *[action]* "[response in character]"
 
             GENRE:
-            [One word genre like: Fantasy, SciFi, Modern, etc.]
-
-            TAGS:
-            [3-5 relevant tags, comma-separated]"""
+            [One word genre like: Fantasy, SciFi, Modern, etc.]"""
 
             try:
                 print(f"[NPC_CREATE] Step 6a: Starting LLM API call")
@@ -2463,6 +2971,7 @@ async def generate_card_field(req: CardGenRequest):
                 physical_traits = []
                 scenario = f"You encounter {char_name}."
                 first_message = f"*{char_name} looks at you.*"
+                dialogue_examples = "<START>\n{{user}}: \"Hello, nice to meet you.\"\n{{char}}: *" + char_name + " nods politely.* \"Pleasure to meet you as well.\"\n\n<START>\n{{user}}: \"Can you tell me about yourself?\"\n{{char}}: *" + char_name + " considers for a moment.* \"I am " + char_name + ", and I'm here to help.\""
                 genre = "General"
                 tags = ["generated", "npc"]
                 
@@ -2470,37 +2979,42 @@ async def generate_card_field(req: CardGenRequest):
                 print(f"[NPC_CREATE] Step 6b: LLM raw response (first 500 chars): {llm_result[:500] if llm_result and len(llm_result) > 500 else llm_result}...")
                 
                 # Extract sections from LLM response
-                if "FULL_DESCRIPTION:" in llm_result:
-                    description = llm_result.split("FULL_DESCRIPTION:")[1].strip().split("\n\n")[0]
-                    print(f"[NPC_CREATE] Extracted FULL_DESCRIPTION: {description[:80]}...")
-                
                 if "PERSONALITY_TRAITS:" in llm_result:
                     traits_text = llm_result.split("PERSONALITY_TRAITS:")[1].split("PHYSICAL_TRAITS:")[0].strip()
                     personality_traits = [t.strip().strip('"').strip("'") for t in traits_text.split(",") if t.strip()]
                     print(f"[NPC_CREATE] Extracted PERSONALITY_TRAITS: {len(personality_traits)} traits")
-                
+
                 if "PHYSICAL_TRAITS:" in llm_result:
                     physical_text = llm_result.split("PHYSICAL_TRAITS:")[1].split("SCENARIO:")[0].strip()
                     physical_traits = [t.strip().strip('"').strip("'") for t in physical_text.split(",") if t.strip()]
                     print(f"[NPC_CREATE] Extracted PHYSICAL_TRAITS: {len(physical_traits)} traits")
-                
+
                 if "SCENARIO:" in llm_result:
                     scenario = llm_result.split("SCENARIO:")[1].split("FIRST_MESSAGE:")[0].strip()
                     print(f"[NPC_CREATE] Extracted SCENARIO: {scenario[:80]}...")
-                
+
                 if "FIRST_MESSAGE:" in llm_result:
-                    first_message = llm_result.split("FIRST_MESSAGE:")[1].split("FULL_DESCRIPTION:")[0].strip()
+                    first_message = llm_result.split("FIRST_MESSAGE:")[1].split("DIALOGUE_EXAMPLES:")[0].strip()
                     print(f"[NPC_CREATE] Extracted FIRST_MESSAGE: {first_message[:80]}...")
-                
+
+                # Extract DIALOGUE_EXAMPLES for mes_example
+                if "DIALOGUE_EXAMPLES:" in llm_result:
+                    dialogue_examples = llm_result.split("DIALOGUE_EXAMPLES:")[1].split("GENRE:")[0].strip()
+                    print(f"[NPC_CREATE] Extracted DIALOGUE_EXAMPLES: {len(dialogue_examples)} chars")
+                else:
+                    # Fallback: Generate default dialogue examples
+                    dialogue_examples = "<START>\n"
+                    dialogue_examples += "{{user}}: \"Hello, nice to meet you.\"\n"
+                    dialogue_examples += "{{char}}: *" + char_name + " nods politely.* \"Pleasure to meet you as well.\"\n\n"
+                    dialogue_examples += "<START>\n"
+                    dialogue_examples += "{{user}}: \"Can you tell me about yourself?\"\n"
+                    dialogue_examples += "{{char}}: *" + char_name + " considers for a moment.* \"I am " + char_name + ", and I'm here to help.\""
+                    print(f"[NPC_CREATE] DIALOGUE_EXAMPLES not found, using fallback")
+
                 if "GENRE:" in llm_result:
-                    genre = llm_result.split("GENRE:")[1].split("TAGS:")[0].strip()
+                    genre = llm_result.split("GENRE:")[1].strip().split("\n")[0]
                     print(f"[NPC_CREATE] Extracted GENRE: {genre}")
-                
-                if "TAGS:" in llm_result:
-                    tags_text = llm_result.split("TAGS:")[1].strip().split("\n")[0]
-                    tags = [t.strip() for t in tags_text.split(",") if t.strip()]
-                    print(f"[NPC_CREATE] Extracted TAGS: {tags}")
-                
+
                 print(f"[NPC_CREATE] Step 6c: LLM generation successful - all fields parsed")
                 
             except Exception as e:
@@ -2525,37 +3039,43 @@ async def generate_card_field(req: CardGenRequest):
             print(f"[NPC_CREATE] Step 7d: Physical traits: {physical_traits}")
             print(f"[NPC_CREATE] Step 7e: Scenario: {scenario[:80]}...")
             print(f"[NPC_CREATE] Step 7f: First message: {first_message[:80]}...")
-            print(f"[NPC_CREATE] Step 7g: Genre: {genre}, Tags: {tags}")
+            print(f"[NPC_CREATE] Step 7g: Genre: {genre}")
             
-            # Build PList format for creator_notes and depth_prompt
-            personality_plist = ', '.join([f'"{trait}"' for trait in personality_traits])
-            body_plist = ', '.join([f'"{trait}"' for trait in physical_traits]) if physical_traits else '"mysterious figure"'
-            tags_list = ', '.join(tags)
-
-            plist_format = f"""[{char_name}'s Personality= {personality_plist}]
-            [{char_name}'s body= {body_plist}]
-            [Genre: {genre}; Tags: {tags_list}]"""
-
+            # Build SillyTavern-compatible character data
+            
             # Add source information to creator_notes
             source_info = f"Created from {req.source_mode}: {user_input[:100]}\n\n" if req.source_mode else ""
+            
+            # Build personality string (comma-separated for SillyTavern)
+            personality_string = ', '.join(personality_traits) if personality_traits else ""
+
+            # Build body description with char_name prefix
+            body_desc = ""
+            if physical_traits:
+                body_desc = f"{char_name} is {', '.join(physical_traits)}."
+
+            # Build creator_notes (only genre, no PList)
+            creator_notes = source_info
+            if genre:
+                creator_notes += f"[Genre: {genre}]"
 
             # Create full character card with generated data
             character_data = {
                 "name": char_name,
-                "description": description,
-                "personality": "",  # Empty per your example
+                "description": body_desc,
+                "personality": personality_string,
                 "scenario": scenario,
                 "first_mes": first_message,
-                "mes_example": "",
-                "creator_notes": source_info + plist_format,
+                "mes_example": dialogue_examples,
+                "creator_notes": creator_notes,
                 "system_prompt": "",
                 "post_history_instructions": "",
                 "alternate_greetings": [],
-                "tags": tags,
+                "tags": [],  # Empty - manual tags only
                 "creator": "NeuralRP NPC Generator",
                 "extensions": {
                     "depth_prompt": {
-                        "prompt": plist_format,
+                        "prompt": "",
                         "depth": 4
                     },
                     "talkativeness": 100
@@ -2637,7 +3157,7 @@ async def generate_card_field(req: CardGenRequest):
     try:
         if field_type == 'personality':
             system = f"You are an expert at analyzing characters and writing roleplay personality traits."
-            prompt = f"""Based on the {source_desc}, identify {char_name}'s personality traits.
+            prompt = f"""Based on {source_desc}, identify {char_name}'s personality traits.
 Convert them into a PList personality array format.
 Use this exact format: [{char_name}'s Personality= "trait1", "trait2", "trait3", ...]
 
@@ -2649,7 +3169,7 @@ Only output the personality array line, nothing else."""
             
         elif field_type == 'body':
             system = f"You are an expert at analyzing characters and writing physical descriptions."
-            prompt = f"""Based on the {source_desc}, identify {char_name}'s physical features.
+            prompt = f"""Based on {source_desc}, identify {char_name}'s physical features.
 Convert them into a PList body array format.
 Use this exact format: [{char_name}'s body= "feature1", "feature2", "feature3", ...]
 
@@ -2663,7 +3183,7 @@ Only output the body array line, nothing else."""
             # Handle 'full' field type for both chat and manual source modes
             # This generates a complete character card from the provided context
             system = "You are a creative character designer. Generate detailed, engaging character information in a structured format."
-            
+
             prompt = f"""Create a character card for this character:
 
 Name: {char_name}
@@ -2672,10 +3192,13 @@ Description: {user_input}
 Generate the following in this exact format:
 
 PERSONALITY_TRAITS:
-[List 4-6 personality traits, comma-separated, like: "brave", "loyal", "gruff"]
+[List 4-6 personality traits, comma-separated]
 
 PHYSICAL_TRAITS:
-[List 4-6 physical/body traits, comma-separated, like: "tall", "muscular", "scarred"]
+[List 4-6 physical/body traits, comma-separated]
+
+DESCRIPTION:
+[Write a detailed description of the character's appearance, background, and mannerisms]
 
 SCENARIO:
 [Write a scenario describing the setting/situation where you meet this character]
@@ -2683,14 +3206,8 @@ SCENARIO:
 FIRST_MESSAGE:
 [Write the character's first message/greeting using *asterisks* for actions and "quotes" for speech]
 
-FULL_DESCRIPTION:
-[Write a detailed description of the character's appearance, background, and mannerisms]
-
 GENRE:
-[One word genre like: Fantasy, SciFi, Modern, etc.]
-
-TAGS:
-[3-5 relevant tags, comma-separated]"""
+[One word genre like: Fantasy, SciFi, Modern, etc.]"""
 
             result = await call_llm_helper(system, prompt, max_tokens=1000)
             
@@ -2770,20 +3287,10 @@ Use markdown format with *actions* and "speech". Make it immersive. Only output 
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# PList Formatting Helper Functions
+# Character Card Field Formatting Helper Functions
 def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) -> str:
     """Extract PList-formatted content from LLM output and ensure proper format."""
     import re
-    
-    # Handle XML plist format (fallback if LLM uses XML instead of bracketed format)
-    if '<plist>' in result or '<key>' in result:
-        # Extract content from <string> tags within <dict> structures
-        string_matches = re.findall(r'<string>([^<]+)</string>', result)
-        if string_matches:
-            # Format extracted content as bracketed PList entries
-            lines = [f'[Content: {text.strip()}]' for text in string_matches if text.strip()]
-            if lines:
-                return '\n'.join(lines)
     
     # If result already starts with bracket, it's likely PList formatted
     if result.strip().startswith('['):
@@ -2803,7 +3310,7 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
     # Handle different field types
     if field_type in ['personality', 'body']:
         # For personality/body, extract trait lists and format as PList
-        trait_pattern = r'(?:personality_traits|physical_traits|personality|body)[\s:\s*]*([^\n]*)'
+        trait_pattern = r'(?:personality_traits|physical_traits|personality|body):\s*([^\n]*)'
         match = re.search(trait_pattern, result_lower, re.IGNORECASE)
         
         if match:
@@ -2827,7 +3334,7 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
         # Extract personality traits
         personality_traits = []
         if 'personality_traits:' in result_lower:
-            traits_match = re.search(r'personality_traits[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
+            traits_match = re.search(r'personality_traits:\s*([^\n]*)', result_lower, re.IGNORECASE)
             if traits_match:
                 traits_text = traits_match.group(1)
                 personality_traits = [t.strip().strip('"').strip("'") for t in traits_text.split(',') if t.strip()]
@@ -2835,64 +3342,26 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
         # Extract physical traits
         physical_traits = []
         if 'physical_traits:' in result_lower:
-            phys_match = re.search(r'physical_traits[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
+            phys_match = re.search(r'physical_traits:\s*([^\n]*)', result_lower, re.IGNORECASE)
             if phys_match:
                 phys_text = phys_match.group(1)
                 physical_traits = [t.strip().strip('"').strip("'") for t in phys_text.split(',') if t.strip()]
         
-        # Extract genre and tags
-        genre = "General"
-        tags = []
-        if 'genre:' in result_lower:
-            genre_match = re.search(r'genre[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
-            if genre_match:
-                genre = genre_match.group(1).strip()
+        # Format personality and body as PList
+        personality_result = ""
+        if personality_traits:
+            trait_list = ', '.join([f'"{trait}"' for trait in personality_traits])
+            personality_result = f"[{char_name}'s Personality= {trait_list}]"
         
-        if 'tags:' in result_lower:
-            tags_match = re.search(r'tags[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
-            if tags_match:
-                tags_text = tags_match.group(1)
-                tags = [t.strip() for t in tags_text.split(',') if t.strip()]
+        body_result = ""
+        if physical_traits:
+            trait_list = ', '.join([f'"{trait}"' for trait in physical_traits])
+            body_result = f"[{char_name}'s body= {trait_list}]"
         
-        # Extract scenario
-        scenario = f"You encounter {char_name}."
-        if 'scenario:' in result_lower:
-            scenario_match = re.search(r'scenario[:\s*]*([^\n]*)', result_lower, re.IGNORECASE)
-            if scenario_match:
-                scenario = scenario_match.group(1).strip()
-        
-        # Extract first message
-        first_message = f"*{char_name} looks at you.*"
-        if 'first_message:' in result_lower:
-            first_match = re.search(r'first_message[:\s*]*([^\n]+)', result_lower, re.IGNORECASE)
-            if first_match:
-                first_message = first_match.group(1).strip()
-        
-        # Extract description
-        description = result
-        if 'full_description:' in result_lower:
-            desc_match = re.search(r'full_description[:\s*]*([^\n]+)', result_lower, re.IGNORECASE)
-            if desc_match:
-                description = desc_match.group(1).strip()
-        
-        # Format as multiple PList entries (like NPC creation)
-        personality_plist = ', '.join([f'"{trait}"' for trait in personality_traits]) if personality_traits else '"mysterious"'
-        body_plist = ', '.join([f'"{trait}"' for trait in physical_traits]) if physical_traits else '"mysterious figure"'
-        tags_list = ', '.join([f'"{tag}"' for tag in tags]) if tags else '"generated"'
-        
-        plist_format = f"""[{char_name}'s Personality= {personality_plist}]
-[{char_name}'s body= {body_plist}]
-[Genre: {genre}; Tags: {tags_list}]"""
-        
-        return plist_format
+        # Return PList-formatted personality and body
+        return f"{personality_result}\n{body_result}".strip()
     
-    # Fallback: try to extract any bracketed content
-    bracketed_entries = re.findall(r'\[.+?\]', result)
-    if bracketed_entries:
-        lines = [entry.strip() for entry in bracketed_entries if entry.strip()]
-        return '\n'.join(lines)
-    
-    # Last fallback: return original result
+    # FALLBACK: Return result as-is for other field types
     return result.strip()
 
 # Capsule Generation for Multi-Character Optimization
@@ -2998,11 +3467,18 @@ async def edit_character_field(req: CharacterEditRequest):
             char_data = json.load(f)
         
         # Validate field exists
-        if req.field not in ["personality", "body", "dialogue", "genre", "tags", "scenario", "first_message"]:
+        if req.field not in ["personality", "body", "dialogue", "genre", "tags", "scenario", "first_message", "mes_example"]:
             return {"success": False, "error": "Invalid field"}
-        
+
         # Update the field
-        char_data["data"][req.field] = req.new_value
+        if req.field == "body":
+            if "extensions" not in char_data["data"]:
+                char_data["data"]["extensions"] = {}
+            if "depth_prompt" not in char_data["data"]["extensions"]:
+                char_data["data"]["extensions"]["depth_prompt"] = {}
+            char_data["data"]["extensions"]["depth_prompt"]["prompt"] = req.new_value
+        else:
+            char_data["data"][req.field] = req.new_value
         
         # Save the updated character
         with open(file_path, "w", encoding="utf-8") as f:
@@ -3104,6 +3580,97 @@ async def edit_character_capsule_ai(req: CharacterEditFieldRequest):
             return {"success": False, "error": result["error"]}
         
     except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/characters/edit-field-ai")
+async def edit_character_field_ai(req: CharacterEditFieldRequest):
+    """Use AI to generate or improve a character field.
+
+    Takes current field value + all other character data,
+    generates improved/expanded content, and OVERWRITES the field.
+
+    Supported fields:
+    - mes_example: Example dialogue exchanges
+    - personality: Personality traits (PList format)
+    - body: Physical description (PList format, stored in description)
+    - scenario: Single sentence scenario
+    - first_message: Opening greeting (Markdown format)
+
+    Args:
+        req: CharacterEditFieldRequest with filename, field, context, source_mode
+
+    Returns:
+        JSON with success status and generated text
+    """
+    try:
+        file_path = os.path.join(DATA_DIR, "characters", req.filename)
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "Character file not found"}
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            char_data = json.load(f)
+
+        char_name = char_data["data"]["name"]
+        personality = char_data["data"].get("personality", "")
+        depth_prompt = char_data["data"]["extensions"].get("depth_prompt", {}).get("prompt", "")
+        scenario = char_data["data"].get("scenario", "")
+
+        result = ""
+
+        if req.field == "mes_example":
+            current_example = char_data["data"].get("mes_example", "")
+            result = await generate_dialogue_for_edit(
+                char_name, personality, depth_prompt, scenario, current_example
+            )
+            char_data["data"]["mes_example"] = result
+
+        elif req.field == "personality":
+            current_personality = char_data["data"].get("personality", "")
+            result = await generate_personality_for_edit(
+                char_name, current_personality, depth_prompt, scenario
+            )
+            char_data["data"]["personality"] = result
+
+        elif req.field == "body":
+            current_body = char_data["data"].get("description", "")
+            result = await generate_body_for_edit(
+                char_name, current_body, personality, scenario
+            )
+            char_data["data"]["description"] = result
+
+        elif req.field == "scenario":
+            current_scenario = char_data["data"].get("scenario", "")
+            result = await generate_scenario_for_edit(
+                char_name, current_scenario, personality, depth_prompt
+            )
+            char_data["data"]["scenario"] = result
+
+        elif req.field == "first_message":
+            current_first_msg = char_data["data"].get("first_mes", "")
+            result = await generate_first_message_for_edit(
+                char_name, current_first_msg, personality, scenario, depth_prompt
+            )
+            char_data["data"]["first_mes"] = result
+
+        else:
+            return {"success": False, "error": f"Field '{req.field}' not supported for AI generation"}
+
+        # Save updated character to JSON
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(char_data, f, indent=2, ensure_ascii=False)
+
+        # Sync to database so changes take effect immediately in active chats
+        sync_result = sync_character_from_json(req.filename)
+        if not sync_result["success"]:
+            print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
+
+        # Record recent edit for immediate context injection on next chat turn
+        add_recent_edit('character', req.filename, req.field, result)
+
+        return {"success": True, "text": result}
+
+    except Exception as e:
+        print(f"Error in edit_character_field_ai: {e}")
         return {"success": False, "error": str(e)}
 
 # World Info Generation Logic (Ported from world-gen-app)
@@ -3458,11 +4025,16 @@ async def chat(request: PromptRequest):
 
 
     
-    # Auto-generate capsules for group chats (2+ characters)
+    # Auto-generate capsules for group chats (2+ characters) AND single character mode (for dynamic switching)
     updated_characters = []
     chars_needing_capsules = []
     
-    if len(request.characters) >= 2:
+    # Determine if capsules are needed based on current chat state
+    is_group_chat = len(request.characters) >= 2
+    is_single_char = len(request.characters) == 1
+    
+    # Generate capsules for any character that doesn't have one (if capsules would be used)
+    if is_group_chat or is_single_char:
         for char_obj in request.characters:
             data = char_obj.get("data", {})
             extensions = data.get("extensions", {})
@@ -3836,9 +4408,9 @@ async def reimport_json_files():
 
 @app.post("/api/reimport/characters")
 async def reimport_characters():
-    """Manually trigger re-import of character JSON files only."""
+    """Manually trigger re-import of character JSON files only with capsule generation."""
     try:
-        import_count = import_characters_json_files()
+        import_count = await import_characters_json_files_async()
         return {
             "success": True,
             "imported": {"characters": import_count},
@@ -3972,6 +4544,9 @@ async def save_character(char: dict):
         save_data = char.copy()
         if "_filename" in save_data:
             del save_data["_filename"]
+        
+        # Normalize to V2 spec before export
+        save_data = normalize_character_v2(save_data)
         
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(save_data, f, indent=2, ensure_ascii=False)
@@ -4757,6 +5332,9 @@ async def promote_npc_to_global(chat_id: str, npc_id: str):
             "spec_version": "2.0",
             "data": char_data
         }
+        
+        # Normalize to ensure all V2 fields are present
+        character_card = normalize_character_v2(character_card)
         
         # Add promotion history metadata
         char_data.setdefault('extensions', {})['promotion_history'] = {

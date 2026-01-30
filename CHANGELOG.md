@@ -5,6 +5,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.8.1] - 2026-01-29
+
+### Added
+- **Character Edit Override System**: Full card injection when characters are edited mid-chat
+- **SillyTavern Compatibility**: Character card generation now uses correct field mappings
+  - Personality traits saved to `personality` field (comma-separated)
+  - Body traits appended to `description` field
+  - Tags changed from auto-generated to manual-only
+  - Removed NeuralRP-specific fields for better SillyTavern compatibility
+
+### Changed
+- **NPC Creation**: Updated to use same SillyTavern-compatible field mappings
+- **Field Generation Prompts**: LLM prompts updated for SillyTavern output format
+- **Frontend Card Generator**: Removed tags from auto-generation, updated field mappings
+
+***
+
 ## [1.8.0] - 2026-01-28
 
 ### Added
@@ -41,11 +58,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [1.7.3] - 2026-01-28
 
 ### Added
-- **Immediate Edit Notifications**: Character, NPC, and world info card edits now appear in "Recent Updates" on the next chat turn
+- **Immediate Edit Notifications**: Character, NPC, and world info card edits now appear in "Recent Updates" on next chat turn
 
 ### Fixed
 - **Character Card Editing**: Changes now sync immediately to active chats without refresh
-- **NPC Card Editing**: Mid-chat NPC edits now take effect on the next message
+- **NPC Card Editing**: Mid-chat NPC edits now take effect on next message
 - **World Info Semantic Matching**: Keys now properly trigger entries; quoted keys require exact match, unquoted use semantic search
 - **Chat Message Editing**: Fixed edit window collapsing to narrow box
 
@@ -103,9 +120,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 - **Adaptive Relationship Tracker**: Real-time three-tier detection of dramatic relationship shifts
-  - Tier 1: Keyword detection (~0.5ms) with 60+ relationship keywords
-  - Tier 2: Semantic similarity (~2-3ms) detects conversational shifts below 0.7 threshold
-  - Tier 3: Dimension filtering (~1-2ms) injects only relevant dimensions
+  - Tier1: Keyword detection (~0.5ms) with 60+ relationship keywords
+  - Tier2: Semantic similarity (~2-3ms) detects conversational shifts below 0.7 threshold
+  - Tier3: Dimension filtering (~1-2ms) injects only relevant dimensions
   - Spam blocker: 3-turn cooldown prevents repeated triggers
   - Total overhead: 3-5ms per turn vs 5ms static injection
 
@@ -260,6 +277,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **AI Card Generation**: Create character cards and world info from conversations
 - **Token Counter**: Real-time context usage monitoring
 - **Chat Persistence**: Save/load sessions with characters, world, and images
-
 
 ***

@@ -14,6 +14,7 @@ This document explains how NeuralRP's advanced features work under the hood, des
 6. [Semantic Relationship Tracker](#semantic-relationship-tracker)
 7. [Entity ID System](#entity-id-system)
 8. [Chat-Scoped NPC System](#chat-scoped-npc-system)
+8.5. [Character Card Field Mappings](#character-card-field-mappings)
 9. [Message Search System](#message-search-system)
 10. [Performance Mode](#performance-mode)
 11. [Branching System](#branching-system)
@@ -585,6 +586,451 @@ Think of reinforcement like cleaning a house:
 - Character, NPC, and world info context injection on first appearance to chat
 - Added comprehensive context hygiene rationale for injection strategies
 - Documented token efficiency tradeoffs and decision reasoning
+
+### Character Edit Override System (v1.8.1)
+
+**Problem: Recent Updates Alone is Insufficient for Character Edits**
+
+When a user edits a character's personality, description, or other fields mid-chat, the previous implementation only showed a "Recent Updates" notification with the changed field. This approach had critical flaws:
+
+| Issue | Previous Behavior | Problem |
+|-------|------------------|---------|
+| **Context Incompleteness** | "Recent Updates: Character Updated: Alice - personality<br/>friendly, helpful" | LLM only sees new personality, not description, scenario, dialogue examples |
+| **Behavioral Drift** | Personality shown alone, but old description/context unchanged | LLM tries to reconcile inconsistent instructions (new personality vs old description) |
+| **Redundancy on Reinforcement** | Recent Updates + Reinforcement both appear on same turn | Wastes tokens, confuses LLM with duplicate/conflicting signals |
+| **Auto-First_Mes Edge Case** | Frontend adds character's first_mes before first inference | System incorrectly thinks character "has appeared", prevents full card injection |
+
+**Why Full Card Injection on Edit Matters:**
+
+**Context Hygiene Principle: Complete Character Definitions**
+
+When a character is edited mid-chat, the LLM needs the ENTIRE updated character context, not just the changed field:
+
+| Field Updated | Previous "Recent Updates" Approach | Full Card Injection Approach |
+|---------------|----------------------------------|----------------------------|
+| Personality changed from "shy" to "outgoing" | Shows: "outgoing" (20 tokens) | Shows: Full card (500-2000 tokens) with updated personality + description + scenario |
+| Description updated to include new backstory | Shows: New backstory (100 tokens) | Shows: Full card with new description + original personality + dialogue examples |
+| Scenario updated to new setting | Shows: New scenario (50 tokens) | Shows: Full card with new scenario + existing personality + description |
+
+**Why Partial Updates Are Problematic:**
+
+1. **Contextual Incoherence**: LLM receives new personality but old description that may contradict it
+   - Example: Personality updated to "outgoing", description still says "Alice is shy and avoids social situations"
+   - Result: LLM confused, generates inconsistent behavior
+
+2. **Missing Behavioral Cues**: Description often contains subtle behavioral cues not in personality field
+   - Example: Description mentions "Alice rarely makes eye contact, speaks in whispers"
+   - Personality field alone won't capture these nuances
+   - Full card injection ensures all behavioral constraints are consistent
+
+3. **Scenario Disruption**: Updates to scenario change the entire context
+   - Example: Scenario updated from "Alice works at space station" to "Alice is stranded on alien planet"
+   - Partial update: Shows new scenario but old personality (e.g., "professional engineer")
+   - Full card injection: LLM sees entire updated context and adapts appropriately
+
+**Token Budget Analysis: Full Card Injection vs Recent Updates Only**
+
+| Approach | Token Cost | Frequency | Long-Term Impact |
+|-----------|-------------|-------------|------------------|
+| **Recent Updates Only** (previous) | 20-200 tokens | One-time after edit | LLM drifts due to incomplete context |
+| **Full Card Injection** (current) | 500-2000 tokens | One-time after edit | LLM maintains complete, consistent character understanding |
+| **Reinforcement** (both) | 50-200 tokens (PList) or 150-750 tokens (capsules) | Every 5 turns | Prevents drift regardless of edit approach |
+
+**Why Full Card is Justified Despite Token Cost:**
+
+| Factor | Reasoning |
+|--------|-----------|
+| **One-Time Cost** | Full card injection happens only once per edit, not every turn |
+| **Prevents Drift** | Inconsistent context causes gradual character corruption (worse than one-time token spike) |
+| **User Expectation** | When user edits character, they expect behavior to change immediately and completely |
+| **Reinforcement Deduplication** | `chars_injected_this_turn` prevents double injection (edit + reinforcement same turn) |
+| **Context Quality** | 500-2000 tokens for complete character context vs 20-200 tokens for partial (25x more information density) |
+
+**Implementation Details:**
+
+**Backend (main.py):**
+
+1. **Add `edited_characters` to Request Model** (line 424)
+```python
+class PromptRequest(BaseModel):
+    messages: List[ChatMessage]
+    characters: List[Dict[str, Any]] = []
+    world_info: Optional[Dict[str, Any]] = None
+    settings: Dict[str, Any] = {}
+    summary: Optional[str] = ""
+    mode: Optional[str] = "narrator"
+    metadata: Optional[Dict[str, Any]] = None
+    chat_id: Optional[str] = None
+    edited_characters: List[str] = []  # NEW: Character/NPC IDs edited this turn
+```
+
+2. **Add `normalize_string_for_comparison()` Helper** (lines 2317-2335)
+```python
+def normalize_string_for_comparison(s: str) -> str:
+    """Normalize a string for robust comparison.
+    
+    Handles common formatting differences that can occur between
+    database storage and frontend message handling.
+    """
+    if not s:
+        return ""
+    
+    # Strip leading/trailing whitespace
+    normalized = s.strip()
+    
+    # Normalize line breaks (convert \r\n to \n)
+    normalized = normalized.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # Normalize multiple consecutive spaces to single space
+    normalized = ' '.join(normalized.split())
+    
+    return normalized
+```
+
+3. **Rewrite `is_first_message_auto_added()` Helper** (lines 2337-2396)
+```python
+def is_first_message_auto_added(messages: List[ChatMessage], char_obj: dict) -> bool:
+    """Check if the first assistant message is character's auto-added first_mes.
+    
+    This handles the edge case where frontend adds character's first_mes
+    to messages before any real inference has happened.
+    
+    Returns True if:
+    - Only one message exists AND it's auto-added first_mes (original behavior), OR
+    - First assistant message exists AND it matches character's first_mes (new behavior for multi-message case)
+    
+    Uses normalized comparison to handle formatting differences while
+    maintaining speaker name precision.
+    """
+    if len(messages) == 0:
+        return False
+    
+    # Get character's first message and name
+    char_name = get_character_name(char_obj)
+    char_first_mes = char_obj.get("data", {}).get("first_mes", "")
+    
+    # Empty first_mes means it wasn't auto-added
+    if not char_first_mes:
+        return False
+    
+    # Find the first assistant message in the sequence
+    first_assistant_msg = None
+    for msg in messages:
+        if msg.role == "assistant":
+            first_assistant_msg = msg
+            break
+    
+    if not first_assistant_msg:
+        return False
+    
+    # Skip Visual System messages
+    if first_assistant_msg.speaker == "Visual System":
+        return False
+    
+    # Check if first assistant message has speaker matching character
+    speaker_matches = first_assistant_msg.speaker == char_name
+    if not speaker_matches:
+        return False
+    
+    # Normalize and compare content
+    normalized_msg_content = normalize_string_for_comparison(first_assistant_msg.content)
+    normalized_char_first_mes = normalize_string_for_comparison(char_first_mes)
+    
+    content_matches = normalized_msg_content == normalized_char_first_mes
+    
+    # Debug logging
+    if len(messages) == 1 and content_matches:
+        print(f"[AUTO_FIRST_MES] Single-message detection: {char_name}'s first_mes detected")
+    elif len(messages) > 1 and content_matches:
+        print(f"[AUTO_FIRST_MES] Extended detection: First assistant message matches {char_name}'s first_mes (total messages: {len(messages)})")
+    elif speaker_matches and not content_matches:
+        print(f"[DEBUG] First message detection: Speaker matched '{char_name}' but content mismatch")
+        print(f"[DEBUG]   Message content (first 100 chars): {normalized_msg_content[:100]}...")
+        print(f"[DEBUG]   Character first_mes (first 100 chars): {normalized_char_first_mes[:100]}...")
+    
+    return content_matches
+```
+
+4. **Revise Character Injection Logic with Edit Override** (lines 2582-2649)
+```python
+# Build set of edited character references from request
+edited_char_refs = set(request.edited_characters) if request.edited_characters else set()
+
+for char_obj in request.characters:
+    name = get_character_name(char_obj)
+    char_ref = char_obj.get("_filename") or char_obj.get("entity_id")
+    is_npc = char_obj.get("is_npc", False)
+    
+    # Check if character has appeared in real conversation
+    char_has_appeared = character_has_speaker(request.messages, name)
+    
+    # Special case: if only message is auto-added first_mes, treat as "not appeared"
+    is_auto_first_mes_only = is_first_message_auto_added(request.messages, char_obj)
+    
+    # Check if this character was edited this turn
+    is_edited_this_turn = char_ref in edited_char_refs
+    
+    # Determine if injection is needed
+    needs_injection = (not char_has_appeared) or is_auto_first_mes_only or is_edited_this_turn
+    
+    # === CHARACTER INJECTION LOGIC ===
+    if needs_injection:
+        if is_edited_this_turn:
+            # EDIT OVERRIDE: Always inject full card regardless of chat mode
+            print(f"[CONTEXT] {label} {name} full card injection (EDITED)")
+            full_prompt += f"### Character Profile: {name}\n"
+            if description:
+                full_prompt += f"{description}\n"
+            if personality:
+                full_prompt += f"{personality}\n"
+            if scenario:
+                full_prompt += f"{scenario}\n"
+            if mes_example:
+                full_prompt += f"Example dialogue:\n{mes_example}\n"
+            
+            chars_injected_this_turn.add(name)
+```
+
+**Frontend (app/index.html):**
+
+1. **Add `editedCharactersThisTurn` Tracking** (line 2549)
+```javascript
+data() {
+    return {
+        // ... existing state ...
+        editedCharactersThisTurn: [],  // Track character/NPC IDs edited this turn
+        // ... rest of state ...
+    }
+}
+```
+
+2. **Track Edits in `saveCharacter()`** (lines 3799-3803, 3819-3823)
+```javascript
+// NPC edit tracking
+if (res.data.success) {
+    const npcRef = this.editingChar.npcId;
+    if (npcRef && !this.editedCharactersThisTurn.includes(npcRef)) {
+        this.editedCharactersThisTurn.push(npcRef);
+        console.log(`[EDIT_TRACK] NPC ${npcRef} marked as edited`);
+    }
+    // ... rest of NPC save logic ...
+}
+
+// Global character edit tracking
+if (res.data.success) {
+    const charRef = this.editingChar._filename || res.data.filename;
+    if (charRef && !this.editedCharactersThisTurn.includes(charRef)) {
+        this.editedCharactersThisTurn.push(charRef);
+        console.log(`[EDIT_TRACK] Character ${charRef} marked as edited`);
+    }
+    // ... rest of character save logic ...
+}
+```
+
+3. **Send `edited_characters` in API Requests** (line 3929, regenerate function)
+```javascript
+const res = await axios.post('/api/chat', {
+    messages: this.messages,
+    summary: this.summary,
+    characters: this.activeCharactersWithData(),
+    edited_characters: this.editedCharactersThisTurn,  // NEW
+    world_info: this.settings.world_info_enabled ? this.activeWI : null,
+    settings: this.settings,
+    mode: mode,
+    chat_id: this.currentChatId
+});
+```
+
+4. **Clear `editedCharactersThisTurn` in Finally Blocks** (line 3977, regenerate function)
+```javascript
+} finally {
+    this.isLoading = false;
+    this.editedCharactersThisTurn = [];  // Clear immediately (Option A)
+    this.scrollToBottom();
+    this.updateTokenCount();
+}
+```
+
+**Design Decisions and Rationale:**
+
+| Decision | Option Chosen | Rationale |
+|----------|---------------|-----------|
+| **Recent Updates + Full Card** | Keep both | "Recent Updates" provides explicit edit signal, full card provides complete context (small notification cost for clear user feedback) |
+| **First Mes Matching** | Exact match (`==`) not fuzzy | Prevents false positives: "Hi" shouldn't match first_mes if it's just "Hello" |
+| **Capsule Generation on Edit** | No | Only generate capsules during group chat injection, not on edit (avoids unnecessary computation) |
+| **Clear Timing** | Immediately in finally block (Option A) | Ensures edits cleared regardless of success/failure (prevents stale edit tracking on retry) |
+
+**Test Scenarios Covered:**
+
+1. ✅ Fresh chat, single char added → Full card injection
+2. ✅ Fresh chat, multiple chars added → Capsule injection for all
+3. ✅ First turn with auto-added first_mes → Full card injection (first_mes ignored)
+4. ✅ User deletes first_mes, writes own → Full card injection
+5. ✅ Mid-chat: char added (alone) → Full card injection
+6. ✅ Mid-chat: char added (to group) → Capsule injection
+7. ✅ Mid-chat: char edited (single mode) → Full card injection
+8. ✅ Mid-chat: char edited (group mode) → Full card injection (override)
+9. ✅ Reinforcement turn + first appearance → Skip reinforcement for that char
+10. ✅ Reinforcement turn + edit → Skip reinforcement for that char
+11. ✅ NPC edited in group chat → Full card injection (override)
+12. ✅ Character toggled off then on again → Full card (single) / Capsule (group)
+
+**Context Hygiene Philosophy Behind Edit Override:**
+
+**1. Completeness Over Minimalism (for Edits Only)**
+
+While context hygiene emphasizes minimal reinforcement to prevent token bloat, character edits are a special case:
+
+| Context | Hygiene Strategy | Rationale |
+|---------|------------------|-----------|
+| **Normal reinforcement** | PList/capsules only (minimal) | Prevents drift, character already fully defined |
+| **Character edit** | Full card injection (complete) | User changed character definition, LLM needs NEW complete definition |
+
+**Why This Distinction?**
+
+- **User Intent**: When user edits character, they expect behavior to change, not just one field
+- **Context Consistency**: Partial updates create contradictions (new personality + old description)
+- **One-Time Cost**: Edit override is one-time, reinforcement is periodic (token impact differs)
+- **Prevents Corruption**: Inconsistent context leads to gradual character corruption (worse than temporary token spike)
+
+**2. Immediate Grounding Over Gradual Adaptation**
+
+**Problem with Gradual Adaptation:**
+- Previous approach: Show edited field, let LLM "adapt" to new personality
+- Reality: LLM tries to reconcile conflicting instructions (new personality vs old description)
+- Result: Character behavior becomes inconsistent and unpredictable
+
+**Solution with Immediate Full Card:**
+- LLM receives complete, consistent character definition
+- No reconciliation needed (all fields aligned)
+- Result: Character behavior changes immediately and consistently
+
+**3. Reinforcement Deduplication for Token Efficiency**
+
+**Problem: Edit + Reinforcement on Same Turn**
+
+| Without Deduplication | Token Waste |
+|---------------------|--------------|
+| Edit override: Full card (1000 tokens) | 1000 |
+| Reinforcement: PList (100 tokens) | 100 |
+| Recent Updates: Notification (50 tokens) | 50 |
+| **Total** | **1150 tokens (wasted: 150 tokens)** |
+
+**Solution: `chars_injected_this_turn` Set**
+
+```python
+chars_injected_this_turn = set()  # Track characters injected this turn
+
+# Add to set when character is injected (including edit override)
+chars_injected_this_turn.add(name)
+
+# Skip reinforcement if character was just injected
+if char_name in chars_injected_this_turn:
+    print(f"[REINFORCEMENT] Skipping {char_name} (injected this turn)")
+    continue
+```
+
+**Result:**
+- Edit override: Full card (1000 tokens) ✅
+- Reinforcement: Skipped ✅
+- Recent Updates: Notification (50 tokens) ✅
+- **Total**: 1050 tokens (saved 100 tokens)
+
+**Why Keep Recent Updates + Full Card?**
+
+| Approach | Tokens | User Feedback | LLM Clarity |
+|----------|--------|---------------|--------------|
+| **Full card only** | 1000 | Unclear what changed | Clear (complete context) |
+| **Recent Updates only** | 50 | Clear what changed | Unclear (incomplete context) |
+| **Both** (current) | 1050 | Clear what changed | Clear (complete context) |
+
+**Rationale:**
+- 50-token notification cost is negligible compared to clarity benefit
+- User sees explicit signal: "Character was edited, here's what changed"
+- LLM sees complete context without contradictions
+- Tradeoff: 5% more tokens for 100% clarity (acceptable)
+
+**4. Auto-First_Mes Edge Case: Why First Assistant Message Detection Matters**
+
+**Problem: Frontend Adds First Message Before User's First Message**
+
+| Scenario | Without Special Handling | With Special Handling |
+|----------|-------------------------|---------------------|
+| Fresh chat with character, user sends first message | `character_has_speaker()` returns True (auto-first_mes in messages) | `is_first_message_auto_added()` detects first assistant message matches first_mes |
+| Messages: `[assistant: first_mes, user: msg]` | Original logic: `len(messages) > 1` returns False | New logic: Finds first assistant message, matches content, returns True |
+| Result | No full card injection (LLM doesn't know character) | Full card injection (LLM knows character) |
+
+**Why First Assistant Message Detection (Not Just Single Message)?**
+
+| Approach | Scenario | Result | Why It Fails/Works |
+|----------|-----------|---------|-------------------|
+| **Original** (len == 1 only) | `[assistant: first_mes, user: msg]` | Fails: len = 2, returns False | Only handles single-message case |
+| **New** (first assistant message) | `[assistant: first_mes, user: msg, assistant: reply]` | Works: Finds first assistant, matches | Handles multi-message case |
+| **New** (first assistant message) | `[assistant: first_mes]` | Works: First assistant matches | Preserves original behavior |
+
+**Rationale:**
+- **User Workflow**: Users add character → auto-first_mes appears → user types → user sends message
+- **Message Count**: After user sends first message, `len(messages) = 2`
+- **Original Check**: `len(messages) > 1` returns False → function returns False
+- **New Check**: Finds first assistant message, compares speaker + normalized content
+- **Why It Works**: Doesn't care about message count, only checks if FIRST assistant message matches first_mes
+
+**Why Normalized String Comparison?**
+
+| Issue | Without Normalization | With Normalization |
+|-------|----------------------|---------------------|
+| Whitespace differences | "Hello!" vs " Hello!" | Mismatch → False positive |
+| Line break differences | "Hello!\nWorld" vs "Hello!\r\nWorld" | Mismatch → False positive |
+| Multiple spaces | "Hello,  world!" vs "Hello, world!" | Mismatch → False positive |
+
+**Why Exact Match (Not Fuzzy)?**
+
+| Matching Strategy | Example | Risk |
+|------------------|----------|-------|
+| **Fuzzy** (`in` or startswith) | first_mes: "Hello!", message: "Hello, how are you?" | False positive: Treats as auto-added when it's actual conversation |
+| **Exact with normalization** (`==`) | first_mes: "Hello!", message: "Hello!" (after normalization) | Correct: Only matches exact first_mes (ignoring formatting differences) |
+
+**Rationale:**
+- Prevents false positives (user writes similar but different first message)
+- Auto-first_mes is EXACT character's first_mes (ignoring formatting)
+- Normalization handles database/frontend formatting differences
+- Edge case is common (fresh chat + user sends message), so robust detection is critical
+
+**5. Clear Timing: Immediately in Finally Block (Option A)**
+
+| Option | When Cleared | Pros | Cons |
+|--------|--------------|-------|-------|
+| **A: Immediately in finally** (current) | After every message (success or failure) | Edits never persist incorrectly, prevents stale tracking | None |
+| **B: Only after success** | Only on successful API response | Ensures edits only cleared when actually sent | Failed sends leave stale edits (retry sends old edits) |
+| **C: On refresh/new chat** | Only when user navigates away | Edits persist across attempts | Edits could affect unrelated messages |
+
+**Rationale for Option A:**
+- **Consistency**: Edits always cleared, regardless of outcome
+- **Safety**: Prevents stale edit tracking on retries
+- **Simplicity**: Single clear point in finally block
+- **User Experience**: Failed generation doesn't corrupt next generation
+
+**Summary: Context Hygiene Tradeoffs for Edit Override System**
+
+| Context Hygiene Principle | Normal Behavior | Edit Override Exception | Rationale |
+|------------------------|-----------------|------------------------|-----------|
+| **Minimal Injection** | Use capsules/PList only | Inject full card | User changed character definition (not reinforcement) |
+| **Prevent Redundancy** | Skip reinforcement if already injected | Skip reinforcement if edit injected | Same deduplication logic applies |
+| **One-Time Cost Acceptable** | Periodic reinforcement only | One-time full card injection | Prevents character corruption (worse than token spike) |
+| **Completeness for Edits** | Not applicable | Full card injection | Ensures consistent, complete character context |
+| **Token Efficiency** | Minimal reinforcement | Edit override (one-time) | Acceptable tradeoff for behavior correctness |
+
+**Conclusion:**
+
+The Character Edit Override System represents a deliberate exception to standard context hygiene rules. While the system normally emphasizes minimal, periodic reinforcement to prevent token bloat, character edits require immediate, complete context injection to maintain behavioral consistency and prevent character corruption. This exception is justified by:
+
+1. **User Intent**: Edits represent explicit user desire for behavior change
+2. **Context Integrity**: Partial updates create contradictions and drift
+3. **One-Time Cost**: Unlike reinforcement, edit injection happens once per edit
+4. **Token Efficiency**: Reinforcement deduplication prevents redundant injections
+5. **Clarity**: Recent Updates + Full Card provides explicit feedback and complete context
+
+This system maintains context hygiene philosophy by applying appropriate strategies to different scenarios: minimal reinforcement for normal drift prevention, but complete injection for deliberate character changes.
 
 ### Chat Modes
 
@@ -2050,6 +2496,176 @@ Check:
 - Frontend: ~250 lines added to `app/index.html`
 
 **v1.6.0 (January 2026)**: Initial NPC system implementation
+
+---
+
+## Character Card Field Mappings
+
+### Overview (v1.8.0+)
+
+Character cards and NPC cards use the same SillyTavern V2 JSON format with consistent field mappings. This ensures that both character types behave identically in context assembly and reinforcement systems.
+
+### SillyTavern V2 Character Card Structure
+
+All character cards (both global characters and local NPCs) use the following JSON structure:
+
+```json
+{
+  "spec": "chara_card_v2",
+  "spec_version": "2.0",
+  "data": {
+    "name": "Character Name",
+    "description": "Physical description of the character",
+    "personality": "Trait1, trait2, trait3",
+    "scenario": "One-sentence opening scenario",
+    "first_mes": "Character's opening message",
+    "mes_example": "<START>\n{{user}}: \"question\"\n{{char}}: *action* \"response\"",
+    "creator_notes": "Metadata and source information",
+    "system_prompt": "",
+    "post_history_instructions": "",
+    "alternate_greetings": [],
+    "tags": ["tag1", "tag2"],
+    "creator": "NeuralRP",
+    "character_version": "",
+    "character_book": null,
+    "extensions": {
+      "depth_prompt": {
+        "prompt": "Additional context instructions",
+        "depth": 4
+      },
+      "talkativeness": 100,
+      "danbooru_tag": "",
+      "label_description": "",
+      "multi_char_summary": "Capsule summary for multi-character chats"
+    }
+  }
+}
+```
+
+### Field Mappings: "Gen Card" UI → JSON
+
+The "Generate Character Card from Chat" UI (`app/index.html` cardGen interface) maps UI fields to SillyTavern V2 JSON fields as follows:
+
+| UI Field | JSON Field | Description |
+|-----------|-------------|-------------|
+| **Physical Body (PList)** | `description` | Physical description with char_name prefix (e.g., "Alice is tall, athletic, with blue eyes") |
+| **Example Dialogue** | `mes_example` | Dialogue exchanges with `<START>` markers for LLM guidance |
+| **Personality** | `personality` | Comma-separated personality traits |
+| **Scenario** | `scenario` | One-sentence opening situation |
+| **First Message** | `first_mes` | Character's opening greeting |
+| **Genre** | `creator_notes` | Genre metadata (e.g., "[Genre: Fantasy]") |
+| **depth_prompt.prompt** | `extensions.depth_prompt.prompt` | Empty string (genre moved to creator_notes) |
+
+**Key Implementation Details:**
+
+- **Line 4849**: `description: this.cardGen.fields.body || ""` - Maps Physical Body field directly
+- **Line 4853**: `mes_example: this.cardGen.fields.dialogue || ""` - Maps Example Dialogue field (with `<START>` markers)
+- **Line 4863**: `depth_prompt: {prompt: "", depth: 4}` - Empty string (genre only in creator_notes)
+- **Line 4859**: `creator_notes: character_note` - Contains genre metadata like "[Genre: Fantasy]"
+
+**Why These Mappings?**
+
+| Field | Reason |
+|--------|---------|
+| `description` = Physical Body | Provides grounding for appearance in single-character reinforcement |
+| `mes_example` = Dialogue | Gives LLM voice examples showing how character speaks (critical for multi-character chats) |
+| `depth_prompt.prompt` = empty | Prevents bloat; genre moved to creator_notes for reference only |
+| `creator_notes` = Genre | Preserves metadata without polluting context |
+
+### Field Mappings: NPC Creation → JSON
+
+NPCs created via `POST /api/card-gen/generate-field` with `save_as='local_npc'` map LLM-generated content to SillyTavern V2 JSON fields identically to global characters:
+
+| LLM-Generated Field | JSON Field | Source |
+|---------------------|-------------|---------|
+| **PHYSICAL_TRAITS** | `description` | LLM generates physical traits, formatted as "{char_name} is trait1, trait2, trait3" |
+| **DIALOGUE_EXAMPLES** | `mes_example` | LLM generates 2-3 dialogue exchanges with `<START>` markers |
+| **PERSONALITY_TRAITS** | `personality` | Comma-separated traits converted to string |
+| **SCENARIO** | `scenario` | Opening scenario for first meeting |
+| **FIRST_MESSAGE** | `first_mes` | Character's greeting with actions and speech |
+| **GENRE** | `creator_notes` | Genre metadata (e.g., "[Genre: SciFi]") |
+| **depth_prompt.prompt** | `extensions.depth_prompt.prompt` | Empty string (genre moved to creator_notes) |
+
+**Key Implementation Details (main.py:2545-2706):**
+
+- **Line 2555-2570**: LLM prompt generates `PHYSICAL_TRAITS`, `PERSONALITY_TRAITS`, `SCENARIO`, `FIRST_MESSAGE`, `DIALOGUE_EXAMPLES`, and `GENRE` sections
+- **Line 2655-2658**: `body_desc = f"{char_name} is {', '.join(physical_traits)}."` - Formats physical traits for `description` field
+- **Line 2670**: `mes_example: dialogue_examples` - Maps dialogue to `mes_example` field (not `description` field as in v1.7.x)
+- **Line 2681**: `depth_prompt: {prompt: "", depth: 4}` - Empty string (genre only in creator_notes)
+- **Line 2680**: `creator_notes` with genre - Contains "[Genre: {genre}]" metadata
+
+**Why These Mappings?**
+
+| Field | Reason |
+|--------|---------|
+| `description` = Physical Traits | Ensures NPC description includes grounding info (appearance) for single-character reinforcement |
+| `mes_example` = Dialogue | Provides voice examples for multi-character chats, critical for distinguishing NPC voices |
+| `depth_prompt.prompt` = empty | Prevents context bloat; genre metadata moved to creator_notes for reference |
+| Fallback for DIALOGUE_EXAMPLES | If LLM fails to generate dialogue, NPC gets default template with char_name substitution |
+
+### Consistency Between Characters and NPCs
+
+Both character types use identical field mappings, ensuring consistent behavior in:
+
+| System Component | Character Behavior | NPC Behavior |
+|------------------|-------------------|----------------|
+| **Initial Injection (Turn 1)** | Full card (description + personality + mes_example + scenario) | Full card (description + personality + mes_example + scenario) |
+| **First Appearance Detection** | `character_has_speaker()` prevents redundant injections | `character_has_speaker()` prevents redundant injections |
+| **Single-Character Reinforcement** | PList (depth_prompt) + description every N turns | PList (depth_prompt) + description every N turns |
+| **Multi-Character Reinforcement** | Capsule (multi_char_summary) every N turns | Capsule (multi_char_summary) every N turns |
+| **Context Assembly** | Treated identically via `load_character_profiles()` | Treated identically via `load_character_profiles()` |
+| **Relationship Tracking** | Entity IDs used for both types | Entity IDs used for both types |
+
+**Key Consistency Principle:**
+
+> "NPCs are simply chat-scoped characters with the same reinforcement behavior as global characters."
+
+This means:
+- Single-character chats with NPC: NPC uses `description` + `personality` for reinforcement (same as global character)
+- Multi-character chats with NPC: NPC uses `multi_char_summary` capsule for reinforcement (same as global character)
+- First appearance detection applies equally to both types
+- Both participate in semantic relationship system via entity IDs
+
+### Field Mapping Changes in v1.8.0
+
+| Field | Before v1.8.0 | After v1.8.0 | Reason |
+|-------|----------------|----------------|--------|
+| `description` | `FULL_DESCRIPTION` (narrative) | `PHYSICAL_TRAITS` (appearance) | Prioritizes grounding for reinforcement |
+| `mes_example` | Empty string | `DIALOGUE_EXAMPLES` (with `<START>`) | Provides voice examples for multi-char chats |
+| `depth_prompt.prompt` | Genre metadata | Empty string | Reduces context bloat |
+| `creator_notes` | Genre only | Genre only | Genre metadata for reference (unchanged) |
+
+**Impact on Context Hygiene:**
+
+- **Reduced redundancy**: `description` field now contains appearance (used in reinforcement) instead of narrative (already known from initial injection)
+- **Improved multi-char voice**: `mes_example` field now contains dialogue examples, enabling LLM to distinguish NPC voices in group chats
+- **Cleaner reinforcement**: `depth_prompt.prompt` is empty, reducing token overhead while maintaining behavioral guidance
+
+### API Endpoints
+
+**Character Card Generation:**
+
+- `POST /api/card-gen/generate-field` - Generate specific character field or full card
+  - `field_type`: 'personality', 'body', 'dialogue_likes', 'dialogue_story', 'scenario', 'first_message', 'genre', 'tags', 'full'
+  - `context`: Source text for generation
+  - `source_mode`: 'chat' (from conversation) or 'manual' (user-provided)
+  - `save_as`: 'local_npc' for NPC creation (chat-scoped), omitted for global characters
+
+**Character Management:**
+
+- `POST /api/characters` - Save new global character from "Gen Card" UI
+- `POST /api/characters/{filename}/edit` - Edit character field with auto-sync to database
+- `POST /api/characters/{filename}/tags` - Replace all tags for character
+- `GET /api/characters` - List all global characters (supports tag filtering)
+
+### See Also
+
+- [SillyTavern V2 Format](https://github.com/SillyTavern/SillyTavern/wiki/Card-Format-Specifications)
+- [Context Assembly](#context-assembly) - How characters are injected into LLM prompts
+- [Reinforcement System](#reinforcement-system) - How character profiles are re-injected periodically
+- [Chat-Scoped NPC System](#chat-scoped-npc-system) - NPC creation and lifecycle management
+
+
 - Entity ID system with entities table
 - Chat-scoped NPC storage in metadata
 - NPC creation, activation, promotion, deletion
