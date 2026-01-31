@@ -1,6 +1,6 @@
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**Local AI roleplay frontend that keeps characters, NPCs, and worlds coherent across 30k+ tokens on the GPU you bought in 2021 with your COVID stimulus check, with built-in SD and SillyTavern card support**
+**tl;dr: NeuralRP is a local, no-cloud roleplay engine that keeps characters, NPCs, worlds, and images coherent across 30k+ tokens on midrange GPUs—without you babysitting templates or extensions.**
 
 **Simple out of the box. Just drop your cards in the folders, there isn't a million different things to configure. Just go.**
 
@@ -10,7 +10,19 @@
 
 **[Quickstart Guide](docs/QUICKSTART.md)**
 
-# NeuralRP: Storytime
+## Why its different:
+
+1. **Context hygiene engine**
+-  Sticky first 3 turns, unified reinforcement, semantic world info + canon law, intelligent summarization, 5D relationships
+
+2. **Emergent cast: characters + NPCs + narrator + YOU**
+- Chat-scoped NPCs with full parity to characters, promotion to globals, branch-safe IDs, plus real narrator mode so stories can start system-first and grow a cast. AND characters/NPCs treat you as a character too.
+
+3. **Native Stable Diffusion for RP**
+- A1111 integration, performance-aware presets, inpainting UX, character tag substitution, per-image metadata, and strict separation from the text context.
+
+## NeuralRP: Storytime
+
 When I discovered Huggingface and tuned LLM's for roleplay, I quickly developed a love for experimenting with it. I love writing, and it quickly became a passion to create worlds and characters through written dialog with interesting, creative LLM's. 
 
 However, when I started (with Ollama) I noticed something: once I hit about 12k tokens (happens quickly), LLM's completely changed: output became repetitive and garbled, it forgot the situation and world I had carefully detailed in the system prompt, and characters became all the same. Rather than accepting this as a fundamental limitation of small, local LLM's, I decided to move on to other frontends.
@@ -29,11 +41,7 @@ The fact is, there are certain limitations with 7B-12B LLM's that you simply can
 
 **Context assembly, not context dumping.** Every piece of story data is managed:
 
-- **Sticky first 3 turns** — Character cards (single char) or capsules (multi-char) injected on turns 1, 2, 3 to maintain early-conversation consistency and voice differentiation
-
-- **Unified reinforcement** — Description + personality reinforced every N turns for ALL characters (single and multi-char), simplified from previous dual-system
-
-- **No full card dumping** — After sticky window, only reinforcement chunks appear, keeping dialogue at 70-80% of context
+- Character cards inject in full on first three turns, then reinforce with PList constraints every few turns. Not repeated in full every turn. New characters added mid-chat have a smaller "capsules" with traits and dialog examples injected for the next 3 turns as well. 
 
 - World information uses semantic search via sqlite-vec embeddings to inject lore relevant to the last 5 messages. Not dumped wholesale or manually triggered.
 
@@ -49,11 +57,7 @@ The outcome: Relationship status tracked through summarizations. NPCs that emerg
 
 70-80% of your context budget should be dialogue, not metadata. Characters, world info, and relationships exist to support conversation, not dominate the prompt. AND, this is supported by both experience and studies: a short, strongly worded prompt beats a meandering, unfocused one. Why should't RP optimize for that?
 
-- **Inject on first 3 turns** — Full character cards (single) or capsules (multi-char) on turns 1, 2, 3 for early-turn consistency
-
-- **Reinforce minimally** — Description + personality every N turns (default: 5) for ALL characters, unified logic
-
-- **Token budget** — ~20-25% character info, 75-80% dialogue (after sticky window)
+- **Inject on first 3 turns** —  Full character cards (single) or capsules (multi-char) on first 3 turns for early-turn consistency
 
 - **Just-in-time grounding** — World lore appears when semantically relevant, not before
 
@@ -89,7 +93,7 @@ Both methods output SillyTavern V2-compatible JSON files. Prototype NPC's/charac
 
 ### Multi-Character Chats That Scale
 
-Optimized to run multiple active characters with distinct voices and full personality tracking without context overflow. Capsules (compressed character summaries with dialog examples, 50-100 tokens each) enable group chats with 5-6 active characters. Capsules injected on first 3 turns, then reinforced with description + personality every N turns. I've literally never been able to do this effectively with another front end before.
+Optimized to run multiple active characters with distinct voices and full personality tracking without context overflow. Capsules (compressed character summaries with dialog examples, 50-100 tokens each) enable group chats with 5-6 active characters. Capsules injected on first 3 turns, then reinforced with description + personality every N turns.
 
 ### Emergent NPCs
 
@@ -136,12 +140,6 @@ Continue conversations beyond context limits. When context approaches 85%:
 ### Branching Timelines
 
 Fork any message to create alternate storylines. All characters, NPCs, world info, and relationships are copied. NPC entity IDs are remapped, so they can develop independently with each story arc.
-
-## Context Hygiene Improvements (v1.8.1-v1.8.2)
-
-- **v1.8.1 (Reinforcement Simplification)** — Unified reinforcement logic uses description + personality for ALL characters (single and multi-chat), removed complex edit override system
-
-- **v1.8.2 (Sticky First 3 Turns)** — Character cards/capsules injected on turns 1, 2, 3 to maintain early-conversation consistency and voice differentiation
 
 ## Library-Scale Organization (v1.8.0)
 
