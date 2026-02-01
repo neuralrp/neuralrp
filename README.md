@@ -41,6 +41,9 @@ NeuralRP analyzes your favorited images to understand your preferences:
 - **Tag detection** — Identifies Danbooru tags in your favorite prompts
 - **Preference tracking** — Future generations biased toward your preferred styles
 - **Works for both** — Snapshot and manual mode favorites both contribute to learning
+- **Natural library expansion** — Add your own custom tags via manual mode; they become part of the searchable library with semantic embeddings
+
+**Plus:** Database auto-setup (works out of the box!), double-click favorites to jump to source chat, and first-run guidance for model downloads.
 
 ---
 
