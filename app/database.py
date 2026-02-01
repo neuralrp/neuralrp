@@ -175,7 +175,17 @@ def init_db():
             print("Dropped capsule column from characters table (capsules now chat-scoped)")
         except:
             pass  # Column doesn't exist or already dropped
-        
+
+        # Add snapshot_data column to messages table (v1.9.1+ - snapshot messages)
+        # Stores snapshot data (prompt, negative_prompt, scene_analysis, etc.) as JSON
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN snapshot_data TEXT")
+            conn.commit()
+            print("Added snapshot_data column to messages table")
+        except:
+            pass  # Column already exists
+
+         
         # Image metadata table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS image_metadata (
@@ -468,8 +478,37 @@ def init_db():
         
         # Run migration on startup
         check_and_migrate_tags()
-        
-        # ============================================================================  
+
+        # ============================================================================
+        # DANBOORU TAGS (Snapshot Feature)
+        # ============================================================================
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS danbooru_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_text TEXT UNIQUE NOT NULL,
+                block_num INTEGER NOT NULL,
+                frequency INTEGER DEFAULT 0,
+                created_at INTEGER
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_danbooru_tags_block ON danbooru_tags(block_num)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_danbooru_tags_text ON danbooru_tags(tag_text)")
+
+        try:
+            cursor.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_danbooru_tags USING vec0(
+                    embedding float[768]
+                )
+            """)
+            print("[DB] vec_danbooru_tags table created")
+        except Exception as e:
+            print(f"[WARN] sqlite-vec not available: {e}")
+
+        conn.commit()
+
+        # ============================================================================
         # CHARACTER OPERATIONS
         # ============================================================================
 
@@ -1242,7 +1281,7 @@ def db_get_chat(chat_id: str, include_summarized: bool = False) -> Optional[Dict
         if include_summarized:
             # Get all messages (both active and summarized)
             cursor.execute("""
-                SELECT id, role, content, speaker, image_url, timestamp, summarized
+                SELECT id, role, content, speaker, image_url, timestamp, summarized, snapshot_data
                 FROM messages
                 WHERE chat_id = ?
                 ORDER BY timestamp ASC
@@ -1250,22 +1289,31 @@ def db_get_chat(chat_id: str, include_summarized: bool = False) -> Optional[Dict
         else:
             # Get only active (non-summarized) messages for normal use
             cursor.execute("""
-                SELECT id, role, content, speaker, image_url, timestamp, summarized
+                SELECT id, role, content, speaker, image_url, timestamp, summarized, snapshot_data
                 FROM messages
                 WHERE chat_id = ? AND summarized = 0
                 ORDER BY timestamp ASC
             """, (chat_id,))
-        
+
         messages = []
         for msg_row in cursor.fetchall():
-            messages.append({
+            msg_dict = {
                 'id': msg_row['id'],
                 'role': msg_row['role'],
                 'content': msg_row['content'],
                 'speaker': msg_row['speaker'],
                 'image': msg_row['image_url'],
                 'summarized': msg_row['summarized']
-            })
+            }
+
+            # Parse snapshot_data if present
+            if msg_row['snapshot_data']:
+                try:
+                    msg_dict['snapshot'] = json.loads(msg_row['snapshot_data'])
+                except (json.JSONDecodeError, TypeError):
+                    pass  # Invalid JSON, skip
+
+            messages.append(msg_dict)
         
         metadata = json.loads(row['metadata']) if row['metadata'] else {}
         
@@ -1339,6 +1387,12 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
             else:
                 metadata["characterCapsules"] = incoming_metadata["characterCapsules"]
 
+            # Preserve snapshot_history (backend-managed snapshot data)
+            if "snapshot_history" not in incoming_metadata:
+                metadata["snapshot_history"] = metadata.get("snapshot_history", [])
+            else:
+                metadata["snapshot_history"] = incoming_metadata["snapshot_history"]
+
             # Critical: Ensure localnpcs exists (preserves NPCs from atomic creation)
             if "localnpcs" not in metadata:
                 metadata["localnpcs"] = {}
@@ -1393,9 +1447,10 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
                 
                 if msg_id and msg_id in existing_messages:
                     # Update existing message
+                    snapshot_data = msg.get('snapshot')
                     cursor.execute("""
                         UPDATE messages
-                        SET role = ?, content = ?, speaker = ?, image_url = ?, timestamp = ?, summarized = ?
+                        SET role = ?, content = ?, speaker = ?, image_url = ?, timestamp = ?, summarized = ?, snapshot_data = ?
                         WHERE id = ? AND chat_id = ?
                     """, (
                         msg.get('role', 'user'),
@@ -1404,15 +1459,17 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
                         msg.get('image'),
                         msg.get('timestamp', int(time.time())),
                         0,  # Active messages are not summarized
+                        json.dumps(snapshot_data) if snapshot_data else None,
                         msg_id,
                         chat_id
                     ))
                 else:
                     # Insert new message - let database auto-generate ID
+                    snapshot_data = msg.get('snapshot')
                     cursor.execute("""
-                        INSERT INTO messages 
-                        (chat_id, role, content, speaker, image_url, timestamp, summarized)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO messages
+                        (chat_id, role, content, speaker, image_url, timestamp, summarized, snapshot_data)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         chat_id,
                         msg.get('role', 'user'),
@@ -1420,7 +1477,8 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
                         msg.get('speaker'),
                         msg.get('image'),
                         msg.get('timestamp', int(time.time())),
-                        0  # Active messages are not summarized
+                        0,  # Active messages are not summarized
+                        json.dumps(snapshot_data) if snapshot_data else None
                     ))
                     
                     # Track the ID mapping for newly inserted messages
@@ -1833,6 +1891,232 @@ def db_count_embeddings(world_name: Optional[str] = None) -> int:
         return 0
     except Exception as e:
         return 0
+
+
+# ============================================================================
+# DANBOORU TAGS OPERATIONS (Snapshot Feature)
+# ============================================================================
+
+def db_migrate_danbooru_tags():
+    """Populate danbooru_tags table with tags from config and generate embeddings."""
+    from app.danbooru_tags_config import get_tags_as_tuples
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        print("[DB] sentence_transformers not available, skipping danbooru tag migration")
+        return
+
+    tags = get_tags_as_tuples()
+    model = SentenceTransformer('all-mpnet-base-v2')
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # Check if already migrated
+        cursor.execute("SELECT COUNT(*) FROM danbooru_tags")
+        if cursor.fetchone()[0] > 0:
+            print("[DB] Danbooru tags already migrated")
+            return
+
+        # Insert tags
+        cursor.executemany(
+            "INSERT OR IGNORE INTO danbooru_tags (tag_text, block_num, created_at) VALUES (?, ?, ?)",
+            [(tag, block, int(time.time())) for tag, block in tags]
+        )
+
+        # Generate embeddings for each tag
+        print("[DB] Generating embeddings for danbooru tags...")
+        for idx, (tag_text, block_num) in enumerate(tags):
+            if idx % 100 == 0:
+                print(f"[DB] Embedding progress: {idx}/{len(tags)}")
+
+            try:
+                tag_id = cursor.execute(
+                    "SELECT id FROM danbooru_tags WHERE tag_text = ? AND block_num = ?",
+                    (tag_text, block_num)
+                ).fetchone()[0]
+
+                embedding = model.encode(tag_text).astype(np.float32).tobytes()
+
+                # Insert into vec table (rowid = tag_id)
+                cursor.execute(
+                    "INSERT INTO vec_danbooru_tags (rowid, embedding) VALUES (?, ?)",
+                    (tag_id, embedding)
+                )
+            except Exception as e:
+                print(f"[DB] Failed to embed tag '{tag_text}': {e}")
+                continue
+
+        conn.commit()
+    print(f"[DB] Danbooru tags migrated: {len(tags)} tags")
+
+
+def db_get_danbooru_tag_count() -> int:
+    """Get total count of danbooru tags in database.
+    
+    Returns:
+        int: Number of danbooru tags
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as count FROM danbooru_tags")
+        row = cursor.fetchone()
+        return row['count'] if row else 0
+
+
+def db_search_danbooru_embeddings(query_embedding: np.ndarray,
+                                 block_num: Optional[int] = None,
+                                 k: int = 10,
+                                 threshold: float = 0.35) -> List[Tuple[str, float]]:
+    """Search danbooru tags via semantic similarity."""
+    try:
+        import sqlite_vec
+    except ImportError:
+        print("[DB] sqlite-vec not available, cannot search danbooru tags")
+        return []
+
+    query_bytes = query_embedding.astype(np.float32).tobytes()
+
+    with get_connection() as conn:
+        sqlite_vec.load(conn)
+        cursor = conn.cursor()
+
+        if block_num is not None:
+            # Filter by block
+            query = """
+                SELECT tag_text, similarity
+                FROM (
+                    SELECT dt.tag_text,
+                           (1 - vec_distance_cosine(vec_danbooru_tags.embedding, ?)) as similarity
+                    FROM vec_danbooru_tags
+                    JOIN danbooru_tags dt ON vec_danbooru_tags.rowid = dt.id
+                    WHERE dt.block_num = ?
+                ) AS subquery
+                WHERE similarity >= ?
+                ORDER BY similarity DESC
+                LIMIT ?
+            """
+            cursor.execute(query, (query_bytes, block_num, threshold, k))
+        else:
+            # Search all blocks
+            query = """
+                SELECT tag_text, similarity
+                FROM (
+                    SELECT dt.tag_text,
+                           (1 - vec_distance_cosine(vec_danbooru_tags.embedding, ?)) as similarity
+                    FROM vec_danbooru_tags
+                    JOIN danbooru_tags dt ON vec_danbooru_tags.rowid = dt.id
+                ) AS subquery
+                WHERE similarity >= ?
+                ORDER BY similarity DESC
+                LIMIT ?
+            """
+            cursor.execute(query, (query_bytes, threshold, k))
+
+        return [(row[0], float(row[1])) for row in cursor.fetchall()]
+
+
+def db_increment_tag_frequency(tag_text: str):
+    """Increment usage frequency for a danbooru tag."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE danbooru_tags SET frequency = frequency + 1 WHERE tag_text = ?",
+                (tag_text,)
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"Error incrementing tag frequency: {e}")
+
+
+# ============================================================================
+# SNAPSHOT HISTORY OPERATIONS (Snapshot Feature)
+# ============================================================================
+
+def db_save_snapshot_to_metadata(chat_id: str, snapshot_data: Dict[str, Any]) -> bool:
+    """Save snapshot data to chat metadata.
+    
+    Args:
+        chat_id: Chat ID
+        snapshot_data: Dictionary with snapshot data (image_url, prompt, negative_prompt, etc.)
+    
+    Returns:
+        bool: True if saved successfully
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get current chat metadata
+            cursor.execute("SELECT metadata FROM chats WHERE id = ?", (chat_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                print(f"Error saving snapshot: Chat {chat_id} not found")
+                return False
+            
+            # Parse existing metadata
+            try:
+                metadata = json.loads(row['metadata']) if row['metadata'] else {}
+            except json.JSONDecodeError:
+                metadata = {}
+            
+            # Add or update snapshot history
+            if 'snapshot_history' not in metadata:
+                metadata['snapshot_history'] = []
+            
+            metadata['snapshot_history'].append(snapshot_data)
+            
+            # Limit history to last 50 snapshots
+            if len(metadata['snapshot_history']) > 50:
+                metadata['snapshot_history'] = metadata['snapshot_history'][-50:]
+            
+            # Update chat metadata
+            cursor.execute(
+                "UPDATE chats SET metadata = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), chat_id)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error saving snapshot to metadata: {e}")
+        return False
+
+
+def db_get_snapshot_history(chat_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Get snapshot history from chat metadata.
+    
+    Args:
+        chat_id: Chat ID
+        limit: Maximum number of snapshots to return
+    
+    Returns:
+        List of snapshot data dictionaries
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT metadata FROM chats WHERE id = ?", (chat_id,))
+            row = cursor.fetchone()
+            
+            if not row or not row['metadata']:
+                return []
+            
+            # Parse metadata
+            try:
+                metadata = json.loads(row['metadata']) if row['metadata'] else {}
+            except json.JSONDecodeError:
+                return []
+            
+            # Get snapshot history
+            history = metadata.get('snapshot_history', [])
+            
+            # Return most recent snapshots (reversed order, newest first)
+            return history[-limit:][::-1] if history else []
+    except Exception as e:
+        print(f"Error getting snapshot history: {e}")
+        return []
 
 
 # ============================================================================
@@ -3948,6 +4232,323 @@ def get_relationship_context_filtered(
         return "### Relationship Context:\n" + "\n".join(lines)
     
     return ""
+
+
+# ============================================================================
+# SNAPSHOT FAVORITES FUNCTIONS (Unified for Snapshot + Manual Mode)
+# ============================================================================
+
+def db_add_snapshot_favorite(data: Dict[str, Any]) -> int:
+    """
+    Add a snapshot favorite to favorites table.
+
+    Args:
+        data: Dict with keys:
+            - chat_id: str (snapshot mode only, NULL for manual)
+            - image_filename: str
+            - prompt: str
+            - negative_prompt: str
+            - scene_type: str (optional, NULL for manual)
+            - setting: str (optional, NULL for manual)
+            - mood: str (optional, NULL for manual)
+            - character_ref: str (optional, NULL for manual)
+            - tags: List[str]
+            - steps: int
+            - cfg_scale: float
+            - width: int
+            - height: int
+            - source_type: str ('snapshot' or 'manual')
+            - note: str (optional)
+
+    Returns:
+        int: ID of inserted favorite record
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO sd_favorites (
+                chat_id, image_filename, prompt, negative_prompt,
+                scene_type, setting, mood, character_ref, tags,
+                steps, cfg_scale, width, height, source_type, note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data.get('chat_id'),
+            data.get('image_filename'),
+            data.get('prompt'),
+            data.get('negative_prompt'),
+            data.get('scene_type'),
+            data.get('setting'),
+            data.get('mood'),
+            data.get('character_ref'),
+            json.dumps(data.get('tags', [])),
+            data.get('steps'),
+            data.get('cfg_scale'),
+            data.get('width'),
+            data.get('height'),
+            data.get('source_type', 'snapshot'),  # Default to snapshot for backward compatibility
+            data.get('note')
+        ))
+        fav_id = c.lastrowid
+        conn.commit()
+        return fav_id
+
+
+def db_get_favorites(limit: int = 50,
+                  scene_type: Optional[str] = None,
+                  source_type: Optional[str] = None,
+                  tags: Optional[List[str]] = None,
+                  offset: int = 0) -> List[Dict[str, Any]]:
+    """
+    Get all favorites, optionally filtered by scene type, source type, and tags.
+
+    Args:
+        limit: Maximum number of favorites to return
+        scene_type: Filter by scene type (optional)
+        source_type: Filter by source type ('snapshot' or 'manual') (optional)
+        tags: Filter by tags (AND semantics - must match ALL tags) (optional)
+        offset: Number of results to skip (for pagination) (default: 0)
+
+    Returns:
+        List of favorite records (as dicts)
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+
+        # Build WHERE clause dynamically
+        where_conditions = []
+        params = []
+
+        if scene_type:
+            where_conditions.append("scene_type = ?")
+            params.append(scene_type)
+
+        if source_type:
+            where_conditions.append("source_type = ?")
+            params.append(source_type)
+
+        # Tag filtering with AND semantics
+        if tags and len(tags) > 0:
+            placeholders = ','.join(['?'] * len(tags))
+            where_conditions.append(f"""
+                (
+                    SELECT COUNT(*)
+                    FROM json_each(sd_favorites.tags)
+                    WHERE json_each.value IN ({placeholders})
+                ) = ?
+            """)
+            params.extend(tags)
+            params.append(len(tags))
+
+        where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+        params.append(limit)
+        params.append(offset)
+
+        c.execute(f"""
+            SELECT * FROM sd_favorites
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+        """, params)
+
+        results = [dict(row) for row in c.fetchall()]
+        return results
+
+
+def db_delete_favorite(favorite_id: int) -> bool:
+    """
+    Delete a favorite by ID.
+
+    Args:
+        favorite_id: ID of favorite to delete
+
+    Returns:
+        bool: True if deleted, False if not found
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM sd_favorites WHERE id = ?", (favorite_id,))
+        deleted = c.rowcount > 0
+        conn.commit()
+        return deleted
+
+
+def db_get_all_favorite_tags() -> List[str]:
+    """
+    Get all unique tags from all favorites.
+
+    Extracts tags from sd_favorites.tags JSON array and returns unique tags.
+
+    Returns:
+        List of unique tags (alphabetically sorted)
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT DISTINCT json_each.value
+            FROM sd_favorites
+            CROSS JOIN json_each(sd_favorites.tags)
+            WHERE sd_favorites.tags != '[]' AND sd_favorites.tags != 'null'
+            ORDER BY json_each.value ASC
+        """)
+        results = [row[0] for row in c.fetchall()]
+        return results
+
+
+def db_get_popular_favorite_tags(limit: int = 5) -> List[Tuple[str, int]]:
+    """
+    Get the most popular tags from favorites.
+
+    Queries danbooru_tag_favorites table for top N tags by favorite_count.
+
+    Args:
+        limit: Maximum number of tags to return (default: 5)
+
+    Returns:
+        List of tuples (tag_text, favorite_count), sorted by favorite_count DESC
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT tag_text, favorite_count
+            FROM danbooru_tag_favorites
+            ORDER BY favorite_count DESC
+            LIMIT ?
+        """, (limit,))
+        results = [(row[0], row[1]) for row in c.fetchall()]
+        return results
+
+
+def db_get_favorite_by_image(image_filename: str) -> Optional[Dict[str, Any]]:
+    """
+    Get a favorite record by image filename.
+
+    Args:
+        image_filename: Image filename to look up
+
+    Returns:
+        Favorite dict if found, None otherwise
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM sd_favorites WHERE image_filename = ?", (image_filename,))
+        row = c.fetchone()
+        return dict(row) if row else None
+
+
+# ============================================================================
+# TAG DETECTION FUNCTIONS
+# ============================================================================
+
+def db_detect_danbooru_tags(prompt: str, threshold: int = 2) -> List[str]:
+    """
+    Detect which tags in a custom prompt are danbooru tags.
+
+    Args:
+        prompt: User's custom prompt text (comma-separated)
+        threshold: Minimum number of danbooru tags to consider it worth learning (default: 2)
+
+    Returns:
+        List[str]: Found danbooru tags
+    """
+    from app.danbooru_tags_config import get_all_tags
+
+    # Get all danbooru tags from config (case-insensitive lookup)
+    all_tags = get_all_tags()
+    tag_set = set()
+    for block_tags in all_tags.values():
+        for tag in block_tags:
+            tag_set.add(tag.lower())
+
+    # Check prompt for danbooru tags
+    prompt_lower = prompt.lower()
+    found_tags = []
+
+    for tag in tag_set:
+        if tag in prompt_lower:
+            found_tags.append(tag)
+
+    return found_tags
+
+
+# ============================================================================
+# DANBOORU TAG FREQUENCY FUNCTIONS (Learning Data)
+# ============================================================================
+
+def db_get_favorite_tag_frequency(tag_text: str) -> int:
+    """
+    Get favorite count for a tag.
+
+    Args:
+        tag_text: Tag name (e.g., "1girl", "forest")
+
+    Returns:
+        int: Favorite count (0 if not found)
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT favorite_count FROM danbooru_tag_favorites WHERE tag_text = ?",
+            (tag_text,)
+        )
+        row = c.fetchone()
+        return row[0] if row else 0
+
+
+def db_increment_favorite_tag(tag_text: str):
+    """
+    Increment favorite count for a tag.
+
+    Creates record if not exists, otherwise increments.
+    Applies to BOTH snapshot and manual mode favorites.
+
+    Args:
+        tag_text: Tag name to increment
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO danbooru_tag_favorites (tag_text, favorite_count, last_used)
+            VALUES (?, 1, strftime('%s', 'now'))
+            ON CONFLICT(tag_text) DO UPDATE SET
+                favorite_count = favorite_count + 1,
+                last_used = strftime('%s', 'now')
+        """, (tag_text,))
+        conn.commit()
+
+
+# ============================================================================
+# MIGRATION TRACKING FUNCTIONS
+# ============================================================================
+
+def db_get_applied_migrations() -> List[str]:
+    """
+    Get list of applied migration names.
+
+    Returns:
+        List of migration names that have been applied
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT migration_name FROM schema_migrations ORDER BY applied_at")
+        results = [row[0] for row in c.fetchall()]
+        return results
+
+
+def db_record_migration(migration_name: str):
+    """
+    Record that a migration has been applied.
+
+    Args:
+        migration_name: Name of migration to record
+    """
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO schema_migrations (migration_name)
+            VALUES (?)
+        """, (migration_name,))
+        conn.commit()
+
 
 # Initialize database on module import (only once at the end)
 init_db()

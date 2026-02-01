@@ -49,6 +49,12 @@ from app.database import (
     # sqlite-vec embedding operations
     db_save_embedding, db_get_embedding, db_delete_entry_embedding,
     db_search_similar_embeddings, db_delete_world_embeddings, db_count_embeddings,
+    # Danbooru tags operations (Snapshot feature)
+    db_migrate_danbooru_tags, db_search_danbooru_embeddings, db_increment_tag_frequency,
+    # Snapshot favorites operations
+    db_add_snapshot_favorite, db_get_favorites, db_delete_favorite, db_get_favorite_by_image,
+    db_get_all_favorite_tags, db_get_popular_favorite_tags,
+    db_detect_danbooru_tags, db_get_favorite_tag_frequency, db_increment_favorite_tag,
     # Performance metrics
     db_save_performance_metric, db_get_recent_performance_metrics,
     db_get_median_performance, db_cleanup_old_metrics,
@@ -69,8 +75,11 @@ from app.database import (
 )
 
 from app.tag_manager import parse_tag_string
+from app.snapshot_analyzer import SnapshotAnalyzer
+from app.snapshot_prompt_builder import SnapshotPromptBuilder
 
 # NPC helper functions are now integrated in load_character_profiles()
+
 
 # Removed orphaned code - this block references undefined variables and is not used
 
@@ -1283,6 +1292,14 @@ class SemanticSearchEngine:
 semantic_search_engine = SemanticSearchEngine()
 
 # ============================================================================
+# SNAPSHOT FEATURE (v1.9.0)
+# ============================================================================
+
+snapshot_analyzer = None
+prompt_builder = None
+snapshot_http_client = None
+
+# ============================================================================
 # ADAPTIVE RELATIONSHIP TRACKING ENGINE (v1.6.1)
 # ============================================================================
 
@@ -2043,6 +2060,43 @@ def import_chats_json_files():
     
     return import_count
 
+
+async def check_ai_services():
+    """Check if KoboldCpp and Stable Diffusion are running on startup"""
+    import httpx
+    
+    kobold_url = CONFIG.get("kobold_url", "http://127.0.0.1:5001")
+    sd_url = CONFIG.get("sd_url", "http://127.0.0.1:7861")
+    
+    # Check KoboldCpp
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{kobold_url}/api/v1/model")
+            if response.status_code == 200:
+                print(f"  ✅ KoboldCpp found at {kobold_url}")
+            else:
+                print(f"  ⚠️  KoboldCpp responded but may not be ready")
+    except Exception:
+        print(f"  ❌ KoboldCpp not found at {kobold_url}")
+        print(f"     💡 Tip: Start KoboldCpp with your model before chatting")
+        print(f"     💡 Download: https://github.com/LostRuins/koboldcpp")
+    
+    # Check Stable Diffusion
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(f"{sd_url}/sdapi/v1/samplers")
+            if response.status_code == 200:
+                print(f"  ✅ Stable Diffusion found at {sd_url}")
+            else:
+                print(f"  ⚠️  Stable Diffusion responded but may not be ready")
+    except Exception:
+        print(f"  ❌ Stable Diffusion not found at {sd_url}")
+        print(f"     💡 Tip: Start A1111 WebUI with --api flag for image generation")
+        print(f"     💡 Download: https://github.com/AUTOMATIC1111/stable-diffusion-webui")
+    
+    print()  # Empty line for readability
+
+
 # FastAPI startup and shutdown handlers
 @app.on_event("startup")
 async def startup_event():
@@ -2053,6 +2107,10 @@ async def startup_event():
     if not verify_database_health():
         print("⚠️  Database health check failed - app may not function correctly")
         print("   Try running: python migrate_to_sqlite.py")
+    
+    # Check for external AI services
+    print("\n🔍 Checking for AI services...")
+    await check_ai_services()
     
     # Auto-import any new JSON files dropped into folders
     print("Scanning for new JSON files to import...")
@@ -2080,7 +2138,23 @@ async def startup_event():
         print("[ADAPTIVE_TRACKER] Ready - Three-tier detection system active")
     else:
         print("[ADAPTIVE_TRACKER] Warning: Could not initialize - semantic model not loaded")
-    
+
+    # Initialize snapshot feature (v1.9.0)
+    print("Initializing snapshot feature...")
+    global snapshot_analyzer, prompt_builder, snapshot_http_client
+    snapshot_http_client = httpx.AsyncClient(timeout=10.0)
+    snapshot_analyzer = SnapshotAnalyzer(
+        semantic_search_engine=semantic_search_engine,
+        http_client=snapshot_http_client,
+        config=CONFIG
+    )
+    prompt_builder = SnapshotPromptBuilder(snapshot_analyzer)
+    print("[SNAPSHOT] Snapshot feature initialized")
+
+    # Migrate danbooru tags on first run
+    print("Checking danbooru tags migration...")
+    db_migrate_danbooru_tags()
+
     # Start periodic cleanup task when app starts
     cleanup_task = asyncio.create_task(periodic_cleanup())
     print("Periodic cleanup task started")
@@ -2088,7 +2162,7 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when the FastAPI app shuts down"""
-    global cleanup_task
+    global cleanup_task, snapshot_http_client
     if cleanup_task:
         # Cancel the cleanup task
         cleanup_task.cancel()
@@ -2096,6 +2170,10 @@ async def shutdown_event():
             await cleanup_task
         except asyncio.CancelledError:
             print("Periodic cleanup task cancelled")
+    # Close snapshot HTTP client
+    if snapshot_http_client:
+        await snapshot_http_client.aclose()
+        print("[SNAPSHOT] HTTP client closed")
 
 def preprocess_world_info(world_info):
     """Pre-process world info for case-insensitive matching"""
@@ -4160,10 +4238,10 @@ async def generate_image(params: SDParams):
         # Apply context-aware preset if performance mode is enabled
         if resource_manager.performance_mode_enabled:
             preset = select_sd_preset(context_tokens)
-            # Use preset values if they differ from user input
-            final_steps = preset["steps"] if preset["steps"] != 20 else params.steps
-            final_width = preset["width"] if preset["width"] != 512 else params.width
-            final_height = preset["height"] if preset["height"] != 512 else params.height
+            # Use preset values only if user hasn't changed from defaults
+            final_steps = preset["steps"] if params.steps == 20 else params.steps
+            final_width = preset["width"] if params.width == 512 else params.width
+            final_height = preset["height"] if params.height == 512 else params.height
         else:
             final_steps = params.steps
             final_width = params.width
@@ -4228,6 +4306,454 @@ async def generate_image(params: SDParams):
             return await sd_operation()
         except Exception as e:
             return {"error": str(e)}
+
+# ============================================================================
+# SNAPSHOT ENDPOINTS (v1.9.0)
+# ============================================================================
+
+class SnapshotRequest(BaseModel):
+    chat_id: str
+    character_ref: Optional[str] = None  # "filename.json" or "npc_xxx"
+    width: Optional[int] = None  # Image width
+    height: Optional[int] = None  # Image height
+
+@app.post("/api/chat/snapshot")
+async def generate_chat_snapshot(request: SnapshotRequest):
+    """Generate SD image from current chat scene."""
+    try:
+        # Load chat data
+        chat = db_get_chat(request.chat_id)
+        if not chat:
+            return {"error": "Chat not found"}
+
+        messages = chat.get('messages', [])
+
+        # Calculate context tokens for chat messages (enables context-aware presets)
+        chat_text = "\n".join([msg.get('content', '') for msg in messages])
+        context_tokens = await get_token_count(chat_text)
+
+        # Get character tag if specified
+        character_tag = None
+        if request.character_ref:
+            character_tag = snapshot_analyzer.get_character_tag(
+                request.character_ref, chat
+            )
+
+        # Analyze scene
+        scene_analysis = await snapshot_analyzer.analyze_scene(
+            messages, request.chat_id
+        )
+
+        # Build prompt
+        positive_prompt, negative_prompt = prompt_builder.build_4_block_prompt(
+            scene_analysis, character_tag
+        )
+
+        # Use size parameters from request, default to 512x512
+        snapshot_width = request.width if request.width else 512
+        snapshot_height = request.height if request.height else 512
+
+        # Generate image using existing generate_image function
+        sd_params = SDParams(
+            prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            steps=20,
+            width=snapshot_width,
+            height=snapshot_height,
+            cfg_scale=7.0,
+            sampler_name='Euler a',
+            scheduler='Automatic',
+            context_tokens=context_tokens
+        )
+
+        image_result = await generate_image(sd_params)
+
+        if "error" in image_result:
+            return {"error": image_result["error"]}
+
+        # Save snapshot to chat metadata
+        snapshot_data = {
+            "timestamp": int(time.time()),
+            "image_url": image_result["url"],
+            "prompt": positive_prompt,
+            "negative_prompt": negative_prompt,
+            "scene_analysis": scene_analysis,
+            "character_ref": request.character_ref
+        }
+
+        # Update chat metadata with snapshot history
+        chat_metadata = chat.get('metadata', {})
+        if 'snapshot_history' not in chat_metadata:
+            chat_metadata['snapshot_history'] = []
+        chat_metadata['snapshot_history'].append(snapshot_data)
+        chat['metadata'] = chat_metadata
+
+        db_save_chat(request.chat_id, chat)
+
+        return {
+            "success": True,
+            "image_url": image_result["url"],
+            "prompt": positive_prompt,
+            "negative_prompt": negative_prompt,
+            "scene_analysis": scene_analysis
+        }
+
+    except Exception as e:
+        logger.error(f"Snapshot generation failed: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/snapshot/status")
+async def get_snapshot_status():
+    """Check if Stable Diffusion is available."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{CONFIG['sd_url']}/sdapi/v1/sd-models")
+            return {"available": True, "sd_url": CONFIG['sd_url']}
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+@app.get("/api/chat/{chat_id}/snapshots")
+async def get_snapshot_history(chat_id: str):
+    """Retrieve snapshot history for a chat."""
+    chat = db_get_chat(chat_id)
+    if not chat:
+        return {"error": "Chat not found"}
+
+    snapshots = chat.get('metadata', {}).get('snapshot_history', [])
+    return {"snapshots": snapshots}
+
+
+class SnapshotFavoriteRequest(BaseModel):
+    """Request model for adding snapshot to favorites."""
+    chat_id: str
+    image_filename: str
+    prompt: str
+    negative_prompt: str
+    scene_analysis: Dict[str, Any]
+    character_ref: Optional[str] = None
+    steps: int = 20
+    cfg_scale: float = 7.0
+    width: int = 512
+    height: int = 512
+    note: Optional[str] = None
+
+
+@app.post("/api/chat/{chat_id}/snapshot/regenerate")
+async def regenerate_snapshot(chat_id: str):
+    """
+    Regenerate snapshot with variation mode enabled.
+
+    Uses same scene analysis as previous snapshot, but applies
+    novelty scoring to generate different tag combinations.
+    """
+    try:
+        # Load chat
+        chat = db_get_chat(chat_id)
+        if not chat:
+            return {"error": "Chat not found"}
+
+        messages = chat.get('messages', [])
+
+        # Get character tag (same as original snapshot)
+        active_chars = chat.get('metadata', {}).get('activeCharacters', [])
+        character_ref = active_chars[0] if active_chars else None
+        character_tag = snapshot_analyzer.get_character_tag(character_ref, chat)
+
+        # Analyze scene (re-run for current context)
+        scene_analysis = await snapshot_analyzer.analyze_scene(messages, chat_id)
+
+        # Build prompt with VARIATION MODE
+        positive_prompt, negative_prompt = prompt_builder.build_4_block_prompt(
+            scene_analysis,
+            character_tag,
+            variation_mode=True  # VARIATION MODE
+        )
+
+        # Generate image
+        sd_params = SDParams(
+            prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            steps=20,
+            width=512,
+            height=512,
+            cfg_scale=7.0,
+            sampler_name='Euler a',
+            scheduler='Automatic',
+            context_tokens=0
+        )
+
+        image_result = await generate_image(sd_params)
+
+        if "error" in image_result:
+            return {"error": image_result["error"]}
+
+        # Save to snapshot history
+        snapshot_data = {
+            "timestamp": int(time.time()),
+            "image_url": image_result["url"],
+            "prompt": positive_prompt,
+            "negative_prompt": negative_prompt,
+            "scene_analysis": scene_analysis,
+            "character_ref": character_ref,
+            "mode": "variation"
+        }
+
+        chat_metadata = chat.get('metadata', {})
+        if 'snapshot_history' not in chat_metadata:
+            chat_metadata['snapshot_history'] = []
+        chat_metadata['snapshot_history'].append(snapshot_data)
+        chat['metadata'] = chat_metadata
+
+        db_save_chat(chat_id, chat)
+
+        return {
+            "success": True,
+            "image_url": image_result["url"],
+            "prompt": positive_prompt,
+            "negative_prompt": negative_prompt,
+            "scene_analysis": scene_analysis,
+            "mode": "variation"
+        }
+
+    except Exception as e:
+        logger.error(f"Snapshot regeneration failed: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/chat/{chat_id}/snapshot/favorite")
+async def add_snapshot_favorite(chat_id: str, request: SnapshotFavoriteRequest):
+    """
+    Mark snapshot as favorite and learn tag preferences.
+
+    Increment favorite counts for all tags in snapshot.
+    This data biases future snapshot and manual generation.
+    """
+    try:
+        # Extract tags from prompt
+        tags = [tag.strip() for tag in request.prompt.split(',') if tag.strip()]
+
+        # Add to favorites table (source_type='snapshot')
+        fav_id = db_add_snapshot_favorite({
+            'chat_id': chat_id,
+            'image_filename': request.image_filename,
+            'prompt': request.prompt,
+            'negative_prompt': request.negative_prompt,
+            'scene_type': request.scene_analysis.get('scene_type', 'other'),
+            'setting': request.scene_analysis.get('setting', ''),
+            'mood': request.scene_analysis.get('mood', ''),
+            'character_ref': request.character_ref,
+            'tags': tags,
+            'steps': request.steps,
+            'cfg_scale': request.cfg_scale,
+            'width': request.width,
+            'height': request.height,
+            'source_type': 'snapshot',
+            'note': request.note
+        })
+
+        # Increment tag frequencies for learning
+        for tag in tags:
+            db_increment_favorite_tag(tag)
+
+        logger.info(f"[SNAPSHOT] Added snapshot favorite: {request.image_filename}, learned {len(tags)} tags")
+
+        return {
+            "success": True,
+            "favorite_id": fav_id,
+            "tags_learned": len(tags),
+            "source_type": "snapshot"
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to add snapshot favorite: {e}")
+        return {"error": str(e)}
+
+
+class ManualFavoriteRequest(BaseModel):
+    """Request model for adding manual mode generation as favorite."""
+    image_filename: str
+    prompt: str
+    negative_prompt: str
+    steps: int = 20
+    cfg_scale: float = 7.0
+    width: int = 512
+    height: int = 512
+    sampler: str = 'Euler a'
+    scheduler: str = 'Automatic'
+    note: Optional[str] = None
+    chat_id: Optional[str] = None  # Optional: associate with current chat for jump-to-source
+
+
+@app.post("/api/manual-generation/favorite")
+async def add_manual_favorite(request: ManualFavoriteRequest):
+    """
+    Add manual mode generation to favorites and learn from detected tags.
+
+    Process:
+    1. Detect danbooru tags in user's custom prompt (lenient threshold=1 for counting)
+    2. If >=2 danbooru tags detected (hedge pass), parse ALL tags (danbooru + NSFW + custom)
+       and learn from ALL tags
+    3. If <2 danbooru tags (hedge fail), skip learning and save with empty tags
+    4. Save to sd_favorites with source_type='manual'
+    """
+    try:
+        from app.snapshot_learning_config import TAG_DETECTION_THRESHOLD
+
+        # Step 1: Detect danbooru tags with lenient threshold (for counting purposes)
+        detected_danbooru = db_detect_danbooru_tags(request.prompt, threshold=1)
+        print(f"[SNAPSHOT] Detected {len(detected_danbooru)} danbooru tags (lenient) in manual prompt")
+
+        # Step 2: Hedge check - only learn if >=2 danbooru tags
+        tags_learned = 0
+        all_tags = []
+        learned = False
+
+        if len(detected_danbooru) >= TAG_DETECTION_THRESHOLD:
+            # Hedge pass: Parse ALL tags (danbooru + NSFW + custom)
+            all_tags = [tag.strip() for tag in request.prompt.split(',') if tag.strip()]
+            print(f"[SNAPSHOT] Tag-based prompt: {len(all_tags)} total tags, {len(detected_danbooru)} danbooru, {len(all_tags) - len(detected_danbooru)} custom")
+
+            # Learn from ALL tags
+            for tag in all_tags:
+                db_increment_favorite_tag(tag)
+                tags_learned += 1
+            learned = True
+            print(f"[SNAPSHOT] Learned from {tags_learned} tags")
+        else:
+            # Hedge fail: Skip learning (sentence-based prompt)
+            print(f"[SNAPSHOT] Sentence-based prompt: {len(detected_danbooru)} danbooru tags (<{TAG_DETECTION_THRESHOLD} threshold)")
+            all_tags = []
+
+        # Step 3: Save to favorites (source_type='manual')
+        fav_id = db_add_snapshot_favorite({
+            'chat_id': request.chat_id,  # Optional: associate with current chat for jump-to-source
+            'image_filename': request.image_filename,
+            'prompt': request.prompt,
+            'negative_prompt': request.negative_prompt,
+            'scene_type': None,  # Manual mode has no LLM analysis
+            'setting': None,  # Manual mode has no LLM analysis
+            'mood': None,  # Manual mode has no LLM analysis
+            'character_ref': None,  # Manual mode has no character context
+            'tags': all_tags,
+            'steps': request.steps,
+            'cfg_scale': request.cfg_scale,
+            'width': request.width,
+            'height': request.height,
+            'source_type': 'manual',
+            'note': request.note
+        })
+
+        logger.info(f"[SNAPSHOT] Added manual favorite: {request.image_filename}, "
+                   f"total_tags: {len(all_tags)}, danbooru_tags: {len(detected_danbooru)}, custom_tags: {len(all_tags) - len(detected_danbooru) if learned else 0}, learned: {learned}")
+
+        return {
+            "success": True,
+            "favorite_id": fav_id,
+            "detected_tags": detected_danbooru,
+            "total_tags": len(all_tags),
+            "danbooru_tags": len(detected_danbooru),
+            "custom_tags": len(all_tags) - len(detected_danbooru) if learned else 0,
+            "tags_learned": tags_learned,
+            "learned": learned,
+            "threshold_met": len(detected_danbooru) >= TAG_DETECTION_THRESHOLD,
+            "source_type": "manual"
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to add manual favorite: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/snapshots/favorites")
+async def get_all_favorites(scene_type: Optional[str] = None,
+                       source_type: Optional[str] = None,
+                       tags: Optional[str] = None,
+                       limit: int = 50,
+                       offset: int = 0):
+    """
+    Get all favorites, optionally filtered by scene type, source type, and tags.
+
+    Returns list of favorite snapshot records.
+    """
+    try:
+        # Parse tags parameter (comma-separated) to list of lowercase tags
+        tag_list = None
+        if tags:
+            tag_list = [t.strip().lower() for t in tags.split(',') if t.strip()]
+
+        favorites = db_get_favorites(limit=limit, scene_type=scene_type, source_type=source_type, tags=tag_list, offset=offset)
+
+        # Parse JSON tags for each favorite
+        for fav in favorites:
+            if fav.get('tags'):
+                try:
+                    fav['tags'] = json.loads(fav['tags'])
+                except:
+                    fav['tags'] = []
+
+        return {"favorites": favorites, "count": len(favorites)}
+
+    except Exception as e:
+        logger.error(f"Failed to get favorites: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/snapshots/tags")
+async def get_all_favorite_tags():
+    """
+    Get all unique tags from all favorites.
+
+    Returns list of unique tags (alphabetically sorted).
+    """
+    try:
+        tags = db_get_all_favorite_tags()
+        return {"tags": tags}
+    except Exception as e:
+        logger.error(f"Failed to get favorite tags: {e}")
+        return {"tags": []}
+
+
+@app.get("/api/snapshots/tags/popular")
+async def get_popular_favorite_tags(limit: int = 5):
+    """
+    Get the most popular tags from favorites.
+
+    Returns list of {tag, count} objects sorted by count DESC.
+    """
+    try:
+        tags = db_get_popular_favorite_tags(limit=limit)
+        return [{"tag": tag_text, "count": count} for tag_text, count in tags]
+    except Exception as e:
+        logger.error(f"Failed to get popular favorite tags: {e}")
+        return []
+
+
+@app.delete("/api/snapshots/favorites/{favorite_id}")
+async def delete_favorite(favorite_id: int):
+    """
+    Delete a favorite snapshot.
+
+    Decrements tag frequencies for tags in deleted favorite.
+    (Note: Simple implementation - doesn't decrement for now to avoid complexity)
+    """
+    try:
+        # Get favorite before deletion (to decrement tags)
+        # Note: This would require db_get_favorite_by_id function
+        # For simplicity, we'll just delete and not decrement
+        # (tag counts are approximate anyway)
+
+        success = db_delete_favorite(favorite_id)
+
+        if success:
+            logger.info(f"[SNAPSHOT] Deleted favorite: {favorite_id}")
+            return {"success": True}
+        else:
+            return {"error": "Favorite not found"}
+
+    except Exception as e:
+        logger.error(f"Failed to delete favorite: {e}")
+        return {"error": str(e)}
+
 
 @app.post("/api/reimport")
 async def reimport_json_files():

@@ -197,6 +197,8 @@ Once running, open your browser and navigate to:
 
 ## Basics of Using the App
 
+> ⚠️ **First Run Notice:** The first time you start NeuralRP, it will download a ~400MB AI model for semantic search. This takes 5-10 minutes depending on your internet speed. The app may appear to hang during this time—**this is normal**. Subsequent launches will be much faster.
+
 ### Starting a New Chat
 
 **Narrator Mode (Default):**
@@ -250,6 +252,143 @@ If you've assigned Danbooru tags to a character (in Character Editor), use `[Cha
 - NeuralRP automatically expands to: `grizzled bartender, short, stout, intimidating, gentle, beard, apron, warm lighting`
 
 This ensures consistent character appearance across all generations.
+
+**Favorites and Personalized Learning:**
+
+NeuralRP learns your visual preferences from your favorited images:
+- **❤️ Favorite Images**: Save your best snapshots and manual generations
+- **Automatic Tag Learning**: System detects Danbooru tags you prefer
+- **Personalized Suggestions**: Future generations biased toward your favorite styles
+- **Persistent Library**: Favorites saved across all chat sessions
+- **Variation Mode**: Regenerate snapshots with novel tag combinations
+- **Works for Both**: Snapshots (📸) and manual images (Vision Panel) support favorites
+
+See "Favoriting Images (Snapshot and Manual)" section below for detailed instructions.
+
+### Generating Snapshots (Automatic Scene Images)
+
+NeuralRP can automatically generate scene images based on your chat context - no manual prompts needed!
+
+**How Snapshots Work:**
+
+1. **📸 Snapshot Button**: Click the camera icon in the chat toolbar to generate an image
+2. **Automatic Scene Analysis**: NeuralRP reads your last 2 turns of conversation to understand:
+   - What's happening (scene type: combat, dialogue, exploration, romance, magic, or other)
+   - Where it's taking place (setting: tavern, forest, castle, etc.)
+   - The mood and atmosphere (relaxed, tense, romantic, intense, etc.)
+3. **Smart Prompt Construction**: Builds a Stable Diffusion prompt using:
+   - **Quality tags**: masterpiece, best quality, high quality
+   - **Subject tags**: Character appearance (from danbooru tags or semantic matching)
+   - **Environment tags**: Setting elements (forest, tavern, castle, etc.)
+   - **Style tags**: Lighting, rendering style, mood colors
+4. **Image Generation**: Sends prompt to Stable Diffusion and displays result in chat
+
+**Character Tag Integration:**
+
+If your character has **Danbooru tags** assigned (Character Editor → Danbooru Tags field), snapshots will use those visual tags:
+- **Example**: `1girl, blonde hair, blue eyes, school uniform`
+- **Benefit**: Ensures consistent character appearance across all snapshots
+
+**Viewing Snapshot Details:**
+
+Each snapshot message shows:
+- **Image**: The generated scene image
+- **📋 Show Prompt Details** button (click to reveal):
+  - Positive Prompt (all tags used)
+  - Negative Prompt (quality filters)
+  - Scene Analysis (detected scene type, setting, mood)
+
+**Snapshot History:**
+
+Snapshots are automatically saved to your chat history. View past snapshots:
+1. Click **Chats (💬)** in header
+2. Saved chats show snapshot count in list
+3. Scroll through chat to find earlier snapshots
+
+**Red Light Indicator:**
+
+If the snapshot button shows a red light (🔴), Stable Diffusion is unavailable:
+- Check that A1111 is running
+- Verify SD API URL in Settings is correct
+- Ensure `--api` flag is enabled in A1111
+
+### Favoriting Images (Snapshot and Manual)
+
+Save your favorite images for future reference:
+
+**Snapshot Images:**
+
+1. Generate a snapshot (📸 button)
+2. Hover over the snapshot image
+3. Click the **❤️ icon** to add to favorites
+4. Heart turns red when favorited
+5. Click again to unfavorite
+
+**Manual Images (Vision Panel):**
+
+1. Open Image Panel (purple wand icon)
+2. Generate image with custom prompt
+3. Click **💾 Save as Favorite** button (appears after generation)
+4. Confirm favorite (optional notes)
+
+**What Happens When You Favorite:**
+
+- **Image Saved**: Stored in your favorites library
+- **Tags Learned**: NeuralRP learns from your visual preferences
+  - Automatically detects Danbooru tags in your favorite images
+  - Uses this data to improve future generation suggestions
+- **Persistent**: Favorites saved across chat sessions
+
+**Viewing Your Favorites:**
+
+Access your favorited images anytime:
+
+1. Click **🖼️ Gallery** in the header to open the Favorites sidebar
+2. Browse your saved images in a grid layout
+3. Filter by source type (Snapshot or Manual) using the toggle buttons
+4. Filter by tags - click any tag chip to show only images with that tag
+5. Search for specific tags using the search bar
+
+**Jump to Source (Double-Click):**
+
+Want to see the original chat context for a favorited image?
+
+- **Double-click any favorite image** to jump directly to the chat where it was generated
+- Automatically loads the chat and scrolls to the exact message
+- Message is highlighted with a pink glow effect for easy identification
+- Works for both snapshot and manual images
+
+*Note: If the chat was deleted or the image was removed, you'll see an error message.*
+
+**Note on Tag Learning:**
+
+When you favorite an image, NeuralRP analyzes its prompt:
+- If the prompt contains **2+ Danbooru tags**, those tags are "learned"
+- Future generations are biased toward your preferred tags
+- This creates a personalized style that matches your taste
+
+### Regenerating Snapshots (Variation Mode)
+
+Want a different version of the same scene? Use variation mode:
+
+**How It Works:**
+- Same scene analysis (understands your conversation)
+- Different tag selection based on novelty scoring
+- Explores less-used tag combinations for variety
+- Maintains scene relevance while changing visual elements
+
+**To Regenerate:**
+
+1. Generate a snapshot (📸 button)
+2. Click **🔄 Regenerate** button below the image
+3. New variation appears in chat with different tags
+4. Repeat as many times as you want for variety
+
+**What Makes Variations Different:**
+- Novelty scoring prioritizes tags you've used less
+- Explores alternative lighting, camera angles, style tags
+- Keeps scene type, setting, and mood consistent
+- Provides visual variety while maintaining narrative relevance
 
 ### Saving Chats
 
@@ -378,6 +517,11 @@ Configure NeuralRP:
 **API Configuration:**
 - **Kobold URL** - Backend API endpoint with Update & Test button
 - **SD API URL** - Stable Diffusion endpoint with Update & Test button
+  - **Required for:** Manual image generation (Vision Panel) AND Snapshots (📸 button)
+  - **Snapshot Feature:** Click camera icon to auto-generate scene images from chat context
+    - Uses the same resolution settings as manual generation (configure in Vision Panel)
+    - In performance mode, automatically drops to 384×384 when chat context is very long (≥15000 tokens)
+  - **Red Light Indicator:** 🔴 appears if SD is unavailable (check A1111 is running)
 
 **Data Recovery:**
 - **View Change History** - 30-day retention of all changes
@@ -455,6 +599,8 @@ Demo files are in SillyTavern V2 format. NeuralRP automatically syncs with JSON 
 - Reduce **GPU Layers** in KoboldCpp (try 20-30 layers instead of all)
 - Use smaller models (L3-8B instead of 13B/27B)
 - Reduce **Resolution** in image generation (512×512 instead of 768×768)
+  - **Note**: Snapshots use the same resolution settings as manual generation
+  - **Emergency Preset**: In performance mode, snapshots automatically drop to 384×384 when chat context exceeds 15000 tokens
 - Enable **Summarization** at 70-75% instead of 85%
 
 **For 12GB+ VRAM Users:**
@@ -463,6 +609,7 @@ Demo files are in SillyTavern V2 format. NeuralRP automatically syncs with JSON 
 - Use larger models (Tiefighter 13B or Gemma-3-27B)
 - Increase **Context Size** in KoboldCpp (4096-8192)
 - Generate higher resolution images (768×768 or 1024×1024)
+  - **Snapshots** will use your chosen resolution for both manual and auto-generated images
 
 ### Common Issues
 

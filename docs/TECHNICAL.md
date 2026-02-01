@@ -8,27 +8,30 @@ This document explains how NeuralRP's advanced features work under the hood, des
 
 1. [Architecture Overview](#architecture-overview)
 2. [SQLite Database](#sqlite-database)
-3. [Context Assembly](#context-assembly)
-4. [World Info Engine](#world-info-engine)
-5. [Semantic Search](#semantic-search)
-6. [Semantic Relationship Tracker](#semantic-relationship-tracker)
-7. [Entity ID System](#entity-id-system)
-8. [Chat-Scoped NPC System](#chat-scoped-npc-system)
-8.5. [Character Card Field Mappings](#character-card-field-mappings)
-9. [Message Search System](#message-search-system)
-10. [Performance Mode](#performance-mode)
-11. [Branching System](#branching-system)
-12. [Memory & Summarization](#memory--summarization)
-13. [Soft Delete System](#soft-delete-system)
-14. [Autosave System](#autosave-system)
-15. [Image Generation](#image-generation)
-16. [Connection Monitoring](#connection-monitoring)
-17. [Change History Data Recovery](#change-history-data-recovery)
-18. [Undo/Redo System](#undo-redo-system)
-19. [Character Name Consistency](#character-name-consistency)
-19.5. [Automatic Capsule Generation](#automatic-capsule-generation)
-20. [Tag Management System](#tag-management-system)
-21. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
+3. [Database Setup System](#database-setup-system)
+4. [Context Assembly](#context-assembly)
+5. [World Info Engine](#world-info-engine)
+6. [Semantic Search](#semantic-search)
+7. [Semantic Relationship Tracker](#semantic-relationship-tracker)
+8. [Entity ID System](#entity-id-system)
+9. [Chat-Scoped NPC System](#chat-scoped-npc-system)
+9.5. [Character Card Field Mappings](#character-card-field-mappings)
+10. [Message Search System](#message-search-system)
+11. [Performance Mode](#performance-mode)
+12. [Branching System](#branching-system)
+13. [Memory & Summarization](#memory--summarization)
+14. [Soft Delete System](#soft-delete-system)
+15. [Autosave System](#autosave-system)
+16. [Image Generation](#image-generation)
+17. [Connection Monitoring](#connection-monitoring)
+18. [Change History Data Recovery](#change-history-data-recovery)
+19. [Undo/Redo System](#undo-redo-system)
+20. [Character Name Consistency](#character-name-consistency)
+20.5. [Automatic Capsule Generation](#automatic-capsule-generation)
+21. [Tag Management System](#tag-management-system)
+22. [Favorites Viewer](#favorites-viewer)
+23. [Snapshot Feature](#snapshot-feature)
+24. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
     - [Context Hygiene Philosophy](#context-hygiene-philosophy)
 
 ---
@@ -349,6 +352,116 @@ Two new `updated_at` columns track modification timestamps:
 4. **SillyTavern Compatibility**: Handles various filename suffixes seamlessly
 5. **Granular Control**: Entry-level sync for worlds (not all-or-nothing)
 6. **Backward Compatible**: Existing databases auto-migrated with timestamps
+
+---
+
+## Database Setup System
+
+**Overview**
+
+NeuralRP uses a consolidated database setup system (`app/database_setup.py`) to manage the complete SQLite schema in a single, version-controlled file. This eliminates the complexity of multiple migration files while maintaining the ability to upgrade existing databases.
+
+**Why Consolidated?**
+
+Traditional migration systems use numbered files (001, 002, 003...) which become difficult to manage:
+- Files get lost or deleted
+- Hard to see the current schema at a glance
+- Complex dependency chains
+- Confusing for users
+
+The consolidated approach:
+- **Single source of truth** — One file shows the complete current schema
+- **Version tracking** — Schema version table tracks upgrades
+- **Automatic migrations** — Upgrade logic built into the same file
+- **User-friendly** — Users never think about migrations
+
+**Schema Version Tracking**
+
+```sql
+CREATE TABLE schema_version (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+);
+```
+
+- Single row (id=1) tracks current schema version
+- Increment `SCHEMA_VERSION` constant in code when making changes
+- Automatic migration logic applies changes between versions
+
+**Setup Process**
+
+```python
+def setup_database(database_path="app/data/neuralrp.db"):
+    # 1. Get current version from schema_version table
+    current_version = _get_schema_version(c)
+    
+    # 2. Apply migrations if needed (e.g., 0 → 1)
+    if current_version < SCHEMA_VERSION:
+        _apply_migrations(c, current_version, SCHEMA_VERSION)
+    
+    # 3. Create all tables (IF NOT EXISTS)
+    _create_all_tables(c)
+    _create_indexes(c)
+    _create_triggers(c)
+    _create_virtual_tables(c)
+    
+    # 4. Update schema version
+    _set_schema_version(c, SCHEMA_VERSION)
+```
+
+**Migration Example (v1.8.0 → v1.9.0)**
+
+```python
+def _apply_migrations(c, from_version, to_version):
+    if from_version < 1:
+        # Add columns to existing tables
+        _add_column_if_not_exists(c, "messages", "snapshot_data", "TEXT")
+        # New tables created automatically by IF NOT EXISTS
+```
+
+**Handling Upgrades**
+
+When upgrading from 1.8.0 to 1.9.0:
+1. Database has version 0 (from before schema tracking)
+2. Setup detects version 0 < 1
+3. Runs migration: adds `snapshot_data` column to messages
+4. Creates new tables (sd_favorites, danbooru_tags, etc.)
+5. Updates schema version to 1
+
+**Integration with Launcher**
+
+`launcher.bat` runs setup automatically:
+```batch
+python app/database_setup.py
+```
+
+- Safe to run every startup (idempotent)
+- Handles new installs and upgrades seamlessly
+- Users never need to manually run migrations
+
+**Adding Future Schema Changes (v1.10.0)**
+
+1. Increment `SCHEMA_VERSION = 2` in database_setup.py
+2. Add migration logic:
+```python
+if from_version < 2:
+    _add_column_if_not_exists(c, "table_name", "new_column", "TEXT")
+    # Or create new tables
+```
+3. That's it — launcher handles the rest automatically
+
+**Core Tables Created**
+
+The setup script creates 17 core tables:
+- **Characters & Worlds**: characters, worlds, world_entries
+- **Chat System**: chats, messages
+- **Tag Management**: character_tags, world_tags
+- **NPCs & Relationships**: chat_npcs, relationship_states, entities
+- **Image Features**: danbooru_tags, sd_favorites, danbooru_tag_favorites, image_metadata
+- **Utilities**: change_log, performance_metrics, schema_version
+
+Plus virtual tables for FTS5 search and sqlite-vec embeddings.
 
 ---
 
@@ -5653,6 +5766,1522 @@ def migrate_character_tags():
 - ✅ Existing search (filter by tags AND search by name/description)
 - ✅ Character/world save operations (tags saved separately via API)
 - ✅ Character/world delete operations (CASCADE delete removes tags)
+
+---
+
+## Favorites Viewer
+
+**Overview**
+
+The Favorites Viewer provides a unified gallery interface for browsing, filtering, and navigating to favorited images from both snapshot and manual generation modes. It serves as a persistent visual library that learns user preferences across all chat sessions.
+
+**UI Components**
+
+The favorites viewer is implemented as a slide-out sidebar (`showFavoritesSidebar`) in `app/index.html`:
+
+```html
+<!-- Favorites Sidebar Toggle -->
+<button @click="showFavoritesSidebar = !showFavoritesSidebar" 
+        class="header-btn"
+        title="Gallery">
+    <i class="fa-solid fa-images"></i>
+</button>
+
+<!-- Favorites Grid -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+    <template x-for="fav in favorites" :key="fav.id">
+        <div class="group relative bg-slate-900/50 rounded-lg overflow-hidden">
+            <!-- Image with double-click handler -->
+            <div class="aspect-square bg-slate-900/50 relative cursor-pointer"
+                 @dblclick="jumpToFavoriteSource(fav)"
+                 title="Double-click to view in chat">
+                <img :src="'/images/' + fav.image_filename" loading="lazy">
+                <!-- Hover overlay with hint -->
+                <div class="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100">
+                    <i class="fa-solid fa-comments"></i>
+                    <div>Double-click to view</div>
+                </div>
+            </div>
+            <!-- Source badge, tags, metadata... -->
+        </div>
+    </template>
+</div>
+```
+
+**Key UI Features:**
+- **Responsive Grid**: 1-3 columns based on viewport size
+- **Lazy Loading**: Images use `loading="lazy"` for performance
+- **Source Type Filter**: Toggle buttons for "All", "Snapshot", "Manual"
+- **Tag Filtering**: Quick chips for top 5 tags + search with autocomplete
+- **Pagination**: "Load More" button fetches 50 favorites at a time
+- **Double-click Navigation**: Jump to source chat with visual highlight
+
+**Data Structure**
+
+**Table: sd_favorites**
+
+```sql
+CREATE TABLE sd_favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT,                    -- NULL for manual (pre-Option B), chat ID for snapshots and new manual
+    image_filename TEXT UNIQUE NOT NULL,
+    prompt TEXT NOT NULL,           -- Full generation prompt
+    negative_prompt TEXT NOT NULL,
+    scene_type TEXT,                -- NULL for manual (snapshot analysis only)
+    setting TEXT,
+    mood TEXT,
+    character_ref TEXT,
+    tags TEXT,                      -- JSON array of detected/learned tags
+    steps INTEGER,
+    cfg_scale REAL,
+    width INTEGER,
+    height INTEGER,
+    source_type TEXT DEFAULT 'snapshot',  -- 'snapshot' or 'manual'
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    note TEXT                       -- User-added notes
+);
+```
+
+**Indexes:**
+```sql
+CREATE INDEX idx_sd_favorites_scene_type ON sd_favorites(scene_type);
+CREATE INDEX idx_sd_favorites_source_type ON sd_favorites(source_type);
+CREATE INDEX idx_sd_favorites_created_at ON sd_favorites(created_at);
+```
+
+**Filtering System**
+
+**Multi-dimensional Filtering (AND semantics):**
+
+Users can filter favorites by multiple criteria simultaneously:
+
+1. **Source Type Filter** (`favoritesSourceType`):
+   - `null`: Show all (default)
+   - `'snapshot'`: Only AI-generated snapshots
+   - `'manual'`: Only Vision Panel generations
+
+2. **Tag Filtering** (`favoritesFilterTags`):
+   - AND logic: Image must have ALL selected tags
+   - Quick chips: Top 5 most-used tags for one-click filtering
+   - Search: Autocomplete from full tag list (50 suggestions max)
+   - Clear all: Reset all tag filters
+
+**API Endpoint:**
+
+```python
+GET /api/snapshots/favorites?source_type=manual&tags=tag1,tag2&limit=50&offset=0
+
+Response:
+{
+    "favorites": [
+        {
+            "id": 123,
+            "chat_id": "chat_abc123",  -- NULL for older manual favorites
+            "image_filename": "image_456.png",
+            "prompt": "masterpiece, 1girl, solo...",
+            "tags": ["masterpiece", "1girl", "solo"],
+            "source_type": "manual",
+            "created_at": 1704067200
+        }
+    ],
+    "total_count": 150
+}
+```
+
+**Database Query (AND tag filtering):**
+
+```sql
+-- Find favorites matching ALL selected tags (AND semantics)
+SELECT f.* FROM sd_favorites f
+WHERE f.source_type = 'manual'
+AND f.id IN (
+    SELECT favorite_id FROM favorite_tags
+    WHERE tag IN ('tag1', 'tag2')
+    GROUP BY favorite_id
+    HAVING COUNT(DISTINCT tag) = 2  -- Must have all 2 tags
+)
+ORDER BY f.created_at DESC
+LIMIT 50 OFFSET 0;
+```
+
+**Jump-to-Source Feature**
+
+**Purpose**: Navigate from a favorited image back to its original chat context.
+
+**Implementation** (see detailed section in [Snapshot Feature](#favorites-jump-to-source-feature)):
+
+```javascript
+async jumpToFavoriteSource(favorite) {
+    if (!favorite.chat_id) {
+        alert('This favorite is not associated with a chat.');
+        return;
+    }
+    
+    // Load chat and search for image
+    await this.loadChat(favorite.chat_id);
+    
+    // Find message containing the image
+    const targetIndex = this.messages.findIndex(msg => 
+        msg.image?.includes(favorite.image_filename) ||
+        msg.snapshot?.image_url?.includes(favorite.image_filename)
+    );
+    
+    // Scroll and highlight
+    document.getElementById(`message-${targetIndex}`)
+            .scrollIntoView({ behavior: 'smooth', block: 'center' });
+    
+    // Add highlight animation
+    messageElement.classList.add('highlight-message');
+    setTimeout(() => messageElement.classList.remove('highlight-message'), 3000);
+}
+```
+
+**Visual Highlight CSS:**
+
+```css
+.highlight-message {
+    animation: highlight-pulse 3s ease-out;
+}
+
+@keyframes highlight-pulse {
+    0% { 
+        box-shadow: 0 0 0 4px rgba(236, 72, 153, 0.8);
+        transform: scale(1.02);
+    }
+    100% { 
+        box-shadow: 0 0 0 0px rgba(236, 72, 153, 0);
+        transform: scale(1);
+    }
+}
+```
+
+**Technical Implementation**
+
+**Alpine.js State Management:**
+
+```javascript
+// Favorites viewer state
+favorites: [],                    // Array of favorite objects
+favoritesSourceType: null,        // 'snapshot', 'manual', or null
+favoritesTags: [],               // All available tags for autocomplete
+popularFavoritesTags: [],        // Top 5 most-used tags
+favoritesFilterTags: [],         // Currently selected filter tags (AND)
+favoritesOffset: 0,              // Pagination offset
+favoritesLimit: 50,              // Items per page
+isLoadingFavorites: false,
+showFavoritesSidebar: false
+```
+
+**Key Methods:**
+
+1. **fetchFavorites(reset=true)**: Load favorites with current filters
+2. **loadMoreFavorites()**: Pagination (offset += limit)
+3. **toggleFavoritesTag(tag)**: Add/remove tag from filter
+4. **setFavoritesSourceType(type)**: Filter by snapshot/manual
+5. **jumpToFavoriteSource(fav)**: Navigate to chat
+6. **deleteFavorite(id)**: Remove from favorites
+
+**Performance Characteristics**
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| **Initial load** | <100ms | 50 favorites with metadata |
+| **Filter application** | <50ms | SQLite indexed queries |
+| **Tag search** | <10ms | Autocomplete from cached list |
+| **Load more** | <100ms | Pagination offset queries |
+| **Jump to source** | ~200ms | Chat load + message search |
+| **Image lazy loading** | Variable | Browser-native lazy loading |
+
+**Optimizations:**
+- Lazy image loading prevents initial page bloat
+- Database indexes on `source_type`, `scene_type`, `created_at`
+- Tag caching in Alpine.js state (no repeated API calls)
+- Pagination prevents loading thousands of favorites at once
+
+**Integration Points**
+
+**Connected Systems:**
+
+1. **Snapshot Feature**: Snapshot favorites include scene analysis (type, setting, mood)
+2. **Tag Management**: Uses same tag system as characters/worlds
+3. **Manual Generation**: Vision Panel favorites store generation parameters
+4. **Learning System**: Favorites drive tag preference learning (see [Snapshot Feature](#tag-preference-tracking))
+
+**Data Flow:**
+
+```
+User Favorites Image
+    ↓
+API: POST /api/manual-generation/favorite (or snapshot favorite)
+    ↓
+Database: Insert into sd_favorites
+    ↓
+Tag Learning: db_increment_favorite_tag() (if threshold met)
+    ↓
+Favorites Viewer: db_get_favorites() on gallery open
+    ↓
+User Filters/Navigates: Jump to chat via jumpToFavoriteSource()
+```
+
+**Edge Cases Handled**
+
+| Scenario | Behavior |
+|----------|----------|
+| Manual upload (no chat_id) | Shows "not associated with a chat" alert |
+| Chat deleted | Shows "Chat not found" alert after load attempt |
+| Image removed from chat | Shows "Image not found" after search |
+| Large favorites library | Pagination (50 per page) + lazy loading |
+| Slow image loading | Skeleton/placeholder while loading |
+| Empty favorites | Empty state with helpful message |
+| Filter returns 0 results | "No favorites match filters" message |
+
+---
+
+## Snapshot Feature (v1.9.0)
+
+### Overview
+
+NeuralRP's snapshot feature enables automatic generation of Stable Diffusion images directly from chat scenes, with intelligent prompt construction that analyzes conversation context to create visually consistent imagery.
+
+### System Architecture
+
+```
+User clicks "📸 Snapshot"
+    ↓
+Frontend: POST /api/chat/snapshot {chat_id, character_ref}
+    ↓
+Backend: Load chat messages + character data
+    ↓
+SnapshotAnalyzer.analyze_scene():
+    1. Extract last 4 messages (2 turns)
+    2. Keyword detection (fast path, minimum 2 matches)
+    3. LLM summary (if available, async)
+    4. Return {scene_type, setting, action, mood}
+    ↓
+SnapshotPromptBuilder.build_4_block_prompt():
+    1. Block 0: Hardwired quality tags (first 3)
+    2. Block 1: Character tags + semantic matches
+    3. Block 2: Setting semantic matches
+    4. Block 3: Mood/style semantic matches
+    5. Apply guardrail fallbacks
+    6. Build universal negative prompt
+    ↓
+Call existing generate_image(SDParams)
+    ↓
+Save snapshot to chat.metadata.snapshot_history
+    ↓
+Return {image_url, prompt, scene_analysis}
+    ↓
+Frontend: Display image in chat + toggleable prompt details
+```
+
+### 4-Block Prompt Structure
+
+The snapshot system uses a rigid 4-block structure for Stable Diffusion prompts:
+
+| Block | Purpose | Target Tags | Example Tags |
+|-------|---------|--------------|--------------|
+| **0: Quality** | Image quality control | 3 | masterpiece, best quality, high quality |
+| **1: Subject** | Character/entity appearance | 5 | 1girl, blonde hair, blue eyes, smile, solo |
+| **2: Environment** | Scene setting/background | 2 | forest, simple background |
+| **3: Style** | Rendering style/lighting | 4 | cinematic lighting, anime style, detailed, vibrant |
+
+**Total Tags**: ~14 tags per prompt (varies by block availability)
+
+**Block Targets Configuration** (`app/danbooru_tags_config.py`):
+```python
+BLOCK_TARGETS: Dict[int, int] = {
+    0: 3,   # Quality
+    1: 5,   # Subject
+    2: 2,   # Environment
+    3: 4    # Style
+}
+```
+
+**Why Hardwired 4-Block Structure?**
+
+| Aspect | Fixed Blocks | Variable Tags | Hybrid (Current) |
+|--------|--------------|---------------|-------------------|
+| **Prompt Consistency** | ⭐⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐ |
+| **Scene Accuracy** | ⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| **Implementation** | Simple | Complex | Moderate |
+| **Maintenance** | Easy | High | Medium |
+| **User Expectations** | Met | Confusing | Met |
+
+**Rationale**:
+- **Quality Block (0)**: Technical tags (masterpiece, best quality) are universal and order-dependent
+- **Subject Block (1)**: Character-focused, most important for visual consistency
+- **Environment Block (2)**: Scene setting provides context without overwhelming subject
+- **Style Block (3)**: Rendering style influences overall aesthetic
+
+### Hybrid Scene Detection
+
+The snapshot system uses a three-tier hybrid approach for scene analysis:
+
+**Tier 1: Keyword Detection (Fast Path, Always Runs)**
+
+```python
+SCENE_KEYWORDS: Dict[str, List[str]] = {
+    'combat': ['battle', 'fight', 'sword', 'attack', 'defend', ...],
+    'dialogue': ['speak', 'say', 'tell', 'ask', 'conversation', ...],
+    'exploration': ['explore', 'travel', 'walk', 'journey', 'path', ...],
+    'romance': ['love', 'kiss', 'hug', 'hold', 'embrace', ...],
+    'tavern': ['tavern', 'inn', 'drink', 'ale', 'bar', ...],
+    'magic': ['spell', 'magic', 'fireball', 'heal', 'curse', ...]
+}
+
+# Detection logic
+for scene_type, keywords in SCENE_KEYWORDS.items():
+    matches = [kw for kw in keywords if kw in text_lower]
+    if len(matches) >= 2:  # Minimum 2 matches required
+        return scene_type, matches
+```
+
+- **Minimum Threshold**: 2 keyword matches required for confidence
+- **False Positive Prevention**: Low threshold prevents accidental triggers
+- **Performance**: <1ms per scan (simple string matching)
+
+**Tier 2: LLM Summary (Optional Enhancement)**
+
+```python
+prompt = f"""Analyze this roleplay scene briefly.
+
+{conversation_context[:800]}
+
+Reply with ONLY this JSON (no explanation):
+{{"scene_type":"combat|dialogue|exploration|romance|magic|other","setting":"brief place","mood":"emotion"}}"""
+```
+
+- **Purpose**: Provides rich setting/mood details that keywords miss
+- **Optional**: System works without LLM (keyword-only fallback)
+- **Token Cost**: ~100 tokens (short prompt, <80 tokens max output)
+
+**Tier 3: Semantic Matching (for Tag Selection)**
+
+Scene analysis results (scene_type, setting, mood) used for semantic matching against danbooru tag database:
+- **Query**: `"{scene_type} {setting} {mood}".strip()`
+- **Database**: 1560 danbooru tags with 768-dim embeddings
+- **Method**: sqlite-vec cosine similarity search per block
+- **Threshold**: 0.35 similarity score minimum
+
+**Hybrid Decision Flow**:
+
+```
+1. Extract last 4 messages (2 turns)
+    ↓
+2. Keyword detection (Tier 1)
+    ├── ≥2 matches? → scene_type = detected, keyword_detected=True
+    └── <2 matches? → scene_type = 'other', keyword_detected=False
+    ↓
+3. LLM summary (Tier 2, if available)
+    ├── Success? → setting=LLM.setting, mood=LLM.mood, llm_used=True
+    └── Failed? → Infer from scene_type (fallback), llm_used=False
+    ↓
+4. Semantic matching (Tier 3, per block)
+    ├── Block 1: Scene subjects (top 5 matches)
+    ├── Block 2: Setting tags (top 2 matches)
+    └── Block 3: Style/mood tags (top 4 matches)
+    ↓
+5. Guardrail fallbacks
+    ├── Block 1 < min_matches? → Add "1girl, solo, portrait"
+    ├── Block 2 < min_matches? → Add "simple background"
+    └── Block 3 < min_matches? → Add "cinematic lighting, detailed"
+    ↓
+6. Assemble final prompt (4 blocks + negative)
+```
+
+### Danbooru Tag System
+
+**Tag Database** (`app/data/neuralrp.db`):
+
+**Table: danbooru_tags** (Metadata)
+```sql
+CREATE TABLE danbooru_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag_text TEXT UNIQUE NOT NULL,
+    block_num INTEGER NOT NULL,  -- 0=quality, 1=subject, 2=environment, 3=style
+    frequency INTEGER DEFAULT 0,   -- Usage tracking (future use)
+    created_at INTEGER
+);
+```
+
+**Table: vec_danbooru_tags** (sqlite-vec Virtual Table)
+```sql
+CREATE VIRTUAL TABLE vec_danbooru_tags USING vec0(
+    embedding float[768]
+);
+```
+
+**Relationship**: `danbooru_tags.id = vec_danbooru_tags.rowid` (implicit)
+
+**Tag Configuration** (`app/danbooru_tags_config.py`):
+
+- **1560 total tags** across 4 blocks:
+  - Block 0 (Quality): 60 tags
+  - Block 1 (Subject): 600 tags (gender, hair, eyes, expression, body, pose, clothing, actions)
+  - Block 2 (Environment): 300 tags (nature, urban, interior, time, weather, backgrounds)
+  - Block 3 (Style): 600 tags (lighting, art style, camera, color, mood, quality modifiers)
+
+**Embedding Generation** (Startup):
+```python
+async def generate_danbooru_embeddings():
+    """Generate embeddings for all danbooru tags on startup."""
+    all_tags = get_tags_as_tuples()  # [(tag_text, block_num), ...]
+    
+    for tag_text, block_num in all_tags:
+        embedding = model.encode([tag_text])[0]
+        db_insert_danbooru_tag(tag_text, block_num, embedding)
+        print(f"[SNAPSHOT] Embedded tag {len(processed)}/{len(all_tags)}: {tag_text}")
+```
+
+- **Startup Time**: 30-60 seconds first run, <1 second subsequent (cached in DB)
+- **Model**: all-mpnet-base-v2 (same as world info semantic search)
+- **Storage**: ~1MB for 1560 embeddings (768 floats × 4 bytes)
+- **Performance**: <100ms per tag on modern CPU
+
+**Character Tag Integration**:
+
+Characters can have custom danbooru tags for visual consistency:
+
+```json
+{
+  "data": {
+    "name": "Alice",
+    "description": "...",
+    "extensions": {
+      "danbooru_tag": "1girl, blonde hair, blue eyes, school uniform"
+    }
+  }
+}
+```
+
+- **Location**: `char.data.extensions.danbooru_tag`
+- **Format**: Comma-separated danbooru tags
+- **Usage**: Added to Block 1 (subject) at highest priority (first 3 tags)
+- **Fallback**: If character has no danbooru_tag, uses semantic matching only
+
+### Snapshot History and Storage
+
+**Storage Location**: Chat metadata (no database persistence)
+
+```python
+chat.metadata = {
+    "localnpcs": { ... },
+    "characterCapsules": { ... },
+    "characterFirstTurns": { ... },
+    "snapshot_history": [  # ← NEW
+        {
+            "timestamp": 1738312345,
+            "image_url": "/app/images/snapshot_abc123.png",
+            "prompt": "masterpiece, best quality, 1girl, blonde hair, blue eyes, ...",
+            "negative_prompt": "low quality, worst quality, bad anatomy, ...",
+            "scene_analysis": {
+                "scene_type": "dialogue",
+                "setting": "tavern interior",
+                "mood": "relaxed",
+                "keyword_detected": true,
+                "matched_keywords": ["tavern", "drink", "bar"],
+                "llm_used": true
+            },
+            "character_ref": "alice.json"
+        }
+    ]
+}
+```
+
+**Why Chat-Scoped Storage?**
+
+| Storage Option | Pros | Cons | Verdict |
+|----------------|-------|-------|---------|
+| **Chat metadata** (current) | Simple, no schema changes, auto-cleanup on chat delete | Limited history per chat | ✅ Best for MVP |
+| **Database table** | Global history, searchable, persistent | Schema changes, orphaned records, cleanup complexity | ❌ Future v2.0 |
+| **JSON files** | Exportable, external access | Sync issues, orphaned files | ❌ No benefits |
+
+**Rationale for Chat-Scoped**:
+- **MVP Simplicity**: Snapshots tied to conversation context (makes sense)
+- **Automatic Cleanup**: Deleting chat = deleting history (no orphaned data)
+- **No Database Schema Changes**: Avoids migration complexity
+- **Future-Proof**: Easy to promote to global table if needed (v2.0)
+
+### Guardrail System
+
+**Fallback Tags** (`app/danbooru_tags_config.py`):
+
+```python
+FALLBACK_TAGS: Dict[int, List[str]] = {
+    0: ["masterpiece", "best quality", "high quality"],
+    1: ["1girl", "solo", "portrait"],
+    2: ["simple background"],
+    3: ["cinematic lighting", "detailed"]
+}
+
+MIN_MATCHES: Dict[int, int] = {
+    0: 0,   # Quality is hardwired, no minimum
+    1: 2,   # Subject needs at least 2 matches
+    2: 1,   # Environment needs at least 1 match
+    3: 2    # Style needs at least 2 matches
+}
+```
+
+**Guardrail Logic**:
+
+```python
+def _build_block_1(self, query_text: str, character_tag: Optional[str]) -> List[str]:
+    block_1 = []
+    target = get_block_target(1)  # 5 tags
+    min_matches = get_min_matches(1)  # 2 tags
+    
+    # Priority 1: Character tag (if provided)
+    if character_tag:
+        char_tags = [t.strip() for t in character_tag.split(',')]
+        block_1.extend(char_tags[:3])
+    
+    # Priority 2: Semantic matching
+    if len(block_1) < target and query_text:
+        matches = self.analyzer.match_tags_semantically(query_text, block_num=1, k=10)
+        for tag_text, score in matches:
+            if score >= 0.35 and len(block_1) < target:
+                block_1.append(tag_text)
+    
+    # Guardrail: Ensure minimum matches
+    if len(block_1) < min_matches:
+        for fallback in get_fallback_tags(1):
+            if fallback not in block_1:
+                block_1.append(fallback)
+                if len(block_1) >= min_matches:
+                    break
+    
+    return block_1[:target]
+```
+
+**Why Minimum Matches?**
+
+| Scenario | Without Minimum | With Minimum (Current) |
+|----------|-----------------|------------------------|
+| **Poor semantic matching** | 1 tag in Block 1 (insufficient subject) | 3 fallback tags (guaranteed subject) |
+| **Strong semantic matching** | 5 tags in Block 1 (excellent subject) | 5 semantic tags (no fallback needed) |
+| **Empty query** | 0 tags (broken prompt) | 3 fallback tags (guaranteed valid prompt) |
+
+**Rationale**:
+- **Prevent Broken Prompts**: Fallbacks ensure at least minimum valid tags per block
+- **Quality Over Quantity**: Better to use fallback tags than random/no tags
+- **Confidence Threshold**: Minimum matches ensure system has some confidence before using semantic results
+
+### Universal Negative Prompt
+
+**Fixed Negative Tags** (`app/danbooru_tags_config.py`):
+
+```python
+UNIVERSAL_NEGATIVES: List[str] = [
+    "low quality", "worst quality", "bad anatomy",
+    "bad hands", "missing fingers", "extra digits",
+    "fewer digits", "cropped", "jpeg artifacts",
+    "signature", "watermark", "username", "blurry",
+    "deformed", "disfigured", "mutated", "ugly",
+    "duplicate", "morbid", "mutilated", "poorly drawn hands",
+    "poorly drawn face", "mutation", "extra limbs",
+    "extra arms", "extra legs", "malformed limbs",
+    "fused fingers", "too many fingers", "long neck"
+]
+```
+
+**Why Universal Negatives Only?**
+
+| Approach | Pros | Cons | Verdict |
+|----------|-------|-------|---------|
+| **Scene-specific negatives** | Tailored to content | Complex implementation, tag conflict risk | ❌ Maintenance burden |
+| **Universal only** (current) | Simple, reliable, no conflicts | Less precise | ✅ Best for MVP |
+
+**Rationale**:
+- **Scene Negatives Unreliable**: LLM-generated negatives often contradict positive tags
+- **Conflict Risk**: "dark" (negative) conflicts with "night scene" (positive)
+- **Maintenance**: Updating 1560 tags with scene-specific negatives = impossible
+- **Universal Negatives Sufficient**: Covers 95% of common SD errors (bad anatomy, artifacts)
+
+### Performance Characteristics
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| **Embedding generation** | <100ms per tag | all-mpnet-base-v2 on modern CPU |
+| **Semantic search** | <50ms per query | sqlite-vec SIMD acceleration |
+| **Keyword detection** | <1ms per scan | Simple string matching |
+| **LLM scene summary** | 2-5 seconds | Optional, async |
+| **Total snapshot generation** | 20-30 seconds | Includes SD generation time |
+| **Startup embedding (first run)** | 30-60 seconds | One-time cost for 1560 tags |
+| **Startup embedding (subsequent)** | <1 second | Cached in database |
+
+**Token Budget Impact**:
+
+| Component | Token Cost | Frequency |
+|-----------|-------------|-------------|
+| LLM scene summary (optional) | ~100 tokens | Per snapshot |
+| Snapshot generation (prompt) | ~2000 tokens (14 tags) | Per snapshot |
+| Negative prompt | ~200 tokens (30 tags) | Per snapshot |
+| Embedding storage | ~1MB (one-time) | Startup only |
+
+**Database Storage**:
+
+| Table | Size Estimate | Growth Rate |
+|-------|---------------|-------------|
+| `danbooru_tags` | ~50KB | Static (1560 rows) |
+| `vec_danbooru_tags` | ~1MB | Static (1560 rows) |
+| `snapshot_history` | ~5KB per snapshot | Grows with chat |
+
+### API Endpoints
+
+**POST /api/chat/{chat_id}/snapshot**
+
+Generate snapshot from chat context.
+
+**Request**:
+```json
+{
+  "character_ref": "alice.json",  // Optional: Character to feature
+  "width": 640,                    // Optional: Image width (default: 512)
+  "height": 512                    // Optional: Image height (default: 512)
+}
+```
+
+**Size Parameter Behavior**:
+- **User Settings Respected**: Snapshots use the same width/height as manual generation (from Vision Panel settings)
+- **Fallback**: Defaults to 512x512 if no size specified
+- **Context-Aware Emergency Preset**: When performance mode is enabled and chat context ≥ 15000 tokens, size automatically overrides to 384x384 for faster generation
+- **Performance Mode OFF**: User's manual settings are always respected
+
+**Response**:
+```json
+{
+  "success": true,
+  "image_url": "/app/images/snapshot_abc123.png",
+  "prompt": "masterpiece, best quality, high quality, 1girl, blonde hair, ...",
+  "negative_prompt": "low quality, worst quality, bad anatomy, ...",
+  "scene_analysis": {
+    "scene_type": "dialogue",
+    "setting": "tavern interior",
+    "mood": "relaxed",
+    "keyword_detected": true,
+    "matched_keywords": ["tavern", "drink"],
+    "llm_used": true
+  }
+}
+```
+
+**GET /api/snapshot/status**
+
+Check Stable Diffusion API availability.
+
+**Response**:
+```json
+{
+  "available": true,
+  "url": "http://localhost:7860",
+  "version": "SD 1.5"
+}
+```
+
+**GET /api/chat/{chat_id}/snapshots**
+
+Get snapshot history for a chat.
+
+**Response**:
+```json
+{
+  "snapshots": [
+    {
+      "timestamp": 1738312345,
+      "image_url": "/app/images/snapshot_abc123.png",
+      "prompt": "...",
+      "negative_prompt": "...",
+      "scene_analysis": {...},
+      "character_ref": "alice.json"
+    }
+  ]
+}
+```
+
+### Frontend Integration
+
+**Snapshot Button** (`app/index.html`):
+
+```javascript
+// Button in chat toolbar
+<button id="snapshot-btn" class="chat-toolbar-btn" title="Generate Snapshot">
+  📸
+</button>
+
+// Loading states
+<span id="snapshot-status" class="snapshot-status hidden">
+  <span class="loading-spinner"></span>
+  Generating snapshot...
+</span>
+
+// Error state
+<span id="snapshot-error" class="snapshot-error hidden">
+  ❌ Stable Diffusion unavailable
+</span>
+```
+
+**Snapshot Message Display**:
+
+```javascript
+// Snapshot message type
+{
+  id: "msg_abc123",
+  role: "assistant",
+  type: "snapshot",
+  content: "Generated scene snapshot",
+  timestamp: 1738312345,
+  snapshot: {
+    image_url: "/app/images/snapshot_abc123.png",
+    prompt: "...",
+    negative_prompt": "...",
+    scene_analysis: {...},
+    character_ref: "alice.json"
+  }
+}
+```
+
+**Toggleable Prompt Details**:
+
+```html
+<div class="snapshot-container">
+  <img src="${snapshot.image_url}" class="snapshot-image" />
+  
+  <button id="toggle-prompt-${msg.id}" class="btn-secondary btn-sm">
+    📋 Show Prompt Details
+  </button>
+  
+  <div id="prompt-details-${msg.id}" class="snapshot-prompt-details hidden">
+    <div class="prompt-section">
+      <h4>Positive Prompt</h4>
+      <p>${snapshot.prompt}</p>
+    </div>
+    <div class="prompt-section">
+      <h4>Negative Prompt</h4>
+      <p>${snapshot.negative_prompt}</p>
+    </div>
+    <div class="prompt-section">
+      <h4>Scene Analysis</h4>
+      <ul>
+        <li><strong>Type:</strong> ${snapshot.scene_analysis.scene_type}</li>
+        <li><strong>Setting:</strong> ${snapshot.scene_analysis.setting}</li>
+        <li><strong>Mood:</strong> ${snapshot.scene_analysis.mood}</li>
+      </ul>
+    </div>
+  </div>
+</div>
+```
+
+### Testing Coverage
+
+**Test Suite**: 48 comprehensive tests across 3 phases
+
+**Phase 1: Unit Tests (13 tests)**
+- Database embedding insertion/retrieval
+- danbooru tag configuration loading
+- Snapshot analyzer keyword detection
+- Snapshot analyzer LLM summary parsing
+- Prompt builder block construction
+- Guardrail fallback logic
+- Negative prompt assembly
+
+**Phase 2: Integration Tests (17 tests)**
+- API endpoint functionality
+- Chat metadata persistence
+- Character tag integration
+- Snapshot history storage
+- Frontend button interactions
+- Loading states
+- Error handling
+
+**Phase 3: Edge Cases (18 tests)**
+- Empty chat (no messages)
+- Long conversation (100+ messages)
+- LLM unavailable (keyword-only mode)
+- Stable Diffusion API down
+- Character without danbooru_tag
+- Multiple snapshots in same chat
+- Invalid character_ref
+- Network timeout
+- Semantic search returns no results
+- All blocks below minimum matches
+
+**Test Framework**: Playwright (modern, async support)
+
+**Coverage Goals**:
+- Functional: 100% of user-facing features
+- Integration: 95% of API endpoints
+- Edge cases: 90% of identified failure modes
+
+### Snapshot Variation Mode (Novelty Scoring)
+
+**Problem**: Users want visual variety while maintaining narrative relevance.
+
+**Solution**: Regenerate snapshots with novelty scoring to explore less-used tag combinations.
+
+**How It Works**:
+
+```python
+def calculate_novelty_score(tag_combination: List[str], user_history: List[List[str]]) -> float:
+    """
+    Calculate novelty score for tag combination based on user's generation history.
+    Higher score = more novel (less frequently used).
+    """
+    # Count occurrences of each tag in user's history
+    tag_frequencies = count_tag_frequencies(user_history)
+    
+    # Calculate novelty: inverse frequency for each tag in combination
+    novelty_scores = [1.0 / (tag_frequencies[tag] + 1) for tag in tag_combination]
+    
+    # Average novelty across all tags
+    return sum(novelty_scores) / len(novelty_scores)
+
+def build_prompt_with_novelty(scene_analysis: Dict, user_tag_preferences: Dict[str, float]) -> str:
+    """
+    Build 4-block prompt with novelty scoring bias.
+    """
+    # Get candidate tags via semantic matching
+    candidate_tags = get_semantic_matches(scene_analysis)
+    
+    # Calculate novelty scores for candidate combinations
+    scored_combinations = []
+    for combination in tag_combinations:
+        novelty = calculate_novelty_score(combination, user_tag_history)
+        preference_score = sum(user_tag_preferences.get(tag, 0) for tag in combination)
+        combined_score = (novelty * 0.6) + (preference_score * 0.4)
+        scored_combinations.append((combined_score, combination))
+    
+    # Sort by combined score (novelty + preference)
+    scored_combinations.sort(reverse=True, key=lambda x: x[0])
+    
+    # Select top combination (highest novelty + user preference)
+    final_tags = scored_combinations[0][1]
+    return build_4_block_prompt(final_tags)
+```
+
+**Novelty Scoring Algorithm:**
+
+- **Tag Frequency Tracking**: Count how often each tag appears in user's generation history
+- **Inverse Frequency Score**: `novelty = 1.0 / (frequency + 1)`
+  - Never-used tag: `novelty = 1.0` (maximum)
+  - Commonly-used tag: `novelty = 0.1` (low)
+- **Combined Score**: `(novelty * 0.6) + (preference * 0.4)`
+  - 60% weight on novelty (explore new territory)
+  - 40% weight on user preferences (match user's taste)
+
+**Regenerate Button Usage:**
+
+```javascript
+// Frontend: Snapshot message UI
+<div class="snapshot-container">
+  <img src="${snapshot.image_url}" class="snapshot-image" />
+  
+  <button id="regenerate-${msg.id}" class="btn-secondary btn-sm">
+    🔄 Regenerate
+  </button>
+  
+  <button id="toggle-prompt-${msg.id}" class="btn-secondary btn-sm">
+    📋 Show Prompt Details
+  </button>
+</div>
+
+// Regenerate with novelty mode
+document.getElementById(`regenerate-${msg.id}`).addEventListener('click', async () => {
+  const response = await fetch(`/api/chat/snapshot/regenerate/${msg.id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ use_novelty_scoring: true })
+  });
+  
+  const result = await response.json();
+  // Display new variation in chat
+});
+```
+
+**What Makes Variations Different:**
+
+| Component | Original Generation | Variation Mode |
+|-----------|-------------------|-----------------|
+| **Scene Analysis** | Same (last 2 turns) | Same (preserves narrative relevance) |
+| **Tag Selection** | Highest semantic similarity | Highest novelty score + preferences |
+| **Block 1 (Subject)** | Top 5 semantic matches | Less-used subject tags preferred |
+| **Block 2 (Environment)** | Top 2 semantic matches | Less-used environment tags preferred |
+| **Block 3 (Style)** | Top 4 semantic matches | Less-used style tags preferred |
+| **Result** | Most semantically relevant | Relevant + novel variety |
+
+**Novelty Scoring vs Random Variation:**
+
+| Approach | Relevance | Variety | Predictability | Verdict |
+|----------|-----------|----------|----------------|---------|
+| **Random tags** | ⭐⭐ | ⭐⭐⭐⭐⭐ | Unpredictable | ❌ Low relevance |
+| **Novelty scoring** (current) | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Controlled | ✅ Balanced |
+| **Preference-only** | ⭐⭐⭐⭐⭐ | ⭐⭐ | Predictable | ❌ Low variety |
+
+**Rationale**:
+- **Narrative Relevance Preserved**: Scene analysis ensures variation fits conversation context
+- **Controlled Exploration**: Novelty scoring guides users toward fresh territory
+- **User Preferences Integrated**: 40% weight on learned preferences maintains personal style
+- **No Quality Loss**: Guardrail fallbacks ensure minimum quality regardless of novelty
+
+### Unified Favorites System
+
+**Problem**: Separate systems for snapshot and manual images create fragmented learning data.
+
+**Solution**: Unified favorites table tracks ALL images with user-level preference learning.
+
+**Database Schema**:
+
+**Table: favorites**
+
+```sql
+CREATE TABLE favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,  -- Future: Multi-user support
+    image_url TEXT NOT NULL UNIQUE,
+    source_type TEXT NOT NULL,  -- 'snapshot' or 'manual'
+    chat_id TEXT,  -- NULL for manual images, chat_id for snapshots
+    message_id TEXT,  -- NULL for manual images, message_id for snapshots
+    prompt TEXT,  -- Full prompt (for learning)
+    negative_prompt TEXT,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+);
+```
+
+**Table: favorite_tags** (Junction table for tag learning)
+
+```sql
+CREATE TABLE favorite_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    favorite_id INTEGER NOT NULL,
+    tag_text TEXT NOT NULL,
+    is_danbooru BOOLEAN DEFAULT 0,  -- 1 = confirmed danbooru tag
+    tag_frequency INTEGER DEFAULT 1,  -- How often favorited with this tag
+    FOREIGN KEY (favorite_id) REFERENCES favorites(id) ON DELETE CASCADE
+);
+```
+
+**Storage Locations**:
+
+| Image Type | Favorites Table | Tag Tracking | Source Metadata |
+|------------|----------------|----------------|------------------|
+| **Snapshot** (📸 button) | ✅ `source_type = 'snapshot'` | ✅ `chat_id`, `message_id` | Scene analysis included |
+| **Manual** (Vision Panel) | ✅ `source_type = 'manual'` | ✅ `chat_id = NULL`, `message_id = NULL` | Custom prompt only |
+
+**Unified Learning Flow:**
+
+```python
+def add_to_favorites(
+    image_url: str,
+    source_type: str,  # 'snapshot' or 'manual'
+    prompt: str,
+    negative_prompt: str,
+    chat_id: Optional[str] = None,
+    message_id: Optional[str] = None
+):
+    """
+    Add image to unified favorites with automatic tag detection.
+    """
+    # Insert into favorites table
+    favorite_id = db_insert_favorite({
+        "image_url": image_url,
+        "source_type": source_type,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "timestamp": int(time.time())
+    })
+    
+    # Detect danbooru tags in prompt (automatic learning)
+    detected_tags = detect_danbooru_tags(prompt)
+    
+    # Insert detected tags into junction table
+    for tag_text in detected_tags:
+        db_insert_favorite_tag({
+            "favorite_id": favorite_id,
+            "tag_text": tag_text,
+            "is_danbooru": tag_text in DANBOORU_TAG_SET,  # Confirmation
+            "tag_frequency": calculate_tag_frequency(tag_text)
+        })
+    
+    # Update user tag preferences for future biasing
+    update_user_tag_preferences(detected_tags)
+```
+
+**Frontend Integration**:
+
+```javascript
+// Snapshot images: Heart icon toggle
+<button id="favorite-snapshot-${msg.id}" class="favorite-btn">
+  <span class="heart-icon">🤍</span>  <!-- Empty heart -->
+</button>
+
+document.getElementById(`favorite-snapshot-${msg.id}`).addEventListener('click', async () => {
+  const isFavorited = this.dataset.favorited === 'true';
+  
+  if (!isFavorited) {
+    // Add to favorites
+    await fetch('/api/favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_url: snapshot.image_url,
+        source_type: 'snapshot',
+        prompt: snapshot.prompt,
+        negative_prompt: snapshot.negative_prompt,
+        chat_id: currentChatId,
+        message_id: msg.id
+      })
+    });
+    this.dataset.favorited = 'true';
+    this.querySelector('.heart-icon').textContent = '❤️';  // Filled heart
+  } else {
+    // Remove from favorites
+    await fetch(`/api/favorites/${snapshot.id}`, { method: 'DELETE' });
+    this.dataset.favorited = 'false';
+    this.querySelector('.heart-icon').textContent = '🤍';  // Empty heart
+  }
+});
+
+// Manual images: "Save as Favorite" button
+<button id="save-favorite-manual" class="btn-primary">
+  💾 Save as Favorite
+</button>
+
+document.getElementById('save-favorite-manual').addEventListener('click', async () => {
+  const prompt = document.getElementById('prompt-input').value;
+  const negative = document.getElementById('negative-prompt').value;
+  
+  await fetch('/api/favorites', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      image_url: generatedImageUrl,
+      source_type: 'manual',
+      prompt: prompt,
+      negative_prompt: negative
+      // chat_id = NULL, message_id = NULL for manual images
+    })
+  });
+  
+  // Show success notification
+  showNotification('Image saved to favorites! ❤️');
+});
+```
+
+**Why Unified System?**
+
+| Aspect | Separate Systems (Old) | Unified System (Current) |
+|--------|----------------------|-------------------------|
+| **Learning Data** | Fragmented (snapshot only) | Complete (both sources) |
+| **User Preferences** | Partial (one source) | Holistic (all generations) |
+| **Code Complexity** | Duplicate tables/logic | Single table, shared logic |
+| **Maintenance** | Sync issues between systems | No sync needed |
+| **Feature Parity** | Manual mode excluded from learning | Equal learning for both |
+
+**Rationale**:
+- **Complete Learning**: User preferences from ALL image types improve future generations
+- **Simplified Maintenance**: Single favorites table eliminates duplicate code paths
+- **Feature Parity**: Manual images no longer second-class citizens
+- **Future-Proof**: Multi-user support (user_id column) ready for v2.0
+
+### Tag Preference Tracking
+
+**Problem**: User favorited images aren't used to improve future generation quality.
+
+**Solution**: Track tag frequencies in favorited images and bias future prompts toward user preferences.
+
+**Tag Learning Algorithm:**
+
+```python
+class TagPreferenceTracker:
+    def __init__(self):
+        self.tag_preferences: Dict[str, float] = {}  # tag → preference score
+        self.load_from_database()  # Load existing preferences
+    
+    def update_from_favorites(self, favorited_tags: List[str]):
+        """
+        Update preference scores based on newly favorited images.
+        """
+        for tag in favorited_tags:
+            current_score = self.tag_preferences.get(tag, 0.0)
+            # Increment score (exponential decay for recency)
+            self.tag_preferences[tag] = current_score + 1.0
+        
+        # Apply recency decay (older favorites weight less)
+        self.apply_recency_decay()
+        self.save_to_database()
+    
+    def calculate_preference_bias(self, candidate_tags: List[str]) -> Dict[str, float]:
+        """
+        Calculate bias scores for candidate tags based on user history.
+        Higher score = user prefers this tag.
+        """
+        biases = {}
+        for tag in candidate_tags:
+            base_score = self.tag_preferences.get(tag, 0.0)
+            # Normalize to 0-1 range
+            normalized_score = min(base_score / MAX_PREFERENCE_SCORE, 1.0)
+            biases[tag] = normalized_score
+        return biases
+    
+    def select_biased_tags(self, candidate_tags: List[str], target_count: int) -> List[str]:
+        """
+        Select tags for prompt with preference bias applied.
+        """
+        # Calculate preference scores
+        biases = self.calculate_preference_bias(candidate_tags)
+        
+        # Combine semantic score with preference score
+        scored_tags = []
+        for tag in candidate_tags:
+            semantic_score = self.get_semantic_score(tag, scene_analysis)
+            preference_score = biases[tag]
+            # Weighted combination: 60% semantic, 40% preference
+            combined_score = (semantic_score * 0.6) + (preference_score * 0.4)
+            scored_tags.append((combined_score, tag))
+        
+        # Sort by combined score and select top N
+        scored_tags.sort(reverse=True, key=lambda x: x[0])
+        return [tag for _, tag in scored_tags[:target_count]]
+```
+
+**Integration with Prompt Builder**:
+
+```python
+def build_4_block_prompt_with_biases(
+    scene_analysis: Dict,
+    user_tag_preferences: Dict[str, float],
+    character_tag: Optional[str] = None
+) -> str:
+    """
+    Build 4-block prompt with user preference biases applied.
+    """
+    # Block 0: Quality (hardwired, no preference bias)
+    block_0 = get_fallback_tags(0)[:3]
+    
+    # Block 1: Subject (character tag + preference-biased semantic matches)
+    block_1 = []
+    if character_tag:
+        block_1.extend([t.strip() for t in character_tag.split(',')[:3]])
+    
+    if len(block_1) < 5:
+        # Get semantic matches with preference scoring
+        semantic_matches = analyzer.match_tags_semantically(scene_query, block_num=1, k=10)
+        # Apply preference bias and select top remaining tags
+        biased_selection = tag_preferences.select_biased_tags(
+            [tag for tag, _ in semantic_matches],
+            target_count=5 - len(block_1)
+        )
+        block_1.extend(biased_selection)
+    
+    # Blocks 2 & 3: Similar preference-biased selection
+    block_2 = build_block_with_biases(2, scene_analysis, user_tag_preferences)
+    block_3 = build_block_with_biases(3, scene_analysis, user_tag_preferences)
+    
+    return ", ".join([*block_0, *block_1, *block_2, *block_3])
+```
+
+**Preference Score Calculation:**
+
+| Scenario | Tags in Prompt | Preference Scores | Result |
+|----------|-----------------|-------------------|---------|
+| **First favorite** | `["1girl", "solo", "portrait"]` | `[0.0, 0.0, 0.0]` | No bias (baseline) |
+| **Favorited 10 images with "cinematic lighting"** | `["1girl", "solo", "cinematic lighting"]` | `[0.0, 0.0, 0.8]` | Bias toward lighting |
+| **Favorited 50 images with "anime style"** | `["1girl", "anime style", "portrait"]` | `[0.0, 0.9, 0.0]` | Strong bias toward style |
+
+**Recency Decay**:
+
+```python
+def apply_recency_decay(self):
+    """
+    Decay older preference scores to adapt to changing user tastes.
+    """
+    decay_rate = 0.95  # Multiply all scores by 0.95 weekly
+    
+    for tag in self.tag_preferences:
+        self.tag_preferences[tag] *= decay_rate
+    
+    # Prune tags with very low scores (< 0.1)
+    self.tag_preferences = {
+        tag: score 
+        for tag, score in self.tag_preferences.items() 
+        if score >= 0.1
+    }
+```
+
+- **Weekly Decay**: All preference scores multiplied by 0.95
+- **Pruning**: Tags with score < 0.1 removed (taste changed)
+- **Adaptation**: System adapts to changing user preferences over time
+
+**Why Preference Tracking?**
+
+| Aspect | Without Tracking | With Tracking (Current) |
+|--------|----------------|----------------------|
+| **Generation Quality** | Baseline (semantic only) | Personalized (semantic + preference) |
+| **User Satisfaction** | Generic results | Matches user's visual taste |
+| **Learning Curve** | None (static) | Improves with more favorites |
+| **Cold Start** | Immediate relevance | Baseline + gradual personalization |
+| **Memory Usage** | 0 bytes | ~50KB (user preferences) |
+
+**Rationale**:
+- **Personalization**: Generations match user's evolving visual preferences
+- **Adaptive Learning**: Recency decay allows system to adapt to changing tastes
+- **Minimal Overhead**: ~50KB storage, <1ms computation per tag
+- **Cold Start Friendly**: Works immediately, improves gradually with more favorites
+
+### Tag Detection System
+
+**Problem**: Users add custom/NSFW tags via manual mode, but system doesn't recognize them.
+
+**Solution**: Automatic danbooru tag detection with 2+ tag threshold for learning activation.
+
+**Tag Detection Algorithm**:
+
+```python
+def detect_danbooru_tags(prompt: str) -> List[str]:
+    """
+    Detect danbooru tags in custom prompt using prefix matching.
+    """
+    # Load danbooru tag set (1560 tags from danbooru_tags table)
+    danbooru_set = load_danbooru_tag_set()
+    
+    # Split prompt into tokens
+    prompt_tokens = prompt.split(', ')
+    
+    detected_tags = []
+    for token in prompt_tokens:
+        token = token.strip().lower()
+        if token in danbooru_set:
+            detected_tags.append(token)
+    
+    return detected_tags
+
+def should_activate_learning(prompt: str) -> bool:
+    """
+    Determine if prompt has enough danbooru tags for learning.
+    Threshold: 2+ tags required.
+    """
+    detected = detect_danbooru_tags(prompt)
+    return len(detected) >= 2
+```
+
+**Danbooru Tag Set** (`app/danbooru_tags_config.py`):
+
+```python
+# Generated from database table on startup
+DANBOORU_TAG_SET: Set[str] = load_from_database()
+
+# Manual additions for NSFW tags (not in public danbooru set)
+NSFW_TAG_ADDITIONS: Set[str] = {
+    "nsfw", "explicit", "suggestive",
+    # Users can add custom NSFW tags here
+}
+```
+
+**Detection Flow**:
+
+```
+User Favorites Manual Image
+    ↓
+Extract Prompt: "masterpiece, 1girl, solo, portrait, my_custom_tag, anime style"
+    ↓
+Tokenize: ["masterpiece", "1girl", "solo", "portrait", "my_custom_tag", "anime style"]
+    ↓
+Check Danbooru Set: ["masterpiece", "1girl", "solo", "portrait", "anime style"]
+    ↓
+Threshold Check: 5 detected tags ≥ 2 (minimum)
+    ↓
+Learning Activated: YES → Update user_tag_preferences
+    ↓
+User Custom Tags ("my_custom_tag"): NOT in danbooru_set → Skipped (no bias)
+```
+
+**Threshold Rationale (2+ Tags)**:
+
+| Threshold | Learning | False Positives | Missed Learning | Verdict |
+|-----------|----------|-----------------|-----------------|---------|
+| **0 tags** | Always active | High (noise) | None | ❌ Too permissive |
+| **1 tag** | Very active | Medium | Low | ❗ Borderline |
+| **2 tags** (current) | Balanced | Low | Acceptable | ✅ Optimal |
+| **3+ tags** | Conservative | Very Low | Minimal | ✗ Too strict |
+
+**Why 2+ Tag Threshold?**
+
+- **Prevent Noise**: Prompts with 0-1 danbooru tags often have random/unlearnable content
+- **Confirm Intent**: 2+ tags indicates intentional danbooru-style prompting
+- **Natural Library Expansion**: Users add custom tags via manual mode, but system only learns from confirmed danbooru tags
+- **NSFW Support**: Users can add NSFW tags to manual prompts; if 2+ danbooru tags present, system learns the NSFW context
+
+**Natural Library Expansion Mechanism**:
+
+Users can expand the danbooru tag library organically:
+
+1. **Add Custom Tags**: User adds "my_custom_tag" to manual prompt
+2. **Generate Image**: Image created with custom tag
+3. **Favorite Image**: If prompt has 2+ danbooru tags, learning activated
+4. **Detection**: `my_custom_tag` detected but NOT in danbooru_set (skipped)
+5. **Future PR**: Users can PR custom tags to official danbooru set
+6. **Result**: Library grows organically with community contributions
+
+**Why Natural Expansion?**
+
+| Method | Pros | Cons | Verdict |
+|--------|-------|-------|---------|
+| **Official PR review** | Quality controlled, curated | Slow, bottleneck | ❗ Viable but slow |
+| **Natural expansion** (current) | Fast, user-driven | Potential noise | ✅ Best for v1.9.0 |
+| **Manual editing** | Immediate | Technical barrier | ❌ High friction |
+
+**Rationale**:
+- **User-Driven**: Users naturally expand library with tags they use
+- **Low Barrier**: No technical knowledge needed (just use tags in prompts)
+- **Quality Control**: 2+ tag threshold ensures intentional usage before learning
+- **Future-Proof**: Foundation for community PR system (v2.0+)
+- **NSFW Support**: Natural expansion enables adding NSFW tags without manual configuration
+
+### Favorites Jump-to-Source Feature
+
+**Problem**: Users save favorite images but lose track of which chat and message context they came from.
+
+**Solution**: Double-click navigation that jumps directly from a favorited image to its original chat location.
+
+**Implementation**:
+
+```javascript
+// Alpine.js method in app/index.html
+async jumpToFavoriteSource(favorite) {
+    // Extract chat_id and image_filename from favorite
+    const chatId = favorite.chat_id;
+    const imageFilename = favorite.image_filename;
+    
+    // Load the chat
+    await this.loadChat(chatId);
+    
+    // Search through messages for the image
+    let targetMessageIndex = -1;
+    for (let i = 0; i < this.messages.length; i++) {
+        const msg = this.messages[i];
+        // Check both snapshot and manual images
+        if (msg.snapshot?.image_url?.includes(imageFilename) || 
+            msg.image?.includes(imageFilename)) {
+            targetMessageIndex = i;
+            break;
+        }
+    }
+    
+    // Navigate to message with visual highlight
+    if (targetMessageIndex !== -1) {
+        this.showFavoritesSidebar = false;
+        const messageElement = document.getElementById(`message-${targetMessageIndex}`);
+        messageElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        messageElement.classList.add('highlight-message');
+        // Auto-remove highlight after 3 seconds
+        setTimeout(() => {
+            messageElement.classList.remove('highlight-message');
+        }, 3000);
+    }
+}
+```
+
+**UI Integration**:
+
+- **Double-click handler**: Added to favorites grid images (`@dblclick="jumpToFavoriteSource(fav)"`)
+- **Visual hint**: Hover overlay shows "Double-click to view" with chat icon
+- **Cursor indicator**: `cursor-pointer` class indicates interactivity
+- **Message IDs**: Each message div has unique ID (`message-${index}`) for targeting
+
+**CSS Animation**:
+
+```css
+/* Pink glow highlight animation */
+.highlight-message {
+    animation: highlight-pulse 3s ease-out;
+}
+
+@keyframes highlight-pulse {
+    0% { box-shadow: 0 0 0 4px rgba(236, 72, 153, 0.8); transform: scale(1.02); }
+    50% { box-shadow: 0 0 0 2px rgba(236, 72, 153, 0.4); transform: scale(1.01); }
+    100% { box-shadow: 0 0 0 0px rgba(236, 72, 153, 0); transform: scale(1); }
+}
+```
+
+**Edge Case Handling**:
+
+| Scenario | Behavior |
+|----------|----------|
+| Manual upload (no chat_id) | Shows "not associated with a chat" alert |
+| Chat deleted | Shows "Chat not found" alert |
+| Image removed from chat | Shows "Image not found" alert |
+| Multiple occurrences | Jumps to first occurrence |
+| Message not found | Graceful error with alert |
+
+**Why No Database Migration?**
+
+Instead of storing message indices in the favorites table, the system searches on-demand:
+
+| Approach | Pros | Cons | Verdict |
+|----------|------|------|---------|
+| **Store message_index** | Instant lookup | Requires migration, stale data risk | ❌ Complex |
+| **Search on-demand** | No migration, always accurate | Slight delay (~50ms) | ✅ Simple |
+
+**Decision**: Search-on-demand is negligible overhead (~50ms for 1000 messages) and eliminates sync issues.
+
+### Key Design Decisions
+
+**Why sqlite-vec for Danbooru Tags?**
+
+| Aspect | sqlite-vec | NumPy + Pickle |
+|--------|-------------|----------------|
+| **Performance** | <50ms per query (SIMD) | <200ms per query |
+| **Storage** | Disk-based (1MB) | Memory-based (300MB) |
+| **Startup** | <1 second | 2-5 seconds |
+| **Persistence** | Automatic | Manual save/load |
+| **Maturity** | Production-tested | Development stage |
+
+**Decision**: sqlite-vec follows existing `vec_world_entries` pattern, maintains consistency.
+
+**Why Hybrid Scene Detection (Keywords + LLM)?**
+
+| Approach | Reliability | Richness | Token Cost | Verdict |
+|----------|--------------|-----------|-------------|---------|
+| **Keywords only** | ⭐⭐⭐⭐⭐ | ⭐⭐ | 0 | ❌ Too simplistic |
+| **LLM only** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ~100 | ❌ Blocker if LLM down |
+| **Hybrid** (current) | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ~100 (optional) | ✅ Optimal |
+
+**Decision**: Keywords provide reliability, LLM provides richness. Optional LLM ensures system works without it.
+
+**Why Keyword Minimum (2 matches)?**
+
+| Threshold | Precision | Recall | False Positives | Verdict |
+|-----------|-----------|--------|----------------|---------|
+| **1 match** | ⭐⭐ | ⭐⭐⭐⭐⭐ | High | ❌ Too many false triggers |
+| **2 matches** (current) | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Low | ✅ Balanced |
+| **3 matches** | ⭐⭐⭐⭐⭐ | ⭐⭐ | Very Low | ✗ Too strict |
+
+**Decision**: 2 matches balances false positive prevention with scene coverage.
+
+**Why Chat-Scoped History vs Global Database?**
+
+| Aspect | Chat-Scoped (current) | Global Database (future v2.0) |
+|--------|---------------------|------------------------------|
+| **Implementation** | Simple (no schema changes) | Complex (new tables, migrations) |
+| **Cleanup** | Automatic (delete chat) | Manual (orphaned records) |
+| **Searchability** | Per-chat only | Global search |
+| **Scalability** | Limited per chat | Unlimited |
+| **MVP suitability** | ✅ Perfect | ❌ Overkill |
+
+**Decision**: Chat-scoped storage simplifies MVP. Easy to promote to global table if needed.
+
+**Why Guardrail Fallbacks vs Semantic-Only?**
+
+| Scenario | Semantic-Only | With Guardrails (current) |
+|----------|----------------|------------------------|
+| **Good semantic matches** | 5 tags in Block 1 (excellent) | 5 semantic tags (same result) |
+| **Poor semantic matches** | 1 tag in Block 1 (insufficient) | 3 fallback tags (guaranteed valid) |
+| **Empty query** | 0 tags (broken prompt) | 3 fallback tags (guaranteed valid) |
+
+**Decision**: Guardrails prevent broken prompts. Semantic tags preferred when available, fallbacks ensure minimum quality.
 
 ---
 

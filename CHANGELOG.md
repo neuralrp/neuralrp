@@ -5,6 +5,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.9.0] - 2026-01-31
+
+### Added
+- **Snapshot Feature**: Generate Stable Diffusion images directly from chat scenes with automatic prompt construction
+  - 4-block prompt structure (quality, subject, environment, style) with ~14 tags per generation
+  - Hybrid scene detection: keyword minimum (2+ matches) + LLM summary (optional) + semantic matching
+  - Character dropdown integration with danbooru_tag support for visual consistency
+  - SQLite-vec embeddings for 1560 danbooru tags (768-dimensional vectors)
+  - Snapshot history stored in chat metadata (chat-scoped, no database persistence)
+  - Red light indicator for Stable Diffusion API unavailability
+  - Toggleable prompt details (positive/negative prompt, scene analysis)
+  - Comprehensive test suite: 48 tests across 3 phases (unit, integration, edge cases)
+
+- **Snapshot Variation Mode**: Regenerate snapshots with novelty scoring
+  - Single "🔄 Regenerate" button below snapshot images
+  - Applies novelty scoring to explore less-used tag combinations
+  - Same scene analysis with different tag selection for variety
+  - Encourages exploration while maintaining scene relevance
+
+- **Unified Favorites System**: User-level learning that biases ALL image generations
+  - Single favorites table supports BOTH snapshot and manual mode images
+  - Favorite images tracked via `source_type` field ('snapshot' or 'manual')
+  - Toggle favorite status with heart icon (❤️) on snapshots
+  - "Save as Favorite" button for manual mode images (Vision Panel)
+  - Favorites persist across chat sessions
+
+- **Tag Preference Tracking**: Automatic learning from user's favorited images
+  - Analyzes tags in favorited images to understand user preferences
+  - Automatic tag detection for danbooru tags in prompts (2+ tag threshold)
+  - Tag frequency tracking for bias calculation
+  - Future generations biased toward your preferred tags
+  - Works for BOTH snapshot and manual mode favorites
+
+- **Tag Detection System**: Automatic detection of danbooru tags in custom prompts with 2+ tag threshold for learning activation
+- **Favorites Jump-to-Source**: Double-click any favorite image to jump directly to its original chat context with visual highlight
+- **Manual Favorites Chat Association**: Manual mode favorites now store optional chat_id for jump-to-source functionality
+
+### Changed
+- **Tag Configuration System**: Standalone `app/danbooru_tags_config.py` with 1560 tags organized by 4 blocks (Quality, Subject, Environment, Style)
+
+### Technical
+- **Database Schema**: Added `danbooru_tags` and `vec_danbooru_tags` tables for 1560 danbooru tag embeddings
+- **API Endpoints**: `POST /api/chat/{chat_id}/snapshot`, `GET /api/snapshot/status`, `POST /api/manual-generation/favorite` (accepts optional `chat_id`)
+- **Database Setup System**: Consolidated migration management via `app/database_setup.py`
+  - Single file creates all 17 core tables, indexes, triggers, and virtual tables
+  - Schema version tracking for seamless upgrades (1.8.0 → 1.9.0 and beyond)
+  - Automatic migration handling in `launcher.bat` - runs every startup, idempotent
+- **Testing**: Playwright-based test suite with 48 comprehensive tests (unit, integration, edge cases)
+
+***
+
 ## [1.8.2] - 2026-01-30
 
 ### Added

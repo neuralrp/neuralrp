@@ -107,3 +107,9 @@ CHARACTER_INJECTION_FIX.md
 app/dt_thumbnails.db
 app/images/dt_thumbnails.db
 nul
+
+# ============================================
+# PROJECT FOLDERS
+# ============================================
+tests/
+project_docs/
