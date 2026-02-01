@@ -1951,6 +1951,72 @@ def db_migrate_danbooru_tags():
     print(f"[DB] Danbooru tags migrated: {len(tags)} tags")
 
 
+def db_add_dynamic_danbooru_tag(tag_text: str) -> bool:
+    """
+    Dynamically add a new danbooru tag (from manual mode) with embedding.
+    
+    This allows users to expand the tag library by using custom tags in manual mode.
+    New tags are added with block_num=4 (User/Custom) to distinguish from config tags (0-3).
+    User tags appear at the end of the prompt, after quality, subject, environment, and style blocks.
+    
+    Args:
+        tag_text: The tag to add (e.g., "nsfw_custom_tag", "unique_concept")
+        
+    Returns:
+        bool: True if tag was added successfully, False otherwise
+    """
+    import time
+    try:
+        from sentence_transformers import SentenceTransformer
+        import numpy as np
+    except ImportError:
+        print(f"[DB] sentence_transformers not available, cannot add dynamic tag '{tag_text}'")
+        return False
+    
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if tag already exists (from config or previously added)
+            cursor.execute(
+                "SELECT id FROM danbooru_tags WHERE tag_text = ?",
+                (tag_text,)
+            )
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Tag already exists, no need to add
+                return True
+            
+            # Add new tag with block_num=4 (User/Custom block - appears at end of prompt)
+            cursor.execute(
+                "INSERT INTO danbooru_tags (tag_text, block_num, created_at) VALUES (?, ?, ?)",
+                (tag_text, 4, int(time.time()))
+            )
+            
+            # Get the new tag's ID
+            tag_id = cursor.lastrowid
+            
+            # Generate embedding for the new tag
+            print(f"[DB] Generating embedding for new dynamic tag: '{tag_text}'")
+            model = SentenceTransformer('all-mpnet-base-v2')
+            embedding = model.encode(tag_text).astype(np.float32).tobytes()
+            
+            # Insert into vec table for semantic search
+            cursor.execute(
+                "INSERT INTO vec_danbooru_tags (rowid, embedding) VALUES (?, ?)",
+                (tag_id, embedding)
+            )
+            
+            conn.commit()
+            print(f"[DB] Successfully added dynamic tag '{tag_text}' with ID {tag_id}")
+            return True
+            
+    except Exception as e:
+        print(f"[DB] Failed to add dynamic tag '{tag_text}': {e}")
+        return False
+
+
 def db_get_danbooru_tag_count() -> int:
     """Get total count of danbooru tags in database.
     

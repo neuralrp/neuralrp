@@ -185,11 +185,15 @@ class SnapshotPromptBuilder:
         # ========================================
         positive_parts = []
 
-        # Add blocks in order
+        # Add blocks in order (0-3 are config tags, 4 is user-added custom tags)
         positive_parts.extend(block_0)
         positive_parts.extend(block_1)
         positive_parts.extend(block_2)
         positive_parts.extend(block_3)
+        
+        # Add Block 4: User-added custom tags (from manual mode favorites)
+        block_4 = self._build_block_4()
+        positive_parts.extend(block_4)
 
         # Remove duplicates while preserving order
         seen = set()
@@ -456,6 +460,44 @@ class SnapshotPromptBuilder:
                         break
 
         return block_3[:target]
+
+    def _build_block_4(self) -> List[str]:
+        """
+        Build Block 4: User-added custom tags (dynamic library expansion).
+        
+        These are tags added by users through manual mode favorites that aren't
+        in the original 1560 danbooru tags config. They appear at the end of the
+        prompt to provide additional customization without disrupting core structure.
+        
+        Returns:
+            List[str]: User-added custom tags from block 4
+        """
+        block_4 = []
+        
+        try:
+            from app.database import get_connection
+            
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get all user-added tags (block_num=4)
+                cursor.execute(
+                    "SELECT tag_text FROM danbooru_tags WHERE block_num = 4 ORDER BY created_at DESC"
+                )
+                
+                rows = cursor.fetchall()
+                for row in rows:
+                    tag_text = row[0] if isinstance(row, tuple) else row['tag_text']
+                    if tag_text and tag_text not in block_4:
+                        block_4.append(tag_text)
+                        
+                if block_4:
+                    print(f"[SNAPSHOT] Block 4 (User): {len(block_4)} custom tags")
+                    
+        except Exception as e:
+            print(f"[SNAPSHOT] Warning: Could not load user tags from block 4: {e}")
+        
+        return block_4
 
     def _build_negative_prompt(self) -> str:
         """

@@ -4617,6 +4617,17 @@ async def add_manual_favorite(request: ManualFavoriteRequest):
             for tag in all_tags:
                 db_increment_favorite_tag(tag)
                 tags_learned += 1
+            
+            # Add custom tags (not in pre-defined 1560) to semantic search system
+            custom_tags = [tag for tag in all_tags if tag.lower() not in [dt.lower() for dt in detected_danbooru]]
+            if custom_tags:
+                print(f"[SNAPSHOT] Adding {len(custom_tags)} custom tags to semantic search library...")
+                from app.database import db_add_dynamic_danbooru_tag
+                for custom_tag in custom_tags:
+                    success = db_add_dynamic_danbooru_tag(custom_tag)
+                    if success:
+                        print(f"[SNAPSHOT] Added custom tag: '{custom_tag}'")
+            
             learned = True
             print(f"[SNAPSHOT] Learned from {tags_learned} tags")
         else:
