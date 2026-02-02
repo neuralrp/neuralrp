@@ -172,6 +172,8 @@ Tag management for character and world cards:
 - **Change history** — 30-day retention with browse/restore functionality
 - **Soft delete** — Messages archived instead of deleted, searchable across history
 - **Export for training** — Export to Alpaca/ShareGPT/ChatML formats for Unsloth
+- **Built on SQLite + SQLite-vec** - Unified data system makes it easy to "bolt on" features, tune and mod this to you heart's content. Just add another table. 
+- **Migration system** — Seamless upgrades (v1 → v2 schemas) without data loss.
 
 ---
 
