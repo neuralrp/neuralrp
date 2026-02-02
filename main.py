@@ -81,6 +81,72 @@ from app.snapshot_prompt_builder import SnapshotPromptBuilder
 # NPC helper functions are now integrated in load_character_profiles()
 
 
+def verify_sqlite_vec_extension():
+    """
+    Verify that sqlite-vec extension is properly loaded and functional.
+    This is critical for embeddings-based features (Danbooru search, world info, etc.)
+    
+    Returns True if working, exits with code 1 if not.
+    """
+    try:
+        import sqlite3
+        import sqlite_vec
+        import numpy as np
+        
+        # Create a test in-memory database
+        conn = sqlite3.connect(":memory:")
+        
+        # Enable and load extension
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        
+        # Test vec0 functionality by creating a test table and running a distance query
+        conn.execute("""
+            CREATE VIRTUAL TABLE test_vec USING vec0(embedding float[3])
+        """)
+        
+        # Insert test data
+        test_embedding = np.array([1.0, 2.0, 3.0], dtype=np.float32).tobytes()
+        conn.execute("INSERT INTO test_vec (rowid, embedding) VALUES (?, ?)", (1, test_embedding))
+        
+        # Test distance function
+        cursor = conn.execute("SELECT vec_distance_cosine(embedding, ?) FROM test_vec", (test_embedding,))
+        result = cursor.fetchone()
+        
+        # Cleanup
+        conn.execute("DROP TABLE test_vec")
+        conn.close()
+        
+        if result and result[0] is not None:
+            print("[STARTUP] sqlite-vec extension verified and working")
+            return True
+        else:
+            raise RuntimeError("vec_distance_cosine returned None")
+            
+    except Exception as e:
+        print("="*70)
+        print("FATAL ERROR: sqlite-vec extension is not working properly")
+        print("="*70)
+        print()
+        print("The sqlite-vec extension is required for NeuralRP to function.")
+        print("Without it, critical features like semantic search will not work.")
+        print()
+        print("Error details:", str(e))
+        print()
+        print("To fix this issue:")
+        print("  1. Ensure sqlite-vec is installed: pip install sqlite-vec")
+        print("  2. Your Python installation must support extension loading")
+        print("  3. Try reinstalling: pip uninstall sqlite-vec && pip install sqlite-vec")
+        print()
+        print("="*70)
+        import sys
+        sys.exit(1)
+
+
+# Verify critical extension before starting
+verify_sqlite_vec_extension()
+
+
 # Removed orphaned code - this block references undefined variables and is not used
 
 app = FastAPI()
@@ -1891,6 +1957,8 @@ def normalize_character_v2(char_data: dict) -> dict:
         extensions['depth_prompt'] = {'depth': 4, 'prompt': ''}
     elif 'prompt' not in extensions['depth_prompt']:
         extensions['depth_prompt']['prompt'] = ''
+    if 'gender' not in extensions:
+        extensions['gender'] = ''
     
     return char_data
 
@@ -2632,6 +2700,7 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         scenario = data.get("scenario", "")
         mes_example = data.get("mes_example", "")
         multi_char_summary = data.get("extensions", {}).get("multi_char_summary", "")
+        gender = data.get("extensions", {}).get("gender", "")
         
         # Check if this character is an NPC
         is_npc = char_obj.get("is_npc", False)
@@ -2683,6 +2752,8 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
                 print(f"[CONTEXT] {label} {name} full card injection")
                 
                 full_prompt += f"### Character Profile: {name}\n"
+                if gender:
+                    full_prompt += f"Gender: {gender}\n"
                 if description:
                     full_prompt += f"{description}\n"
                 if personality:
@@ -2708,6 +2779,8 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
                 print(f"[CONTEXT] {label} {name} using fallback (description + personality)")
                 
                 fallback_content = ""
+                if gender:
+                    fallback_content += f"{name} is a {gender} character. "
                 if description:
                     fallback_content += description
                 if personality:
@@ -2727,6 +2800,8 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         # === REINFORCEMENT CHUNK PREPARATION ===
         # Unified: description + personality for ALL characters (single or multi-chat)
         reinforcement_parts = []
+        if gender:
+            reinforcement_parts.append(f"{name} is a {gender} character.")
         if description:
             reinforcement_parts.append(description)
         if personality:
@@ -3063,6 +3138,7 @@ async def generate_card_field(req: CardGenRequest):
                 physical_traits = ["average build"]
                 scenario = f"You encounter {char_name} for the first time."
                 first_message = f"*{char_name} looks up from what they were doing.*"
+                dialogue_examples = "<START>\n{{user}}: \"Hello, nice to meet you.\"\n{{char}}: *" + char_name + " nods politely.* \"Pleasure to meet you as well.\"\n\n<START>\n{{user}}: \"Can you tell me about yourself?\"\n{{char}}: *" + char_name + " considers for a moment.* \"I am " + char_name + ", and I'm here to help.\""
                 genre = "General"
                 tags = ["generated", "npc"]
 
@@ -3080,14 +3156,19 @@ async def generate_card_field(req: CardGenRequest):
             # Add source information to creator_notes
             source_info = f"Created from {req.source_mode}: {user_input[:100]}\n\n" if req.source_mode else ""
             
-            # Build personality string (comma-separated for SillyTavern)
-            personality_string = ', '.join(personality_traits) if personality_traits else ""
-
-            # Build body description with char_name prefix
-            body_desc = ""
+            # Build PList-formatted personality and body
+            # PList format: [Character's Personality= "trait1", "trait2", ...]
+            plist_personality = ""
+            if personality_traits:
+                trait_list = ', '.join([f'"{trait}"' for trait in personality_traits])
+                plist_personality = f"[{char_name}'s Personality= {trait_list}]"
+            
+            # PList format: [Character's body= "feature1", "feature2", ...]
+            plist_body = ""
             if physical_traits:
-                body_desc = f"{char_name} is {', '.join(physical_traits)}."
-
+                trait_list = ', '.join([f'"{trait}"' for trait in physical_traits])
+                plist_body = f"[{char_name}'s body= {trait_list}]"
+            
             # Build creator_notes (only genre, no PList)
             creator_notes = source_info
             if genre:
@@ -3096,8 +3177,8 @@ async def generate_card_field(req: CardGenRequest):
             # Create full character card with generated data
             character_data = {
                 "name": char_name,
-                "description": body_desc,
-                "personality": personality_string,
+                "description": plist_body,
+                "personality": plist_personality,
                 "scenario": scenario,
                 "first_mes": first_message,
                 "mes_example": dialogue_examples,
@@ -3113,7 +3194,9 @@ async def generate_card_field(req: CardGenRequest):
                         "depth": 4
                     },
                     "talkativeness": 100,
-                    "multi_char_summary": ""
+                    "multi_char_summary": "",
+                    "gender": "",
+                    "danbooru_tag": ""
                 }
             }
             print(f"[NPC_CREATE] Step 7h: Character data structure built, keys: {list(character_data.keys())}")
@@ -3400,22 +3483,25 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
     return result.strip()
 
 # Capsule Generation for Multi-Character Optimization
-async def generate_capsule_for_character(char_name: str, description: str, depth_prompt: str = "") -> str:
+async def generate_capsule_for_character(char_name: str, description: str, depth_prompt: str = "", gender: str = "") -> str:
     """Generate a capsule summary for use in multi-character scenarios."""
     system = "You are an expert at distilling roleplay character cards into minimal capsule summaries for efficient multi-character prompts."
     
-    full_card_text = f"Name: {char_name}\n\nDescription/Dialogue:\n{description}"
+    full_card_text = f"Name: {char_name}"
+    if gender:
+        full_card_text += f"\nGender: {gender}"
+    full_card_text += f"\n\nDescription/Dialogue:\n{description}"
     if depth_prompt:
         full_card_text += f"\n\nPersonality/Context:\n{depth_prompt}"
     
     prompt = f"""Convert this character card into a capsule summary for efficient multi-character prompts.
 Use this exact format (one paragraph, no line breaks):
-Name: [Name]. Role: [1 sentence role/situation]. Key traits: [3-5 comma-separated personality traits]. Speech style: [short/long, formal/casual, any verbal tics]. Example line: "[One characteristic quote from descriptions]"
+Name: [Name]. Gender: [gender if specified]. Role: [1 sentence role/situation]. Key traits: [3-5 comma-separated personality traits]. Speech style: [short/long, formal/casual, any verbal tics]. Example line: "[One characteristic quote from descriptions]"
 
 Full Card:
 {full_card_text}
 
-Output only the capsule summary line, nothing else."""
+Output only capsule summary line, nothing else."""
 
     result = await call_llm_helper(system, prompt, 200)
     return result.strip()
@@ -3820,10 +3906,13 @@ def load_character_profiles(active_chars: List[str], localnpcs: Dict) -> List[di
                     print(f"[CONTEXT] Skipping inactive NPC: {npc['name']}")
                     continue
                 
+                # Normalize NPC data to ensure all V2 fields (including extensions.gender)
+                npc_data_normalized = normalize_character_v2({'data': npc['data']})['data']
+                
                 # Add to profiles
                 character_profiles.append({
                     'name': npc['name'],
-                    'data': npc['data'],
+                    'data': npc_data_normalized,
                     'entity_id': char_ref,
                     'is_npc': True
                 })
@@ -3883,9 +3972,12 @@ async def chat(request: PromptRequest):
                     entity_id = char.get("entity_id") or char.get("npcId")
                     if entity_id in localnpcs:
                         # Reload NPC from metadata with latest data
+                        # Normalize to ensure all V2 fields (including extensions.gender)
+                        npc_data = localnpcs[entity_id].get('data', char.get('data'))
+                        npc_data_normalized = normalize_character_v2({'data': npc_data})['data']
                         request.characters[i] = {
                             'name': localnpcs[entity_id].get('name', char.get('name')),
-                            'data': localnpcs[entity_id].get('data', char.get('data')),
+                            'data': npc_data_normalized,
                             'entity_id': entity_id,
                             'is_npc': True
                         }
@@ -3963,11 +4055,12 @@ async def chat(request: PromptRequest):
                         description = data.get("description", "")
                         personality = data.get("personality", "")
                         depth_prompt = data.get("extensions", {}).get("depth_prompt", {}).get("prompt", "")
+                        gender = data.get("extensions", {}).get("gender", "")
                         
                         try:
                             # Include both description and personality in capsule
                             capsule_source = f"{description} {personality}".strip()
-                            capsule = await generate_capsule_for_character(name, capsule_source, depth_prompt)
+                            capsule = await generate_capsule_for_character(name, capsule_source, depth_prompt, gender)
                             
                             # Update in memory
                             if "extensions" not in data:
@@ -4313,9 +4406,146 @@ async def generate_image(params: SDParams):
 
 class SnapshotRequest(BaseModel):
     chat_id: str
-    character_ref: Optional[str] = None  # "filename.json" or "npc_xxx"
     width: Optional[int] = None  # Image width
     height: Optional[int] = None  # Image height
+
+def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_canon: bool = False) -> List[Dict]:
+    """Extract gender and danbooru tags for all active characters in chat.
+    
+    Args:
+        chat: Chat data dict with activeCharacters and metadata
+        max_chars: Maximum number of characters to process (default: 3)
+        include_visual_canon: If True, load visual_canon bindings (NEW)
+        
+    Returns:
+        List of dicts with 'name', 'gender', 'danbooru_tag' + optional visual_canon fields for each character
+    """
+    chars_data = []
+    active_chars = chat.get("activeCharacters", [])
+    localnpcs = chat.get("metadata", {}).get("localnpcs", {})
+    
+    for char_ref in active_chars[:max_chars]:
+        if char_ref.startswith('npc_'):
+            # Load NPC from metadata
+            npc_data = localnpcs.get(char_ref, {})
+            if not npc_data:
+                continue
+            data = npc_data.get('data', {})
+            extensions = data.get('extensions', {})
+            
+            char_dict = {
+                'name': npc_data.get('name', 'Unknown'),
+                'gender': extensions.get('gender', ''),
+                'danbooru_tag': extensions.get('danbooru_tag', '')
+            }
+            
+            # Add visual_canon data if requested (NEW)
+            if include_visual_canon:
+                from app.database import db_get_npc_visual_canon
+                visual_canon = db_get_npc_visual_canon(chat['id'], char_ref)
+                if visual_canon:
+                    char_dict['visual_canon_id'] = visual_canon['visual_canon_id']
+                    char_dict['visual_canon_name'] = visual_canon['visual_canon_name']
+                    char_dict['visual_canon_tags'] = visual_canon['visual_canon_tags']
+            
+            chars_data.append(char_dict)
+        else:
+            # Load global character from database
+            from app.database import db_get_character
+            char_data = db_get_character(char_ref)
+            if not char_data:
+                continue
+            data = char_data.get('data', {})
+            extensions = data.get('extensions', {})
+            
+            char_dict = {
+                'name': get_character_name(char_data),
+                'gender': extensions.get('gender', ''),
+                'danbooru_tag': extensions.get('danbooru_tag', '')
+            }
+            
+            # Add visual_canon data if requested (NEW)
+            if include_visual_canon:
+                from app.database import db_get_character_visual_canon
+                visual_canon = db_get_character_visual_canon(char_ref)
+                if visual_canon:
+                    char_dict['visual_canon_id'] = visual_canon['visual_canon_id']
+                    char_dict['visual_canon_name'] = visual_canon['visual_canon_name']
+                    char_dict['visual_canon_tags'] = visual_canon['visual_canon_tags']
+            
+            chars_data.append(char_dict)
+    
+    return chars_data
+
+def auto_count_characters_by_gender(chars_data: List[Dict]) -> str:
+    """Generate danbooru count tags based on character genders.
+    
+    Args:
+        chars_data: List of character dicts with 'gender' field
+        
+    Returns:
+        Comma-separated count tags (e.g., "2girls, 1boy") or None if no genders set
+    """
+    gender_counts = {'female': 0, 'male': 0, 'other': 0}
+    
+    for char in chars_data:
+        gender = char.get('gender', '').lower()
+        if gender in gender_counts:
+            gender_counts[gender] += 1
+    
+    count_tags = []
+    if gender_counts['female'] == 1:
+        count_tags.append('1girl')
+    elif gender_counts['female'] > 1:
+        count_tags.append(f'{gender_counts["female"]}girls')
+    
+    if gender_counts['male'] == 1:
+        count_tags.append('1boy')
+    elif gender_counts['male'] > 1:
+        count_tags.append(f'{gender_counts["male"]}boys')
+    
+    if gender_counts['other'] > 0:
+        # For 'other' gender, use 'solo' if single, 'multiple' otherwise
+        if len(count_tags) == 0 and gender_counts['other'] == 1:
+            count_tags.append('solo')
+        elif gender_counts['other'] > 0:
+            count_tags.append('multiple')
+    
+    return ', '.join(count_tags) if count_tags else ''
+
+def aggregate_danbooru_tags(chars_data: List[Dict], override_count: Optional[str] = None) -> str:
+    """Aggregate danbooru tags from all characters with gender count override.
+    
+    Args:
+        chars_data: List of character dicts with 'danbooru_tag' field
+        override_count: Count tag(s) from auto-counting (overrides danbooru_tag count)
+        
+    Returns:
+        Comma-separated danbooru tags for Block 1
+    """
+    all_tags = []
+    
+    for char in chars_data:
+        danbooru_tag = char.get('danbooru_tag', '').strip()
+        if not danbooru_tag:
+            continue
+        
+        # Parse comma-separated tags
+        tags = [t.strip() for t in danbooru_tag.split(',') if t.strip()]
+        
+        # Filter out count tags if override provided (gender wins)
+        if override_count:
+            # Common count patterns to filter
+            count_patterns = ['1girl', '1boy', '2girls', '2boys', '3girls', '3boys',
+                           '4girls', '4boys', '5girls', '5boys', '6+girls', '6+boys',
+                           'solo', 'duo', 'trio', 'quartet', 'group', 'crowd',
+                           'multiple girls', 'multiple boys', 'multiple']
+            tags = [t for t in tags if t.lower() not in count_patterns]
+        
+        all_tags.extend(tags)
+    
+    # Limit to first 8 tags (5 for block 1, 3 for semantic matching buffer)
+    return ', '.join(all_tags[:8])
 
 @app.post("/api/chat/snapshot")
 async def generate_chat_snapshot(request: SnapshotRequest):
@@ -4332,21 +4562,28 @@ async def generate_chat_snapshot(request: SnapshotRequest):
         chat_text = "\n".join([msg.get('content', '') for msg in messages])
         context_tokens = await get_token_count(chat_text)
 
-        # Get character tag if specified
-        character_tag = None
-        if request.character_ref:
-            character_tag = snapshot_analyzer.get_character_tag(
-                request.character_ref, chat
-            )
-
+        # Extract active characters' gender and danbooru tags WITH visual canon data (NEW)
+        chars_data = get_active_characters_data(chat, max_chars=3, include_visual_canon=True)
+        
+        # Auto-count characters by gender
+        count_tags = auto_count_characters_by_gender(chars_data)
+        print(f"[SNAPSHOT] Auto-counted: {count_tags}")
+        
+        # Aggregate danbooru tags with gender override
+        character_tags = aggregate_danbooru_tags(chars_data, override_count=count_tags if count_tags else None)
+        print(f"[SNAPSHOT] Aggregated character tags: {character_tags}")
+        
         # Analyze scene
         scene_analysis = await snapshot_analyzer.analyze_scene(
             messages, request.chat_id
         )
-
-        # Build prompt
+        
+        # Build prompt with multi-character support + visual canon (NEW)
         positive_prompt, negative_prompt = prompt_builder.build_4_block_prompt(
-            scene_analysis, character_tag
+            scene_analysis,
+            character_tags,
+            variation_mode=False,
+            active_chars_data=chars_data  # NEW: Pass visual canon bindings
         )
 
         # Use size parameters from request, default to 512x512
@@ -4378,7 +4615,7 @@ async def generate_chat_snapshot(request: SnapshotRequest):
             "prompt": positive_prompt,
             "negative_prompt": negative_prompt,
             "scene_analysis": scene_analysis,
-            "character_ref": request.character_ref
+            "characters": [{"name": c["name"], "gender": c["gender"]} for c in chars_data]
         }
 
         # Update chat metadata with snapshot history
@@ -4453,20 +4690,27 @@ async def regenerate_snapshot(chat_id: str):
             return {"error": "Chat not found"}
 
         messages = chat.get('messages', [])
-
-        # Get character tag (same as original snapshot)
-        active_chars = chat.get('metadata', {}).get('activeCharacters', [])
-        character_ref = active_chars[0] if active_chars else None
-        character_tag = snapshot_analyzer.get_character_tag(character_ref, chat)
-
+        
+        # Extract active characters' gender and danbooru tags WITH visual canon data (NEW)
+        chars_data = get_active_characters_data(chat, max_chars=3, include_visual_canon=True)
+        
+        # Auto-count characters by gender
+        count_tags = auto_count_characters_by_gender(chars_data)
+        print(f"[SNAPSHOT] Regenerate auto-counted: {count_tags}")
+        
+        # Aggregate danbooru tags with gender override
+        character_tags = aggregate_danbooru_tags(chars_data, override_count=count_tags if count_tags else None)
+        print(f"[SNAPSHOT] Regenerate aggregated tags: {character_tags}")
+        
         # Analyze scene (re-run for current context)
         scene_analysis = await snapshot_analyzer.analyze_scene(messages, chat_id)
-
-        # Build prompt with VARIATION MODE
+        
+        # Build prompt with VARIATION MODE + visual canon (NEW)
         positive_prompt, negative_prompt = prompt_builder.build_4_block_prompt(
             scene_analysis,
-            character_tag,
-            variation_mode=True  # VARIATION MODE
+            character_tags,
+            variation_mode=True,  # VARIATION MODE
+            active_chars_data=chars_data  # NEW: Pass visual canon bindings
         )
 
         # Generate image
@@ -4494,7 +4738,7 @@ async def regenerate_snapshot(chat_id: str):
             "prompt": positive_prompt,
             "negative_prompt": negative_prompt,
             "scene_analysis": scene_analysis,
-            "character_ref": character_ref,
+            "characters": [{"name": c["name"], "gender": c["gender"]} for c in chars_data],
             "mode": "variation"
         }
 
@@ -4764,6 +5008,344 @@ async def delete_favorite(favorite_id: int):
     except Exception as e:
         logger.error(f"Failed to delete favorite: {e}")
         return {"error": str(e)}
+
+
+# ============================================================================
+# DANBOORU CHARACTER CASTING API ENDPOINTS
+# ============================================================================
+
+class VisualCanonRequest(BaseModel):
+    """Request model for visual canon assignment."""
+    gender: Optional[str] = None
+    physical_tags: Optional[List[str]] = None
+
+
+@app.post("/api/characters/{filename}/assign-visual-canon")
+async def assign_visual_canon_character(filename: str, request: VisualCanonRequest):
+    """
+    Assign visual canon to a character.
+
+    Uses entity gender and physical traits from description to find
+    matching Danbooru character via semantic search.
+    """
+    try:
+        from app.visual_canon_assigner import VisualCanonAssigner
+        from app.database import db_get_character
+
+        # Load character data
+        char_data = db_get_character(filename)
+        if not char_data:
+            return {"success": False, "error": "Character not found"}
+
+        # Extract constraints
+        gender = request.gender or char_data.get('data', {}).get('extensions', {}).get('gender', 'unknown')
+        description = char_data.get('data', {}).get('description', '')
+
+        # Extract physical tags from description
+        physical_tags = request.physical_tags or VisualCanonAssigner.extract_physical_traits(description)
+
+        # Assign visual canon
+        result = VisualCanonAssigner.assign_visual_canon(
+            entity_type='character',
+            entity_id=filename,
+            constraints={
+                'gender': gender,
+                'physical_tags': physical_tags
+            }
+        )
+
+        if result['success']:
+            # Load character again to get visual_canon mirrored in extensions
+            updated_char = db_get_character(filename)
+
+            # Sync to JSON file
+            import os
+            import json
+            from app.database import sync_character_from_json
+
+            file_path = os.path.join(DATA_DIR, "characters", filename)
+            with open(file_path, "r", encoding="utf-8") as f:
+                char_json = json.load(f)
+
+            # Mirror visual_canon to extensions
+            if 'extensions' not in char_json['data']:
+                char_json['data']['extensions'] = {}
+            char_json['data']['extensions']['visual_canon_id'] = result['visual_canon_id']
+            char_json['data']['extensions']['visual_canon_name'] = result['visual_canon_name']
+            char_json['data']['extensions']['visual_canon_tags'] = result['visual_canon_tags']
+
+            # Save to JSON
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(char_json, f, indent=2, ensure_ascii=False)
+
+            print(f"[VISUAL_CANON] Assigned to character {filename}: {result['visual_canon_name']}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to assign visual canon to character: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/characters/{filename}/reroll-visual-canon")
+async def reroll_visual_canon_character(filename: str):
+    """
+    Reroll visual canon for a character.
+
+    Keeps same constraints (gender) but selects different character.
+    """
+    try:
+        from app.visual_canon_assigner import VisualCanonAssigner
+        from app.database import db_get_character
+
+        # Load character data
+        char_data = db_get_character(filename)
+        if not char_data:
+            return {"success": False, "error": "Character not found"}
+
+        # Reroll visual canon
+        result = VisualCanonAssigner.reroll_visual_canon(
+            entity_type='character',
+            entity_id=filename
+        )
+
+        if result['success']:
+            # Load character again to get visual_canon mirrored in extensions
+            updated_char = db_get_character(filename)
+
+            # Sync to JSON file
+            import os
+            import json
+            from app.database import sync_character_from_json
+
+            file_path = os.path.join(DATA_DIR, "characters", filename)
+            with open(file_path, "r", encoding="utf-8") as f:
+                char_json = json.load(f)
+
+            # Mirror visual_canon to extensions
+            if 'extensions' not in char_json['data']:
+                char_json['data']['extensions'] = {}
+            char_json['data']['extensions']['visual_canon_id'] = result['visual_canon_id']
+            char_json['data']['extensions']['visual_canon_name'] = result['visual_canon_name']
+            char_json['data']['extensions']['visual_canon_tags'] = result['visual_canon_tags']
+
+            # Save to JSON
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(char_json, f, indent=2, ensure_ascii=False)
+
+            print(f"[VISUAL_CANON] Rerolled for character {filename}: {result['visual_canon_name']}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to reroll visual canon for character: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/chats/{chat_id}/npcs/{npc_id}/assign-visual-canon")
+async def assign_visual_canon_npc(chat_id: str, npc_id: str, request: VisualCanonRequest):
+    """
+    Assign visual canon to an NPC.
+
+    Uses entity gender and physical traits from description to find
+    matching Danbooru character via semantic search.
+    """
+    try:
+        from app.visual_canon_assigner import VisualCanonAssigner
+        from app.database import db_get_chat
+
+        # Load chat data
+        chat = db_get_chat(chat_id)
+        if not chat:
+            return {"success": False, "error": "Chat not found"}
+
+        # Load NPC data
+        localnpcs = chat.get('metadata', {}).get('localnpcs', {})
+        npc_data = localnpcs.get(npc_id)
+        if not npc_data:
+            return {"success": False, "error": "NPC not found"}
+
+        # Extract constraints
+        gender = request.gender or npc_data.get('data', {}).get('extensions', {}).get('gender', 'unknown')
+        description = npc_data.get('data', {}).get('description', '')
+
+        # Extract physical tags from description
+        physical_tags = request.physical_tags or VisualCanonAssigner.extract_physical_traits(description)
+
+        # Assign visual canon
+        result = VisualCanonAssigner.assign_visual_canon(
+            entity_type='npc',
+            entity_id=npc_id,
+            chat_id=chat_id,
+            constraints={
+                'gender': gender,
+                'physical_tags': physical_tags
+            }
+        )
+
+        if result['success']:
+            # Mirror visual_canon to NPC extensions
+            if 'extensions' not in npc_data['data']:
+                npc_data['data']['extensions'] = {}
+            npc_data['data']['extensions']['visual_canon_id'] = result['visual_canon_id']
+            npc_data['data']['extensions']['visual_canon_name'] = result['visual_canon_name']
+            npc_data['data']['extensions']['visual_canon_tags'] = result['visual_canon_tags']
+
+            # Save NPC to chat metadata
+            chat['metadata']['localnpcs'][npc_id] = npc_data
+            from app.database import db_save_chat
+            db_save_chat(chat_id, chat)
+
+            print(f"[VISUAL_CANON] Assigned to NPC {npc_id}: {result['visual_canon_name']}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to assign visual canon to NPC: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/chats/{chat_id}/npcs/{npc_id}/reroll-visual-canon")
+async def reroll_visual_canon_npc(chat_id: str, npc_id: str):
+    """
+    Reroll visual canon for an NPC.
+
+    Keeps same constraints (gender) but selects different character.
+    """
+    try:
+        from app.visual_canon_assigner import VisualCanonAssigner
+        from app.database import db_get_chat
+
+        # Load chat data
+        chat = db_get_chat(chat_id)
+        if not chat:
+            return {"success": False, "error": "Chat not found"}
+
+        # Load NPC data
+        localnpcs = chat.get('metadata', {}).get('localnpcs', {})
+        npc_data = localnpcs.get(npc_id)
+        if not npc_data:
+            return {"success": False, "error": "NPC not found"}
+
+        # Reroll visual canon
+        result = VisualCanonAssigner.reroll_visual_canon(
+            entity_type='npc',
+            entity_id=npc_id,
+            chat_id=chat_id
+        )
+
+        if result['success']:
+            # Mirror visual_canon to NPC extensions
+            if 'extensions' not in npc_data['data']:
+                npc_data['data']['extensions'] = {}
+            npc_data['data']['extensions']['visual_canon_id'] = result['visual_canon_id']
+            npc_data['data']['extensions']['visual_canon_name'] = result['visual_canon_name']
+            npc_data['data']['extensions']['visual_canon_tags'] = result['visual_canon_tags']
+
+            # Save NPC to chat metadata
+            chat['metadata']['localnpcs'][npc_id] = npc_data
+            from app.database import db_save_chat
+            db_save_chat(chat_id, chat)
+
+            print(f"[VISUAL_CANON] Rerolled for NPC {npc_id}: {result['visual_canon_name']}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to reroll visual canon for NPC: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+class GenerateDanbooruTagsRequest(BaseModel):
+    """Request model for generating Danbooru tags from description."""
+    description: str
+    gender: str  # 'female', 'male', 'other'
+
+
+@app.post("/api/characters/{filename}/generate-danbooru-tags")
+async def generate_danbooru_tags_endpoint(filename: str, request: GenerateDanbooruTagsRequest):
+    """
+    Generate Danbooru tags from character description using semantic search.
+    
+    Extracts physical traits (hair color, eye color, body type, creature features)
+    and finds matching Danbooru character via progressive tag reduction.
+    
+    Returns suggested tags to populate the Danbooru Tag field.
+    Click again to reroll (overwrites with different match).
+    """
+    try:
+        from app.danbooru_tag_generator import generate_and_assign_to_character
+        
+        result = generate_and_assign_to_character(
+            filename=filename,
+            description=request.description,
+            gender=request.gender
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to generate Danbooru tags for character: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/chats/{chat_id}/npcs/{npc_id}/generate-danbooru-tags")
+async def generate_danbooru_tags_npc_endpoint(
+    chat_id: str, 
+    npc_id: str, 
+    request: GenerateDanbooruTagsRequest
+):
+    """
+    Generate Danbooru tags for an NPC from description.
+    
+    Same logic as character endpoint, but stores binding in chat_npcs table.
+    """
+    try:
+        from app.danbooru_tag_generator import generate_and_assign_to_npc
+        
+        result = generate_and_assign_to_npc(
+            chat_id=chat_id,
+            npc_id=npc_id,
+            description=request.description,
+            gender=request.gender
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Failed to generate Danbooru tags for NPC: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/danbooru-characters")
+async def list_danbooru_characters(
+    gender: Optional[str] = None,
+    limit: int = 100
+):
+    """
+    List available Danbooru characters.
+
+    For testing and debugging purposes.
+    """
+    try:
+        from app.database import db_get_danbooru_characters
+        characters = db_get_danbooru_characters(gender=gender, limit=limit)
+        return {"success": True, "characters": characters}
+    except Exception as e:
+        logger.error(f"Failed to list Danbooru characters: {e}")
+        return {"success": False, "error": str(e)}
 
 
 @app.post("/api/reimport")

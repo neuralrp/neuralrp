@@ -5,6 +5,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.10.0] - 2026-02-01
+
+### Added
+- **Danbooru Tag Generator**: One-click semantic matching to generate Danbooru tags from character descriptions
+  - Click "Generate Danbooru Character (Visual Canon)" hyperlink in character editor to auto-populate field
+  - Click again to reroll for different results (progressive search finds best match)
+  - Smart trait mapping from natural language to Danbooru vocabulary (e.g., "elf" → `pointy_ears`)
+  - Works for both global characters and local NPCs
+  - Best results with anime-trained SD models (Pony, Illustrious, NoobAI)
+  - Optional: Generate Danbooru character library via `app/fetch_danbooru_characters.py` (requires Danbooru API key, 15-30 min)
+
+- **Gender Field**: Visual gender selection now integrated across character editor, prompt assembly, and image generation
+  - Three-button toggle in character editor (Female/Male/Other) with color-coded styling
+  - NPCs can set gender just like global characters
+  - Stored in SillyTavern-compatible format (`data.extensions.gender`) for full backward compatibility
+  - Leave blank to use existing behavior (no breaking changes)
+
+- **Gender-Aware LLM Prompts**: Gender explicitly stated throughout conversation context
+  - Full character cards display gender field
+  - Multi-character capsules include gender for accurate dialogue generation
+  - Reinforcement reminders state character gender every 5 turns
+  - Reduces pronoun confusion and improves consistency
+
+- **Gender-Aware Image Generation**: Automatic character counting by gender in snapshots
+  - Auto-counts active characters: `1girl`, `2girls`, `1boy`, `2boys`, `1girl, 1boy`, etc.
+  - Gender field takes precedence over manual danbooru_tag count modifiers for accuracy
+  - Supports multi-character scenes (up to 3 characters) with aggregated danbooru tags
+  - Mixed scenarios handled gracefully with `solo`/`multiple` fallbacks
+
+### Changed
+- **Snapshot System**: Simplified API—only `chat_id` required, backend auto-resolves active characters
+- **Migration**: Schema version 2 adds optional `danbooru_characters` table for visual canon library
+
+***
+
 ## [1.9.0] - 2026-01-31
 
 ### Added

@@ -19,11 +19,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [1/3] Checking dependencies...
+echo [1/4] Checking dependencies...
 pip show fastapi >nul 2>&1
 if errorlevel 1 (
-    echo.
-    echo [2/3] Installing dependencies...
+     echo.
+     echo [2/4] Installing dependencies...
     echo This may take a few minutes on first run...
     echo.
     pip install -r requirements.txt
@@ -39,7 +39,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/3] Checking database...
+echo [3/4] Checking database...
 python app/database_setup.py
 if errorlevel 1 (
     echo.
@@ -49,6 +49,24 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Database ready.
+
+echo.
+echo [4/4] Checking Danbooru character database...
+python app/import_danbooru_characters.py --check-only >nul 2>&1
+if errorlevel 1 (
+    echo Danbooru characters not imported. Running import...
+    echo This takes ~30 seconds for ~1,500 characters...
+    python app/import_danbooru_characters.py
+    if errorlevel 1 (
+        echo.
+        echo WARNING: Danbooru import failed. Tag generation may not work.
+        echo.
+    ) else (
+        echo Danbooru characters imported successfully.
+    )
+) else (
+    echo Danbooru characters already imported.
+)
 
 echo.
 echo Starting NeuralRP...

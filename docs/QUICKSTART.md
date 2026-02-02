@@ -248,10 +248,117 @@ Use the dropdown menu in the bottom input area:
 
 If you've assigned Danbooru tags to a character (in Character Editor), use `[CharacterName]` in prompts:
 
-- Example: `[Jim] standing behind the bar, warm lighting`
+- Example: `[Jim] standing behind bar, warm lighting`
 - NeuralRP automatically expands to: `grizzled bartender, short, stout, intimidating, gentle, beard, apron, warm lighting`
 
 This ensures consistent character appearance across all generations.
+
+**Danbooru Tag Generator (v1.10.0):**
+
+One-click generation of Danbooru tags from character descriptions using semantic matching.
+
+**Directions to make it work**
+
+Go to: /neuralrp/app/data/danbooru
+Open fetch_danbooru_characters.py
+---NSFW Warning--- (the danbooru website can have racy images)
+Put in your danbooru api key (create an account at https://danbooru.donmai.us/, the API key is free)
+Right-click in danbooru folder and "Open in terminal"
+Type "python fetch_danbooru_characters.py"
+
+That command pulls 1300 character's worth of tags in, which get uploaded to the database the next time you open NeuralRP!
+
+**How It Works:**
+1. **Edit a Character** with a physical Description (hair color, eye color, body type)
+2. **Select Gender** (Female/Male/Other) - required for the generator
+3. **Click "Generate Danbooru Character"** hyperlink (appears below Gender toggle)
+4. **Auto-Population**: NeuralRP analyzes Description and populates the Danbooru Tag field with matching tags
+5. **Reroll for Variety**: Click the hyperlink again to overwrite with different matching character
+
+**Key Features:**
+- **Physical Trait Extraction**: Maps natural language to Danbooru vocabulary (e.g., "elf" → `pointy_ears`)
+- **Progressive Search**: Removes traits one-by-one until match found (handles sparse descriptions)
+- **Gender Filtering**: Hard 1girl/1boy filter on all searches
+- **Creature Types**: Auto-detects elves, fairies, demons, etc. and adds appropriate features
+- **NPC Parity**: Works identically for both global characters and chat-scoped NPCs
+
+**Best Suited For:**
+This feature works best with **anime-trained Stable Diffusion models**:
+- **Illustrious** - Optimal for detailed character features. This is my first recommendation.
+- **Pony Diffusion** - Excellent character reproduction, not quite as good as Illustious.
+
+The generated tags follow Danbooru tagging conventions which these models understand natively.
+
+**Requirements:**
+- Character must have a **Description** with physical details
+- Character must have **Gender** selected
+- Excel import: Place `Book1.xlsx` in `app/data/danbooru/` folder (one-time setup)
+
+**Importing Danbooru Characters:**
+
+The system includes 1560+ pre-tagged Danbooru characters from a reference database:
+
+```bash
+# Run the import script (one-time setup)
+python app/import_danbooru_characters.py
+```
+
+This takes ~60 seconds and generates semantic embeddings for all characters.
+
+**Note on Semantic Search:**
+- ✅ Normal operation: Uses semantic search with progressive tag reduction
+- ⚠️ Warning if vec0 fails: Falls back to trait-based random selection (still works!)
+- Check startup logs for: `[SETUP WARNING] Could not create vec_danbooru_characters table`
+
+**Fetching Danbooru Character Data (Optional):**
+
+Don't have `book1.xlsx`? Generate it automatically from Danbooru API:
+
+**Step 1: Get Danbooru API Key**
+
+1. Go to https://danbooru.donmai.us/user/edit
+2. Create an account if needed (free)
+3. Generate an API key
+4. Copy your API key
+
+**Step 2: Fetch Character Data**
+
+1. Edit `app/fetch_danbooru_characters.py`
+2. Find line 34: `DANBOORU_API_KEY = "your_api_key_here"`
+3. Paste your API key between the quotes
+4. Run the script:
+   ```bash
+   python app/fetch_danbooru_characters.py
+   ```
+5. Wait 15-30 minutes (fetches data for 1394 characters)
+
+**What the Script Does:**
+
+- Reads `app/data/danbooru/tag_list.txt` (1394 character tags)
+- Fetches 20 posts per character from Danbooru API
+- Extracts top 20 associated tags by frequency
+- Filters out 'solo' and meta tags (rating:, score:, etc.)
+- Sorts tags by frequency (most common tags first)
+- Saves clean data to `app/data/danbooru/book1.xlsx`
+
+**Resume Capability:**
+
+- If script is interrupted, run again
+- Script automatically skips already-fetched characters
+- Progress saves every 10 characters
+- Resume from where you left off
+
+**Rate Limiting:**
+
+- 1 second delay between requests (Danbooru API limit)
+- Retry logic with exponential backoff (3 attempts)
+- API key provides better rate limits than public access
+
+**Example Workflow:**
+1. Create character "Alice" with description: "blonde hair, blue eyes, petite elf girl"
+2. Select Gender: Female
+3. Click **"Generate Danbooru Character"** → System populates field with: `1girl, blonde_hair, blue_eyes, small_breasts, pointy_ears, elf`
+4. Generate snapshot → Prompt uses generated tags: `1girl, blonde_hair, blue_eyes, small_breasts, pointy_ears, elf, masterpiece, best quality`
 
 **Favorites and Personalized Learning:**
 

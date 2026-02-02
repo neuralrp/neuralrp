@@ -31,6 +31,11 @@ app/data/chats/*.json
 !app/data/worldinfo/.gitkeep
 !app/images/.gitkeep
 
+# Danbooru data
+app/data/danbooru/book1.xlsx
+!app/data/danbooru/.gitkeep
+!app/data/danbooru/tag_list.txt
+
 # ============================================
 # PYTHON
 # ============================================

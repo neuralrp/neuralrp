@@ -10,10 +10,27 @@ Version tracking allows for future schema updates.
 
 import sqlite3
 import os
+import sys
 from typing import Optional
 
+# Try to import sqlite-vec for extension loading
+sqlite_vec = None
+SQLITE_VEC_AVAILABLE = False
+try:
+    import sqlite_vec as _sqlite_vec
+    sqlite_vec = _sqlite_vec
+    SQLITE_VEC_AVAILABLE = True
+except ImportError:
+    pass
+
+# Set UTF-8 encoding for console output
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 # Schema version - increment when making schema changes
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
@@ -35,6 +52,13 @@ def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
         
         conn = sqlite3.connect(database_path)
         c = conn.cursor()
+        
+        # Enable extension loading for sqlite-vec
+        try:
+            conn.enable_load_extension(True)
+        except AttributeError:
+            # Extension loading not available in this SQLite build
+            pass
         
         # Enable foreign keys
         c.execute("PRAGMA foreign_keys = ON")
@@ -68,6 +92,7 @@ def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
         _create_change_log_table(c)
         _create_performance_metrics_table(c)
         _create_image_metadata_table(c)
+        _create_danbooru_characters_table(c)
         
         # Create indexes
         _create_indexes(c)
@@ -76,7 +101,7 @@ def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
         _create_triggers(c)
         
         # Create virtual tables (FTS5 and vec0)
-        _create_virtual_tables(c)
+        _create_virtual_tables(c, conn)
         
         # Update schema version
         _set_schema_version(c, SCHEMA_VERSION)
@@ -138,12 +163,22 @@ def _apply_migrations(c, from_version: int, to_version: int):
         
         print("[MIGRATION] v1.8.0 → v1.9.0 complete")
     
-    # Template for future migrations (v1.9.0 → v1.10.0)
-    # if from_version < 2:
-    #     print("[MIGRATION] Applying v1.9.0 → v1.10.0 updates...")
-    #     _add_column_if_not_exists(c, "characters", "new_field", "TEXT")
-    #     # Create new tables for v1.10.0 features
-    #     print("[MIGRATION] v1.9.0 → v1.10.0 complete")
+    # Migration 1 → 2 (v1.10.0 → v1.11.0: Danbooru Character Casting)
+    if from_version < 2:
+        print("[MIGRATION] Applying v1.10.0 → v1.11.0 updates...")
+        
+        # Add visual canon columns to characters table
+        _add_column_if_not_exists(c, "characters", "visual_canon_id", "INTEGER")
+        _add_column_if_not_exists(c, "characters", "visual_canon_tags", "TEXT")
+        
+        # Add visual canon columns to chat_npcs table
+        _add_column_if_not_exists(c, "chat_npcs", "visual_canon_id", "INTEGER")
+        _add_column_if_not_exists(c, "chat_npcs", "visual_canon_tags", "TEXT")
+        
+        # Note: New tables (danbooru_characters, vec_danbooru_characters) are created automatically
+        # by _create_danbooru_characters_table() with IF NOT EXISTS
+        
+        print("[MIGRATION] v1.10.0 → v1.11.0 complete")
 
 
 def _add_column_if_not_exists(c, table: str, column: str, dtype: str):
@@ -425,6 +460,22 @@ def _create_image_metadata_table(c):
     """)
 
 
+def _create_danbooru_characters_table(c):
+    """Create danbooru_characters table for Danbooru character casting."""
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS danbooru_characters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            gender TEXT NOT NULL CHECK(gender IN ('male', 'female', 'other', 'unknown')),
+            core_tags TEXT NOT NULL,
+            all_tags TEXT NOT NULL,
+            image_link TEXT,
+            source_id TEXT UNIQUE,
+            created_at INTEGER
+        )
+    """)
+
+
 def _create_indexes(c):
     """Create all database indexes."""
     indexes = [
@@ -462,6 +513,10 @@ def _create_indexes(c):
         # Danbooru tags indexes
         ("idx_danbooru_tags_block", "CREATE INDEX IF NOT EXISTS idx_danbooru_tags_block ON danbooru_tags(block_num)"),
         ("idx_danbooru_tags_text", "CREATE INDEX IF NOT EXISTS idx_danbooru_tags_text ON danbooru_tags(tag_text)"),
+        
+        # Danbooru characters indexes
+        ("idx_danbooru_characters_gender", "CREATE INDEX IF NOT EXISTS idx_danbooru_characters_gender ON danbooru_characters(gender)"),
+        ("idx_danbooru_characters_name", "CREATE INDEX IF NOT EXISTS idx_danbooru_characters_name ON danbooru_characters(name)"),
         
         # Favorites indexes
         ("idx_sd_favorites_scene_type", "CREATE INDEX IF NOT EXISTS idx_sd_favorites_scene_type ON sd_favorites(scene_type)"),
@@ -511,7 +566,7 @@ def _create_triggers(c):
     """)
 
 
-def _create_virtual_tables(c):
+def _create_virtual_tables(c, conn):
     """Create virtual tables (FTS5 and vec0)."""
     # FTS5 table for message search
     try:
@@ -530,30 +585,63 @@ def _create_virtual_tables(c):
     except sqlite3.Error as e:
         print(f"[SETUP WARNING] Could not create FTS5 table: {e}")
     
+    # Load sqlite-vec extension before creating vec0 tables
+    vec_loaded = False
+    if SQLITE_VEC_AVAILABLE and sqlite_vec is not None:
+        try:
+            sqlite_vec.load(conn)
+            vec_loaded = True
+            print("[SETUP] sqlite-vec extension loaded successfully")
+        except Exception as e:
+            print(f"[SETUP WARNING] Could not load sqlite-vec extension: {e}")
+    
     # vec0 table for world entries embeddings
-    try:
-        c.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_world_entries 
-            USING vec0(
-                entry_id INTEGER PRIMARY KEY,
-                world_name TEXT,
-                entry_uid TEXT,
-                embedding FLOAT[768]
-            )
-        """)
-    except sqlite3.Error as e:
-        print(f"[SETUP WARNING] Could not create vec_world_entries table (sqlite-vec extension may not be loaded): {e}")
+    if vec_loaded:
+        try:
+            c.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_world_entries 
+                USING vec0(
+                    entry_id INTEGER PRIMARY KEY,
+                    world_name TEXT,
+                    entry_uid TEXT,
+                    embedding FLOAT[768]
+                )
+            """)
+            print("[SETUP] vec_world_entries table created")
+        except sqlite3.Error as e:
+            print(f"[SETUP WARNING] Could not create vec_world_entries table: {e}")
+    else:
+        print("[SETUP] Skipping vec_world_entries table (sqlite-vec not available)")
     
     # vec0 table for danbooru tags embeddings
-    try:
-        c.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_danbooru_tags 
-            USING vec0(
-                embedding float[768]
-            )
-        """)
-    except sqlite3.Error as e:
-        print(f"[SETUP WARNING] Could not create vec_danbooru_tags table (sqlite-vec extension may not be loaded): {e}")
+    if vec_loaded:
+        try:
+            c.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_danbooru_tags 
+                USING vec0(
+                    embedding float[768]
+                )
+            """)
+            print("[SETUP] vec_danbooru_tags table created")
+        except sqlite3.Error as e:
+            print(f"[SETUP WARNING] Could not create vec_danbooru_tags table: {e}")
+    else:
+        print("[SETUP] Skipping vec_danbooru_tags table (sqlite-vec not available)")
+    
+    # vec0 table for danbooru characters embeddings
+    if vec_loaded:
+        try:
+            c.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_danbooru_characters 
+                USING vec0(
+                    embedding float[768]
+                )
+            """)
+            print("[SETUP] vec_danbooru_characters table created")
+        except sqlite3.Error as e:
+            print(f"[SETUP WARNING] Could not create vec_danbooru_characters table: {e}")
+    else:
+        print("[SETUP] Skipping vec_danbooru_characters table (sqlite-vec not available)")
 
 
 if __name__ == "__main__":
@@ -561,13 +649,14 @@ if __name__ == "__main__":
     
     # Allow custom database path from command line
     db_path = sys.argv[1] if len(sys.argv) > 1 else "app/data/neuralrp.db"
-    
+     
     print(f"[SETUP] Initializing NeuralRP database at: {db_path}")
     success = setup_database(db_path)
     
     if success:
-        print("[SETUP] ✓ Database setup complete")
+        print("[SETUP] Database setup complete")
         sys.exit(0)
     else:
-        print("[SETUP] ✗ Database setup failed")
+        print("[SETUP] Database setup failed")
         sys.exit(1)
+

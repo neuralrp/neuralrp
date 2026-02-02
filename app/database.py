@@ -37,6 +37,15 @@ def get_connection():
         # Enable extension loading for sqlite-vec
         try:
             _thread_local.connection.enable_load_extension(True)
+            
+            # Load sqlite-vec extension using sqlite_vec module (more reliable)
+            try:
+                import sqlite_vec
+                sqlite_vec.load(_thread_local.connection)
+            except (ImportError, sqlite3.OperationalError):
+                # Extension not available, vec0 functions won't work
+                # Functions using vec0 should handle this gracefully
+                pass
         except AttributeError:
             # Extension loading not available in this SQLite build
             pass
@@ -506,6 +515,59 @@ def init_db():
         except Exception as e:
             print(f"[WARN] sqlite-vec not available: {e}")
 
+        # Snapshot favorites table (v1.9.0+)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sd_favorites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT,
+                image_filename TEXT UNIQUE NOT NULL,
+                prompt TEXT NOT NULL,
+                negative_prompt TEXT NOT NULL,
+                scene_type TEXT,
+                setting TEXT,
+                mood TEXT,
+                character_ref TEXT,
+                tags TEXT,
+                steps INTEGER,
+                cfg_scale REAL,
+                width INTEGER,
+                height INTEGER,
+                source_type TEXT DEFAULT 'snapshot',
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                note TEXT
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sd_favorites_scene_type ON sd_favorites(scene_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sd_favorites_source_type ON sd_favorites(source_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sd_favorites_created ON sd_favorites(created_at DESC)")
+
+        # Danbooru tag favorites table (v1.9.0+)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS danbooru_tag_favorites (
+                tag_text TEXT PRIMARY KEY,
+                favorite_count INTEGER DEFAULT 0,
+                last_used INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+        """)
+
+        # Danbooru characters table (v1.10.0+)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS danbooru_characters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                gender TEXT NOT NULL CHECK(gender IN ('male', 'female', 'other', 'unknown')),
+                core_tags TEXT NOT NULL,
+                all_tags TEXT NOT NULL,
+                image_link TEXT,
+                source_id TEXT UNIQUE,
+                created_at INTEGER
+            )
+        """)
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_danbooru_characters_gender ON danbooru_characters(gender)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_danbooru_characters_name ON danbooru_characters(name)")
+
         conn.commit()
 
         # ============================================================================
@@ -545,7 +607,8 @@ def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT filename, data, danbooru_tag, updated_at
+            SELECT filename, data, danbooru_tag, updated_at,
+                   visual_canon_id, visual_canon_tags
             FROM characters
             WHERE filename = ?
         """, (filename,))
@@ -564,6 +627,21 @@ def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
         if row['danbooru_tag']:
             char_data['data']['extensions']['danbooru_tag'] = row['danbooru_tag']
         
+        # MIRROR: Visual canon to extensions (NEW)
+        if row['visual_canon_id']:
+            # Get full visual canon data from DB
+            cursor.execute("""
+                SELECT name, gender, core_tags
+                FROM danbooru_characters
+                WHERE id = ?
+            """, (row['visual_canon_id'],))
+            canon_row = cursor.fetchone()
+            
+            if canon_row:
+                char_data['data']['extensions']['visual_canon_id'] = row['visual_canon_id']
+                char_data['data']['extensions']['visual_canon_name'] = canon_row['name']
+                char_data['data']['extensions']['visual_canon_tags'] = row['visual_canon_tags']
+        
         return char_data
 
 
@@ -581,6 +659,8 @@ def db_save_character(char_data: Dict[str, Any], filename: str) -> bool:
             name = char_data.get('data', {}).get('name', 'Unknown')
             extensions = char_data.get('data', {}).get('extensions', {})
             danbooru_tag = extensions.get('danbooru_tag', '')
+            visual_canon_id = extensions.get('visual_canon_id', None)
+            visual_canon_tags = extensions.get('visual_canon_tags', '')
             
             # Remove _filename from data before saving
             save_data = char_data.copy()
@@ -590,12 +670,13 @@ def db_save_character(char_data: Dict[str, Any], filename: str) -> bool:
             data_json = json.dumps(save_data, ensure_ascii=False)
             timestamp = int(time.time())
             
-            # Insert or replace
+            # Insert or replace with visual canon columns
             cursor.execute("""
                 INSERT OR REPLACE INTO characters 
-                (filename, name, data, danbooru_tag, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (filename, name, data_json, danbooru_tag, timestamp, timestamp))
+                (filename, name, data, danbooru_tag, visual_canon_id, visual_canon_tags, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (filename, name, data_json, danbooru_tag, 
+                   visual_canon_id, visual_canon_tags, timestamp, timestamp))
             
             conn.commit()
             
@@ -1699,11 +1780,11 @@ def init_vec_table():
     """Initialize vec0 virtual table for embeddings if sqlite-vec is available."""
     try:
         import sqlite_vec
-        
+
         with get_connection() as conn:
             # Load sqlite-vec extension
             sqlite_vec.load(conn)
-            
+
             # Create virtual table for world entry embeddings if it doesn't exist
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_world_entries USING vec0(
@@ -1713,6 +1794,14 @@ def init_vec_table():
                     embedding FLOAT[768]
                 )
             """)
+
+            # Create virtual table for danbooru characters embeddings (v1.10.0+)
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_danbooru_characters USING vec0(
+                    embedding float[768]
+                )
+            """)
+
             conn.commit()
             return True
     except ImportError:
@@ -3791,25 +3880,30 @@ def db_update_npc(chat_id: str, npc_id: str, npc_data: Dict) -> bool:
         with get_connection() as conn:
             cursor = conn.cursor()
 
-            # First check if NPC exists
+            # First check if NPC exists and get current values
             cursor.execute("""
-                SELECT entity_id FROM chat_npcs 
+                SELECT entity_id, visual_canon_id, visual_canon_tags FROM chat_npcs 
                 WHERE chat_id = ? AND entity_id = ?
             """, (chat_id, npc_id))
             
-            if not cursor.fetchone():
+            existing = cursor.fetchone()
+            if not existing:
                 print(f"[NPC] {npc_id} not found in chat {chat_id} for update")
                 return False
+
+            # Preserve visual canon fields if they exist in database
+            existing_visual_canon_id = existing['visual_canon_id']
+            existing_visual_canon_tags = existing['visual_canon_tags']
 
             # Extract name from data if present
             name = npc_data.get("name", "")
 
-            # Update the NPC
+            # Update NPC, preserving existing visual canon fields
             cursor.execute("""
                 UPDATE chat_npcs 
-                SET data = ?, name = ?
+                SET data = ?, name = ?, visual_canon_id = ?, visual_canon_tags = ?
                 WHERE chat_id = ? AND entity_id = ?
-            """, (json.dumps(npc_data), name, chat_id, npc_id))
+            """, (json.dumps(npc_data), name, existing_visual_canon_id, existing_visual_canon_tags, chat_id, npc_id))
 
             conn.commit()
 
@@ -4580,6 +4674,231 @@ def db_increment_favorite_tag(tag_text: str):
                 last_used = strftime('%s', 'now')
         """, (tag_text,))
         conn.commit()
+
+
+# ============================================================================
+# DANBOORU CHARACTER CANON OPERATIONS
+# ============================================================================
+
+def db_get_danbooru_characters(
+    gender: Optional[str] = None,
+    limit: int = 100
+) -> List[Dict[str, Any]]:
+    """Get Danbooru characters, optionally filtered by gender."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        if gender:
+            cursor.execute("""
+                SELECT id, name, gender, core_tags, all_tags, image_link
+                FROM danbooru_characters
+                WHERE gender = ?
+                ORDER BY RANDOM()
+                LIMIT ?
+            """, (gender, limit))
+        else:
+            cursor.execute("""
+                SELECT id, name, gender, core_tags, all_tags, image_link
+                FROM danbooru_characters
+                ORDER BY RANDOM()
+                LIMIT ?
+            """, (limit,))
+        
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def db_search_danbooru_characters_semantically(
+    query_text: str,
+    gender: Optional[str] = None,
+    k: int = 10,
+    threshold: float = 0.5
+) -> List[Dict[str, Any]]:
+    """
+    Search Danbooru characters using semantic search.
+    
+    Args:
+        query_text: Query text (e.g., character description or tags)
+        gender: Optional gender filter
+        k: Number of results to return
+        threshold: Minimum similarity threshold (cosine similarity)
+    
+    Returns:
+        List of matching characters with similarity scores
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+        import numpy as np
+        import sqlite_vec
+    except ImportError:
+        print("[WARN] sentence-transformers or sqlite-vec not available, using random selection")
+        return db_get_danbooru_characters(gender=gender, limit=k)
+    
+    # Generate query embedding
+    model = SentenceTransformer('all-mpnet-base-v2')
+    query_embedding = model.encode(query_text).astype(np.float32)
+    query_bytes = query_embedding.tobytes()
+    
+    try:
+        with get_connection() as conn:
+            # Load sqlite-vec extension
+            sqlite_vec.load(conn)
+            cursor = conn.cursor()
+            
+            # Use vec_distance_cosine for cosine similarity (1 - cosine_distance = similarity)
+            # Note: Cannot use column aliases in WHERE clause, so we use a subquery
+            if gender:
+                cursor.execute("""
+                    SELECT id, name, gender, core_tags, all_tags, similarity
+                    FROM (
+                        SELECT dc.id, dc.name, dc.gender, dc.core_tags, dc.all_tags,
+                               (1 - vec_distance_cosine(vd.embedding, ?)) as similarity
+                        FROM danbooru_characters dc
+                        JOIN vec_danbooru_characters vd ON dc.id = vd.rowid
+                        WHERE dc.gender = ?
+                    ) AS subquery
+                    WHERE similarity >= ?
+                    ORDER BY similarity DESC
+                    LIMIT ?
+                """, (query_bytes, gender, threshold, k))
+            else:
+                cursor.execute("""
+                    SELECT id, name, gender, core_tags, all_tags, similarity
+                    FROM (
+                        SELECT dc.id, dc.name, dc.gender, dc.core_tags, dc.all_tags,
+                               (1 - vec_distance_cosine(vd.embedding, ?)) as similarity
+                        FROM danbooru_characters dc
+                        JOIN vec_danbooru_characters vd ON dc.id = vd.rowid
+                    ) AS subquery
+                    WHERE similarity >= ?
+                    ORDER BY similarity DESC
+                    LIMIT ?
+                """, (query_bytes, threshold, k))
+            
+            # Collect results
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    'id': row['id'],
+                    'name': row['name'],
+                    'gender': row['gender'],
+                    'core_tags': row['core_tags'],
+                    'all_tags': row['all_tags'],
+                    'similarity': row['similarity']
+                })
+            
+            return results
+    except Exception as e:
+        print(f"[WARN] Semantic search failed: {e}, using random selection")
+        return db_get_danbooru_characters(gender=gender, limit=k)
+
+
+def db_assign_visual_canon_to_character(
+    filename: str,
+    canon_id: int,
+    canon_tags: str
+) -> bool:
+    """Assign visual canon to a global character."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE characters
+            SET visual_canon_id = ?, visual_canon_tags = ?
+            WHERE filename = ?
+        """, (canon_id, canon_tags, filename))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def db_assign_visual_canon_to_npc(
+    chat_id: str,
+    npc_id: str,
+    canon_id: int,
+    canon_tags: str
+) -> bool:
+    """Assign visual canon to an NPC."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE chat_npcs
+            SET visual_canon_id = ?, visual_canon_tags = ?
+            WHERE chat_id = ? AND entity_id = ?
+        """, (canon_id, canon_tags, chat_id, npc_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def db_clear_visual_canon_from_character(filename: str) -> bool:
+    """Clear visual canon binding from a character."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE characters
+            SET visual_canon_id = NULL, visual_canon_tags = NULL
+            WHERE filename = ?
+        """, (filename,))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def db_clear_visual_canon_from_npc(chat_id: str, npc_id: str) -> bool:
+    """Clear visual canon binding from an NPC."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE chat_npcs
+            SET visual_canon_id = NULL, visual_canon_tags = NULL
+            WHERE chat_id = ? AND entity_id = ?
+        """, (chat_id, npc_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def db_get_character_visual_canon(filename: str) -> Optional[Dict[str, Any]]:
+    """Get visual canon for a character."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT c.visual_canon_id, c.visual_canon_tags, dc.name, dc.gender, dc.core_tags
+            FROM characters c
+            LEFT JOIN danbooru_characters dc ON c.visual_canon_id = dc.id
+            WHERE c.filename = ?
+        """, (filename,))
+        
+        row = cursor.fetchone()
+        if not row:
+            return None
+        
+        return {
+            'visual_canon_id': row['visual_canon_id'],
+            'visual_canon_tags': row['visual_canon_tags'],
+            'visual_canon_name': row['name'],
+            'visual_canon_gender': row['gender'],
+            'visual_canon_core_tags': row['core_tags']
+        }
+
+
+def db_get_npc_visual_canon(chat_id: str, npc_id: str) -> Optional[Dict[str, Any]]:
+    """Get visual canon for an NPC."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT cn.visual_canon_id, cn.visual_canon_tags, dc.name, dc.gender, dc.core_tags
+            FROM chat_npcs cn
+            LEFT JOIN danbooru_characters dc ON cn.visual_canon_id = dc.id
+            WHERE cn.chat_id = ? AND cn.entity_id = ?
+        """, (chat_id, npc_id))
+        
+        row = cursor.fetchone()
+        if not row:
+            return None
+        
+        return {
+            'visual_canon_id': row['visual_canon_id'],
+            'visual_canon_tags': row['visual_canon_tags'],
+            'visual_canon_name': row['name'],
+            'visual_canon_gender': row['gender'],
+            'visual_canon_core_tags': row['core_tags']
+        }
 
 
 # ============================================================================

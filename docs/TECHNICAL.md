@@ -31,7 +31,8 @@ This document explains how NeuralRP's advanced features work under the hood, des
 21. [Tag Management System](#tag-management-system)
 22. [Favorites Viewer](#favorites-viewer)
 23. [Snapshot Feature](#snapshot-feature)
-24. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
+24. [Gender System](#gender-system)
+25. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
     - [Context Hygiene Philosophy](#context-hygiene-philosophy)
 
 ---
@@ -6079,22 +6080,24 @@ Frontend: Display image in chat + toggleable prompt details
 
 The snapshot system uses a rigid 4-block structure for Stable Diffusion prompts:
 
-| Block | Purpose | Target Tags | Example Tags |
-|-------|---------|--------------|--------------|
-| **0: Quality** | Image quality control | 3 | masterpiece, best quality, high quality |
-| **1: Subject** | Character/entity appearance | 5 | 1girl, blonde hair, blue eyes, smile, solo |
-| **2: Environment** | Scene setting/background | 2 | forest, simple background |
-| **3: Style** | Rendering style/lighting | 4 | cinematic lighting, anime style, detailed, vibrant |
+| Block | Purpose | Target Tags | Example Tags | Source |
+|-------|---------|--------------|--------------|---------|
+| **0: Quality** | Image quality control | 3 | masterpiece, best quality, high quality | Config (60 tags) |
+| **1: Subject** | Character/entity appearance | 5 | 1girl, blonde hair, blue eyes, smile, solo | Config (600 tags) |
+| **2: Environment** | Scene setting/background | 2 | forest, simple background | Config (300 tags) |
+| **3: Style** | Rendering style/lighting | 4 | cinematic lighting, anime style, detailed, vibrant | Config (600 tags) |
+| **4: User/Custom** | User-added custom tags | Unlimited | nsfw_custom, unique_concept, personal_style | Dynamic (user-added) |
 
-**Total Tags**: ~14 tags per prompt (varies by block availability)
+**Total Tags**: ~14+ tags per prompt (varies by block availability + user library)
 
 **Block Targets Configuration** (`app/danbooru_tags_config.py`):
 ```python
 BLOCK_TARGETS: Dict[int, int] = {
     0: 3,   # Quality
-    1: 5,   # Subject
+    1: 5,   # Subject  
     2: 2,   # Environment
-    3: 4    # Style
+    3: 4,   # Style
+    4: None # User/Custom (no limit)
 }
 ```
 
@@ -6113,6 +6116,107 @@ BLOCK_TARGETS: Dict[int, int] = {
 - **Subject Block (1)**: Character-focused, most important for visual consistency
 - **Environment Block (2)**: Scene setting provides context without overwhelming subject
 - **Style Block (3)**: Rendering style influences overall aesthetic
+- **User Block (4)**: Custom tags appear at the end, allowing natural library expansion
+
+### Dynamic Tag Expansion (Block 4 - Natural Library)
+
+**Overview**
+
+Block 4 enables "natural library expansion" - users can add custom tags to the semantic search system by using them in manual mode favorites. These tags get automatic embeddings and participate in future snapshot generations.
+
+**How It Works**
+
+```
+User favorites manual image with custom tags:
+"1girl, my_custom_nsfw_tag, forest, blue_hair"
+    ↓
+System detects danbooru tags: ["1girl", "forest", "blue_hair"]
+Custom tags identified: ["my_custom_nsfw_tag"]
+    ↓
+db_add_dynamic_danbooru_tag("my_custom_nsfw_tag"):
+    1. Insert into danbooru_tags with block_num=4
+    2. Generate 768-dimensional embedding (all-mpnet-base-v2)
+    3. Insert into vec_danbooru_tags virtual table
+    ↓
+Tag now participates in semantic search!
+```
+
+**Implementation Details**
+
+**Database Function** (`app/database.py`):
+```python
+def db_add_dynamic_danbooru_tag(tag_text: str) -> bool:
+    # Check if tag exists (skip if already in config)
+    # Insert with block_num=4 (marks as user-added)
+    # Generate embedding using SentenceTransformer
+    # Add to vec_danbooru_tags for semantic search
+```
+
+**Prompt Builder Integration** (`app/snapshot_prompt_builder.py`):
+```python
+def _build_block_4(self) -> List[str]:
+    # Query all tags with block_num=4
+    # Return user-added custom tags
+    # These appear at the END of the prompt
+```
+
+**Block Ordering in Prompts**:
+```
+Final Prompt = Block 0 + Block 1 + Block 2 + Block 3 + Block 4
+
+Example:
+masterpiece, best quality, high quality,              [Block 0]
+1girl, blonde hair, blue eyes, smile, solo,           [Block 1]
+forest, simple background,                            [Block 2]
+cinematic lighting, anime style, detailed, vibrant,   [Block 3]
+my_custom_nsfw_tag, another_user_tag                  [Block 4 - User]
+```
+
+**Key Characteristics**
+
+| Aspect | Config Tags (0-3) | User Tags (4) |
+|--------|-------------------|---------------|
+| **Source** | 1560 curated tags | User-added via manual mode |
+| **Block Number** | 0, 1, 2, 3 | 4 |
+| **Embeddings** | Pre-generated at startup | Generated on-demand (~100ms) |
+| **Semantic Search** | Yes | Yes |
+| **Prompt Position** | Core structure (first) | End of prompt (last) |
+| **Quantity** | Fixed 1560 | Unlimited (dynamic) |
+| **Curation** | Hand-picked danbooru tags | User-defined |
+
+**Use Cases**
+
+1. **NSFW Content**: Users can add adult tags not in the default SFW config
+2. **Niche Fetishes**: Specific tags for particular interests
+3. **Custom Characters**: Unique descriptors for original characters
+4. **Style Experiments**: Personal aesthetic preferences
+5. **Fandom-Specific**: Tags for specific games, shows, or universes
+
+**Learning Integration**
+
+When users favorite images with custom tags:
+- Tag detection runs on the full prompt
+- Known danbooru tags tracked for preference learning
+- Custom tags added to Block 4 library
+- All tags (config + custom) contribute to preference model
+
+**Example User Workflow**:
+
+```
+1. Generate manual image: "1girl, my_custom_fetish_tag, forest"
+2. Click "Save as Favorite"
+3. System detects: 1girl (danbooru), my_custom_fetish_tag (custom), forest (danbooru)
+4. Adds my_custom_fetish_tag to Block 4 with embedding
+5. Future snapshots can now semantically match my_custom_fetish_tag
+```
+
+**Technical Notes**
+
+- Custom tags use same 768-dimensional embeddings as config tags
+- No limit on number of user-added tags
+- Tags are global (available across all chats)
+- Embeddings persist across sessions (stored in database)
+- Block 4 tags have lower priority than config tags in prompt construction
 
 ### Hybrid Scene Detection
 
@@ -7285,6 +7389,840 @@ Instead of storing message indices in the favorites table, the system searches o
 
 ---
 
+## Gender System (v1.10.0)
+
+### Overview
+
+NeuralRP's gender system provides explicit gender signaling for both LLM context assembly and Stable Diffusion image generation, with automatic multi-character support and gender override logic.
+
+### System Architecture
+
+```
+User sets gender in character editor
+    ↓
+Gender stored in char.data.extensions.gender
+    ↓
+├─→ LLM Prompt Assembly:
+│   ├─ Full card: "Gender: {gender}"
+│   ├─ Capsule: Gender included in generation prompt
+│   └─ Reinforcement: "{name} is a {gender} character."
+│
+└─→ SD Image Generation:
+    ├─ Auto-count characters: "1girl", "2girls, 1boy", etc.
+    ├─ Gender override: Replace danbooru_tag count modifiers
+    ├─ Aggregate tags: All characters' danbooru tags
+    └─ Block 1 prompt: "{count_tags}, {character_tags}..."
+```
+
+### Gender Field Storage
+
+**Location**: `character.data.extensions.gender`
+
+**Values**:
+- `"female"` - Female character (pink button in UI)
+- `"male"` - Male character (blue button in UI)
+- `"other"` - Other gender identity (purple button in UI)
+- `""` (empty string) - Not specified, backward compatible
+
+**Default**: Empty string (`""`) for all existing characters (migration handled automatically)
+
+**Character Data Structure**:
+```json
+{
+  "data": {
+    "name": "Alice",
+    "description": "...",
+    "personality": "...",
+    "extensions": {
+      "gender": "female",
+      "danbooru_tag": "blonde hair, blue eyes",
+      "multi_char_summary": "..."
+    }
+  }
+}
+```
+
+**NPC Parity**: NPCs have identical `extensions.gender` field support (same normalization on load)
+
+### LLM Prompt Assembly
+
+Gender is explicitly stated in multiple prompt injection points:
+
+**1. Full Card Injection** (single character, turns 1-2-3):
+```
+### Character Profile: Alice
+Gender: female
+A brave adventurer with red hair...
+```
+
+**2. Capsule Generation** (multi-character):
+```python
+# Prompt for LLM to generate capsule
+full_card_text = f"Name: {char_name}\nGender: {gender}\n\nDescription/Dialogue:\n{description}"
+
+# Result capsule includes gender
+"[Alice]: A brave female adventurer seeking redemption"
+```
+
+**3. Reinforcement Chunks** (every N turns, default: 5):
+```
+[REINFORCEMENT: Alice is a female character. Brave adventurer... | Bob is a male character. Wise wizard...]
+```
+
+**4. Multi-Char Fallback** (when capsule missing):
+```
+### [Alice]: Alice is a female character. A brave adventurer with red hair...
+### [Bob]: Bob is a male character. A wise wizard with ancient knowledge...
+```
+
+### Stable Diffusion Integration
+
+**Multi-Character Support** (up to 3 characters):
+- Auto-resolves all `activeCharacters` from chat metadata
+- Extracts `gender` and `danbooru_tag` for each character
+- Limits to first 3 characters (prevents prompt bloat)
+
+**Auto-Counting by Gender**:
+```python
+def auto_count_characters_by_gender(chars_data: List[Dict]) -> str:
+    gender_counts = {'female': 0, 'male': 0, 'other': 0}
+    
+    for char in chars_data:
+        gender = char.get('gender', '').lower()
+        if gender in gender_counts:
+            gender_counts[gender] += 1
+    
+    count_tags = []
+    if gender_counts['female'] == 1:
+        count_tags.append('1girl')
+    elif gender_counts['female'] > 1:
+        count_tags.append(f'{gender_counts["female"]}girls')
+    
+    if gender_counts['male'] == 1:
+        count_tags.append('1boy')
+    elif gender_counts['male'] > 1:
+        count_tags.append(f'{gender_counts["male"]}boys')
+    
+    return ', '.join(count_tags) if count_tags else ''
+```
+
+**Examples**:
+| Scenario | Genders | Count Tags |
+|----------|----------|------------|
+| 1 female | female | `1girl` |
+| 2 females | female, female | `2girls` |
+| 3 females | female, female, female | `3girls` |
+| 1 female, 1 male | female, male | `1girl, 1boy` |
+| 2 females, 1 male | female, female, male | `2girls, 1boy` |
+| 1 other (solo) | other | `solo` |
+| 1 other (multiple) | other, other | `multiple` |
+
+**Gender Override Logic**:
+```python
+def aggregate_danbooru_tags(chars_data: List[Dict], override_count: Optional[str] = None) -> str:
+    all_tags = []
+    
+    for char in chars_data:
+        danbooru_tag = char.get('danbooru_tag', '').strip()
+        if not danbooru_tag:
+            continue
+        
+        # Parse comma-separated tags
+        tags = [t.strip() for t in danbooru_tag.split(',') if t.strip()]
+        
+        # Filter out count tags if override provided (gender wins)
+        if override_count:
+            count_patterns = ['1girl', '1boy', '2girls', '2boys', ..., 'solo', 'multiple']
+            tags = [t for t in tags if t.lower() not in count_patterns]
+        
+        all_tags.extend(tags)
+    
+    return ', '.join(all_tags[:8])
+```
+
+**Override Examples**:
+| Gender | danbooru_tag | Override | Final Block 1 |
+|--------|--------------|----------|---------------|
+| female | `"1boy, blonde hair"` | `1girl` | `1girl, blonde hair` |
+| male | `"1girl, blue eyes"` | `1boy` | `1boy, blue eyes` |
+| female + male (mixed) | `"1girl, solo, portrait"` | `1girl, 1boy` | `1girl, 1boy, solo, portrait` |
+| Not set | `"1girl, red hair"` | None | `1girl, red hair` (backward compatible) |
+
+### API Changes
+
+**Snapshot Request Model** (simplified):
+```python
+# Before (v1.9.0)
+class SnapshotRequest(BaseModel):
+    chat_id: str
+    character_ref: Optional[str] = None  # Removed
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+# After (v1.10.0)
+class SnapshotRequest(BaseModel):
+    chat_id: str  # Auto-resolves all activeCharacters
+    width: Optional[int] = None
+    height: Optional[int] = None
+```
+
+**New Helper Functions**:
+- `get_active_characters_data(chat, max_chars=3)` - Extract gender + danbooru_tag for all active chars
+- `auto_count_characters_by_gender(chars_data)` - Generate count tags from gender
+- `aggregate_danbooru_tags(chars_data, override_count)` - Combine tags with gender override
+
+### Frontend Changes
+
+**Character Editor UI**:
+```html
+<!-- Gender toggle with color-coded buttons -->
+<div>
+    <label class="text-[9px] text-slate-500 font-black uppercase">Gender</label>
+    <div class="flex gap-2 mt-1">
+        <button @click="editingChar.data.extensions.gender = 'female'"
+            :class="editingChar.data.extensions.gender === 'female' ? 'bg-pink-600 border-pink-500' : 'bg-slate-800 border-slate-700'"
+            class="flex-1 py-1.5 px-2 rounded-lg text-[10px] font-bold uppercase border">
+            Female
+        </button>
+        <button @click="editingChar.data.extensions.gender = 'male'"
+            :class="editingChar.data.extensions.gender === 'male' ? 'bg-blue-600 border-blue-500' : 'bg-slate-800 border-slate-700'"
+            class="flex-1 py-1.5 px-2 rounded-lg text-[10px] font-bold uppercase border">
+            Male
+        </button>
+        <button @click="editingChar.data.extensions.gender = 'other'"
+            :class="editingChar.data.extensions.gender === 'other' ? 'bg-purple-600 border-purple-500' : 'bg-slate-800 border-slate-700'"
+            class="flex-1 py-1.5 px-2 rounded-lg text-[10px] font-bold uppercase border">
+            Other
+        </button>
+    </div>
+</div>
+```
+
+**Snapshot Frontend** (simplified):
+```javascript
+// Before (v1.9.0)
+const characterRef = this.activeCharacters[0] || null;
+await axios.post('/api/chat/snapshot', {
+    chat_id: this.currentChatId,
+    character_ref: characterRef,
+    width: this.sdParams.width,
+    height: this.sdParams.height
+});
+
+// After (v1.10.0)
+await axios.post('/api/chat/snapshot', {
+    chat_id: this.currentChatId,  // Backend auto-resolves characters
+    width: this.sdParams.width,
+    height: this.sdParams.height
+});
+```
+
+### Design Decisions
+
+**Why Gender in Extensions (Not Core Fields)?**
+
+| Option | Pros | Cons | Verdict |
+|--------|-------|-------|---------|
+| **Core V2 field** (`data.gender`) | Standard, portable | Breaks SillyTavern compatibility, schema change | ❌ ❌ |
+| **Extension field** (current) | Compatible, no migration, flexible | Extension-specific | ✅ ✅ |
+
+**Rationale**: `extensions.gender` maintains full SillyTavern compatibility while providing flexible storage.
+
+**Why Auto-Count vs Manual Danbooru Tags?**
+
+| Scenario | Without Gender | With Gender (Current) |
+|----------|----------------|---------------------|
+| User forgets danbooru_tag | No count tag (broken prompt) | Auto-counted: `"2girls, 1boy"` |
+| User sets wrong count | Wrong count in image | Override fixes: `gender=female` → `"1girl"` |
+| Mixed gender scene | Impossible to specify | Auto-counted: `"1girl, 1boy"` |
+
+**Rationale**: Auto-counting ensures correct character counts even if danbooru_tag is missing or wrong.
+
+**Why Gender Override (Not Just Append)?**
+
+| Approach | Example | Result |
+|----------|----------|---------|
+| **Append gender** | danbooru: `"1boy, blue eyes"`, gender: female | Block 1: `"1boy, blue eyes, 1girl"` (conflicting) |
+| **Override count** (current) | danbooru: `"1boy, blue eyes"`, gender: female | Block 1: `"1girl, blue eyes"` (correct) |
+
+**Rationale**: Override prevents conflicting count modifiers (e.g., `1boy` + `1girl`).
+
+**Why Limit to 3 Characters?**
+
+| Limit | Pros | Cons | Verdict |
+|-------|-------|-------|---------|
+| **1 character** | Simple, no bloat | Can't do group scenes | ❌ Too restrictive |
+| **3 characters** (current) | Balanced, fits most prompts | Some scenes excluded | ✅ Optimal |
+| **5+ characters** | Captures all scenes | Prompt bloat, SD struggles | ❌ Too complex |
+
+**Rationale**: 3 characters covers 95% of use cases while maintaining SD prompt quality.
+
+**Why "Other" Gender Category?**
+
+| Approach | Pros | Cons | Verdict |
+|----------|-------|-------|---------|
+| **Binary (male/female)** | Simple | Excludes non-binary | ❌ Exclusionary |
+| **Free-form text** | Unlimited | Complexity, parsing issues | ❌ High friction |
+| **"Other" category** (current) | Simple, inclusive, handled via "solo/multiple" | Less specific | ✅ Best balance |
+
+**Rationale**: "Other" provides inclusive option without complexity of free-form text.
+
+### Edge Cases Handled
+
+| Scenario | Behavior | Rationale |
+|----------|-----------|------------|
+| **Gender not set** | Uses danbooru_tag as-is | Backward compatible, no breaking changes |
+| **NPC without gender** | Normalized on load (gets `gender: ""`) | Same as global characters |
+| **No active characters** | Fallback to semantic matching only | No gender info to use |
+| **Mixed genders** | Auto-count: `"2girls, 1boy"` | Handles complex scenes |
+| **"Other" gender** | Uses `solo` (single) or `multiple` (multiple) | No gendered count tags available |
+| **Snapshot regenerate** | Same auto-counting logic applied | Consistent behavior |
+
+### Performance Impact
+
+| Component | Token/Time Cost | Frequency | Notes |
+|-----------|-------------------|-------------|--------|
+| **LLM prompt (gender statement)** | +5-10 tokens | Per character per injection | Minimal, improves consistency |
+| **SD prompt (count tags)** | +1-3 tags | Per snapshot | Negligible (<0.5% of prompt) |
+| **Auto-counting logic** | <1ms | Per snapshot | Simple dict counting |
+| **Tag aggregation** | <2ms | Per snapshot | String parsing + filtering |
+
+---
+
+## Danbooru Tag Generator (v1.10.0)
+
+### Overview
+
+The Danbooru Tag Generator automatically creates Danbooru-style tags from character descriptions using semantic matching. This enables consistent, high-quality image generation for anime-trained Stable Diffusion models by analyzing physical traits (hair, eyes, body type) and matching them to 1560+ tagged Danbooru reference characters.
+
+**Best suited for**: Pony, Illustrious, NoobAI and other anime-honed SD models.
+
+### Core Concept
+
+**Problem**: Generic `1girl` or `blonde_hair` tags produce inconsistent visuals. Manual tagging is tedious and requires knowledge of Danbooru vocabulary.
+
+**Solution**: One-click generation that:
+1. Extracts physical traits from description
+2. Maps natural language to Danbooru tags
+3. Performs semantic search with progressive reduction
+4. Populates the Danbooru Tag field with appropriate tags
+
+### Architecture
+
+```
+User clicks "Generate Danbooru Character" hyperlink
+   ↓
+Extract physical traits from description
+   - hair_color: "blonde" → blonde_hair
+   - eye_color: "blue" → blue_eyes
+   - hair_style: "long" → long_hair
+   - creature: "elf" → pointy_ears, elf
+   ↓
+Build search query: "blonde_hair blue_eyes long_hair elf"
+   ↓
+Semantic search with gender filter
+   - Try all traits first
+   - If no results, remove one trait
+   - Continue until match found
+   ↓
+Random selection from top matches
+   ↓
+Populate Danbooru Tag field: "1girl, blonde_hair, blue_eyes, long_hair, pointy_ears, elf"
+```
+
+### New Module: danbooru_tag_generator.py
+
+Standalone module for trait extraction and progressive search:
+
+```python
+# Trait extraction dictionaries
+HAIR_COLORS = ['blonde', 'brown', 'black', 'red', 'white', 'silver', ...]
+HAIR_STYLES = {'long': 'long_hair', 'short': 'short_hair', 'ponytail': 'ponytail', ...}
+CREATURE_TYPES = {
+    'elf': {'tags': ['pointy_ears'], 'search': 'elf'},
+    'fairy': {'tags': ['wings'], 'search': 'fairy'},
+    ...
+}
+```
+
+### Trait Extraction Logic
+
+**Physical Traits Only** (clothing ignored - handled by SD):
+
+| Description Keyword | Danbooru Tag | Priority |
+|---------------------|--------------|----------|
+| "blonde hair" | `blonde_hair` | High |
+| "blue eyes" | `blue_eyes` | High |
+| "long hair" | `long_hair` | High |
+| "elf" | `pointy_ears`, `elf` | Medium |
+| "fairy" | `wings`, `fairy` | Medium |
+| "tan" | `dark_skin` | Low |
+
+**Progressive Search Algorithm**:
+
+```python
+def search_with_progressive_reduction(tags, gender):
+    current_tags = tags.copy()
+    
+    while len(current_tags) > 0:
+        query = " ".join(current_tags)
+        results = semantic_search(query, gender)
+        
+        if results:
+            return results
+        
+        # Remove last (least important) tag and retry
+        removed = current_tags.pop()
+        print(f"No results, removing: {removed}")
+    
+    # Fallback to random gender match
+    return get_random_characters(gender)
+```
+
+### Database Schema
+
+#### danbooru_characters Table
+
+```sql
+CREATE TABLE danbooru_characters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,              -- e.g., "hatsune_miku"
+    gender TEXT NOT NULL,            -- 'male' | 'female' | 'other' | 'unknown'
+    core_tags TEXT NOT NULL,         -- Primary visual traits
+    all_tags TEXT NOT NULL,          -- All associated tags
+    image_link TEXT,                 -- Reference image URL
+    source_id TEXT UNIQUE,           -- Original Danbooru ID
+    created_at INTEGER
+);
+```
+
+#### vec_danbooru_characters Virtual Table
+
+```sql
+CREATE VIRTUAL TABLE vec_danbooru_characters USING vec0(
+    embedding float[768]
+);
+```
+
+**Embedding Generation**: 
+- Query: `"{gender} {core_tags} {all_tags}"`
+- Model: `all-mpnet-base-v2`
+- Dimensions: 768
+- Format: Float32 array stored as BLOB
+
+### Tag Order Priority (Block 1)
+
+When building snapshot prompts, generated Danbooru tags have **highest priority**:
+
+```python
+# Block 1 construction priority
+block_1 = []
+
+# PRIORITY 1: Generated Danbooru Tags (NEW v1.10.0)
+# From hyperlink-generated danbooru_tag field
+for char in active_chars[:3]:  # Top 3 only
+    danbooru_tags = char.get('danbooru_tag', '')
+    if danbooru_tags:
+        tags = [t.strip() for t in danbooru_tags.split(',') if t.strip()]
+        block_1.extend(tags[:5])  # Max 5 per char
+
+# PRIORITY 2: Character Count Tags (auto-counted)
+count_tags = auto_count_characters_by_gender(active_chars)
+block_1.extend(count_tags)
+
+# PRIORITY 3: Semantic matching (scene-based)
+# ... existing logic
+```
+
+**Why This Order?**
+- Generated Danbooru tags define the character's appearance
+- Count tags ensure correct character representation
+- Scene-based semantic tags fill in environment context
+
+### Excel Import
+
+```python
+# Load from C:\Users\fosbo\neuralrp\app\data\danbooru\Book1.xlsx
+df = pd.read_excel(EXCEL_PATH)
+
+# Normalize tags
+core_tags = [hair_color_1, hair_style_1, eye_color_1, body_features]
+all_tags = all non-null columns (except Image_Link)
+
+# Generate embeddings
+embedding_text = f"{gender} {core_tags} {all_tags}"
+embedding = model.encode(embedding_text)  # 768-dim float32
+```
+
+**Import Statistics**:
+- Total characters: ~1560
+- Avg tags per character: 15-20
+- Import time: ~60 seconds (including embedding generation)
+
+### API Endpoints
+
+#### Generate Danbooru Tags
+
+```http
+POST /api/characters/{filename}/generate-danbooru-tags
+Content-Type: application/json
+
+{
+    "description": "blonde hair, blue eyes, petite elf girl",
+    "gender": "female"
+}
+
+Response:
+{
+    "success": true,
+    "suggested_tags": "1girl, blonde_hair, blue_eyes, pointy_ears, elf",
+    "visual_canon_id": 123,
+    "visual_canon_name": "asuna_(sao)",
+    "message": "Generated tags from Danbooru character: asuna_(sao)"
+}
+```
+
+**Click again to reroll** → Different match, different tags.
+
+#### NPC Endpoints (Full Parity)
+
+```http
+POST /api/chats/{chat_id}/npcs/{npc_id}/generate-danbooru-tags
+```
+
+**Same request/response format as character endpoint.**
+
+### Frontend UI
+
+```html
+<!-- Hyperlink-based generation -->
+<div x-show="editingChar.data.extensions.gender">
+    <button @click="generateDanbooruTags()">
+        <i class="fa-solid fa-wand-magic-sparkles"></i>
+        Generate Danbooru Character (Visual Canon)
+    </button>
+    <span x-show="isGeneratingDanbooruTags">Searching...</span>
+    <span x-show="editingChar.data.extensions.danbooru_tag">✓ Generated</span>
+</div>
+<div class="helper-text">
+    Click to auto-populate Danbooru tags from Description (hair, eyes, body type). 
+    Click again to reroll for different matches.
+</div>
+```
+
+### Key Features
+
+#### 1. NPC Parity
+
+Tag generator works identically for:
+- **Global characters**: Stored in `characters` table
+- **Local NPCs**: Stored in `chat_npcs` table
+- Both use same generation logic, same UI, same API patterns
+
+#### 2. Gender Filtering
+
+Hard gender filter on all searches:
+```python
+# Search only within gender-matched characters
+results = semantic_search(query, gender=female)
+# Returns: 1girl characters only
+```
+
+#### 3. Progressive Search
+
+Intelligent fallback when no exact match:
+```
+Full query: "blonde_hair blue_eyes long_hair elf" → No results
+   ↓ Remove "elf"
+Retry: "blonde_hair blue_eyes long_hair" → No results
+   ↓ Remove "long_hair"
+Retry: "blonde_hair blue_eyes" → Match found!
+```
+
+#### 4. Anime Model Optimization
+
+Works best with anime-honed SD models:
+- **Pony Diffusion**: Excellent with generated tags
+- **Illustrious**: Optimal reproduction
+- **NoobAI**: High fidelity character matching
+- **Anything V3**: Good general anime compatibility
+
+### Performance Characteristics
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| **Excel import** | ~60s | One-time, includes 1560 embeddings |
+| **Semantic search** | <50ms | sqlite-vec with HNSW indexing |
+| **Tag generation** | <100ms | Trait extraction + progressive search |
+| **Block 1 build** | <5ms | Tag extraction and ordering |
+| **Embedding storage** | ~1MB | 1560 × 768 × 4 bytes |
+
+### Design Decisions
+
+**Why Hyperlink over Checkbox?**
+
+| Approach | Complexity | UX |
+|----------|-----------|-----|
+| Checkbox + assignment | High (state management, visual_canon storage, reroll/clear buttons) | Confusing (must check, wait, then assigned) |
+| **Hyperlink** (current) | Low (one click, auto-populate, click again to reroll) | **Simple** (immediate feedback, obvious reroll) |
+
+**Why Progressive Search?**
+
+Users describe characters in natural language, not exact Danbooru tags:
+- "blonde elf with blue eyes" might not match exactly
+- Removing "elf" might find a blonde, blue-eyed character
+- Better to find a close match than no match
+
+**Why Physical Traits Only?**
+
+Clothing and armor can be handled by Stable Diffusion:
+- SD can add "armor" or "dress" easily
+- SD struggles to change "blonde" to "black hair"
+- Focus on hard-to-change features (hair, eyes, body type)
+
+### Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| **No gender selected** | Shows warning: "Please select a gender first" |
+| **No description** | Shows warning: "Please add a Description with physical details" |
+| **No semantic matches** | Falls back to random gender-matched character |
+| **Same character on reroll** | Random selection from top 10 provides variety |
+| **Minimal description** | May only generate count tag + 1-2 traits |
+
+### Visual Canon Binding Persistence (NPC Issue)
+
+#### Problem: "Could not store visual canon binding" Warning
+
+When generating Danbooru tags for NPCs, users encountered this warning in the logs:
+
+```
+[DANBOORU_GEN] Search tags: ['brown_hair', 'blue_eyes', 'long_hair', 'dark_skin']
+[DANBOORU_SEARCH] Found 10 matches
+[DANBOORU_GEN] Warning: Could not store visual canon binding
+```
+
+The visual canon binding (which Danbooru character was selected) was not being persisted, causing:
+- Tags generated but not saved to database
+- Visual canon lost on page refresh
+- Inconsistent behavior between global characters and NPCs
+
+#### Root Cause
+
+**Newly created NPCs only exist in chat metadata, not in database:**
+
+```
+User workflow:
+1. User creates NPC via "Generate Character" → Stored in chat.metadata.localnpcs
+2. User clicks "Generate Danbooru Tags" → Calls generate_and_assign_to_npc()
+3. System tries to assign visual_canon_id to chat_npcs table
+4. NPC doesn't exist in chat_npcs table → db_assign_visual_canon_to_npc() returns False
+5. Warning logged, but tags still returned to UI
+6. User saves NPC → NPC synced to database via PUT /api/chats/{id}/npcs/{npc_id}
+7. BUT visual_canon_id never stored (was lost in step 4)
+```
+
+**Database state:**
+```
+chat_npcs table: NPC not created yet
+chat.metadata.localnpcs: NPC exists, no visual_canon_id
+```
+
+#### Solution: Option A + Option B Fallback Strategy
+
+Mirrors pattern used when creating chats and syncing NPCs: if a backing DB row doesn't exist yet, we create a minimal one so engine features can attach to it immediately.
+
+**Option A (Primary): Database First**
+
+```python
+# In generate_and_assign_to_npc() (app/danbooru_tag_generator.py:495)
+
+def generate_and_assign_to_npc(chat_id, npc_id, description, gender):
+    result = generate_tags_from_description(description, gender)
+    
+    if result['success'] and result['visual_canon_id']:
+        # Step 1: Check if NPC exists in database
+        npc_in_db = db_get_npc_by_id(npc_id, chat_id)
+        
+        if not npc_in_db:
+            # Step 2: Load NPC from metadata
+            chat = db_get_chat(chat_id)
+            npc_metadata = chat['metadata']['localnpcs'][npc_id]
+            npc_data = npc_metadata['data']
+            
+            # Step 3: Create minimal NPC row in database
+            success, error = db_create_npc_with_entity_id(chat_id, npc_id, npc_data)
+            
+            if success:
+                print(f"Created NPC {npc_id} in database")
+        
+        # Step 4: Assign visual canon to database
+        db_success = db_assign_visual_canon_to_npc(
+            chat_id, npc_id, 
+            result['visual_canon_id'], 
+            result['suggested_tags']
+        )
+```
+
+**Option B (Fallback): Metadata Backup**
+
+```python
+# Always store in metadata as fallback (even if DB succeeds)
+
+chat = db_get_chat(chat_id)
+if chat:
+    metadata = chat['metadata']
+    if 'localnpcs' not in metadata:
+        metadata['localnpcs'] = {}
+    
+    # Update NPC metadata with visual canon
+    metadata['localnpcs'][npc_id]['visual_canon_id'] = result['visual_canon_id']
+    metadata['localnpcs'][npc_id]['visual_canon_tags'] = result['suggested_tags']
+    
+    # Save to chat
+    chat['metadata'] = metadata
+    db_save_chat(chat_id, chat)
+```
+
+#### Implementation Details
+
+**1. danbooru_tag_generator.py (Lines 491-580)**
+
+```python
+def generate_and_assign_to_npc(
+    chat_id: str,
+    npc_id: str,
+    description: str,
+    gender: str
+) -> Dict[str, Any]:
+    """
+    Generate tags and assign visual canon to an NPC.
+
+    Strategy:
+    1. Generate tags from description
+    2. Check if NPC exists in database
+    3. If not in DB, create minimal NPC row from metadata
+    4. Assign visual canon to database (Option A)
+    5. Store visual canon in metadata as fallback (Option B)
+    """
+```
+
+**Key imports added:**
+- `db_get_chat` - Load chat to get metadata
+- `db_get_npc_by_id` - Check if NPC exists in database
+- `db_create_npc_with_entity_id` - Create NPC with existing entity_id
+- `db_save_chat` - Persist metadata changes
+
+**2. main.py - NPC Loading (Lines 5881-5909)**
+
+```python
+# In get_chat_npcs_endpoint()
+
+# Database NPCs with visual_canon fields
+for npc in db_npcs:
+    merged_npcs.append({
+        'entity_id': entity_id,
+        'name': npc.get('name', 'Unknown'),
+        'data': npc.get('data', {}),
+        'visual_canon_id': npc.get('visual_canon_id'),
+        'visual_canon_tags': npc.get('visual_canon_tags')
+    })
+
+# Metadata NPCs with visual_canon fallback
+for npc_id, npc_data in metadata_npcs.items():
+    if npc_id not in seen_entity_ids:
+        merged_npcs.append({
+            'entity_id': npc_id,
+            'name': npc_data.get('name', 'Unknown'),
+            'data': npc_data.get('data', {}),
+            'visual_canon_id': npc_data.get('visual_canon_id'),
+            'visual_canon_tags': npc_data.get('visual_canon_tags')
+        })
+```
+
+**3. main.py - Context Assembly (Lines 4454-4467)**
+
+```python
+# In load_characters_data()
+
+# Check database first
+visual_canon = db_get_npc_visual_canon(chat['id'], char_ref)
+if visual_canon:
+    char_dict['visual_canon_id'] = visual_canon['visual_canon_id']
+    char_dict['visual_canon_tags'] = visual_canon['visual_canon_tags']
+else:
+    # Fallback to metadata if database doesn't have it
+    metadata_visual_canon_id = npc_data.get('visual_canon_id')
+    metadata_visual_canon_tags = npc_data.get('visual_canon_tags')
+    if metadata_visual_canon_id:
+        char_dict['visual_canon_id'] = metadata_visual_canon_id
+        char_dict['visual_canon_tags'] = metadata_visual_canon_tags
+```
+
+**4. database.py - NPC Update (Lines 3816-3856)**
+
+```python
+# In db_update_npc()
+
+# Preserve visual canon fields when updating NPCs
+cursor.execute("""
+    SELECT entity_id, visual_canon_id, visual_canon_tags FROM chat_npcs 
+    WHERE chat_id = ? AND entity_id = ?
+""", (chat_id, npc_id))
+
+existing = cursor.fetchone()
+existing_visual_canon_id = existing['visual_canon_id']
+existing_visual_canon_tags = existing['visual_canon_tags']
+
+# Update while preserving existing visual canon
+cursor.execute("""
+    UPDATE chat_npcs 
+    SET data = ?, name = ?, visual_canon_id = ?, visual_canon_tags = ?
+    WHERE chat_id = ? AND entity_id = ?
+""", (json.dumps(npc_data), name, existing_visual_canon_id, existing_visual_canon_tags, chat_id, npc_id))
+```
+
+#### Data Flow (Fixed)
+
+```
+User workflow (AFTER FIX):
+1. User creates NPC → Stored in chat.metadata.localnpcs
+2. User clicks "Generate Danbooru Tags" → generate_and_assign_to_npc()
+3. System checks database → NPC not found
+4. System loads NPC from metadata
+5. System creates NPC in chat_npcs table (preserving entity_id) ✓
+6. System assigns visual_canon_id to chat_npcs ✓
+7. System stores visual_canon_id in metadata (fallback) ✓
+8. Tags returned to UI
+9. User saves NPC → db_update_npc() preserves visual_canon ✓
+10. Visual canon persisted correctly ✓
+```
+
+#### Why This Pattern?
+
+**Consistency with existing architecture:**
+- Matches NPC creation pattern in `db_create_npc_and_update_chat()` (atomic operations)
+- Mirrors chat creation pattern (create minimal DB row for features to attach)
+- Follows the "database is source of truth, metadata is fallback" principle
+
+**Benefits:**
+- **No data loss**: Even if database write fails, metadata has backup
+- **Immediate availability**: Features can use visual canon without waiting for save
+- **Idempotent**: Can regenerate tags multiple times without issues
+- **Character parity**: NPCs and global characters now behave identically
+
+#### Related Code Locations
+
+| File | Function | Lines |
+|------|----------|-------|
+| `app/danbooru_tag_generator.py` | `generate_and_assign_to_npc()` | 495-580 |
+| `main.py` | `get_chat_npcs_endpoint()` | 5881-5909 |
+| `main.py` | `load_characters_data()` | 4454-4467 |
+| `app/database.py` | `db_update_npc()` | 3816-3856 |
+| `app/database.py` | `db_create_npc_with_entity_id()` | 3899-3970 |
+
+---
+
 ## Design Decisions & Tradeoffs
 
 ### Context Hygiene Philosophy
@@ -7613,8 +8551,8 @@ For complete API documentation, see the source code in `main.py`. Key endpoints 
 
 ---
 
-**Last Updated**: 2026-01-30
-**Version**: 1.8.2
+**Last Updated**: 2026-02-01
+**Version**: 1.10.0
 ```
 
 The file has been completely rewritten with all typos fixed and the proper NPC database functions section added. The entire file is now clean with correct spelling throughout.

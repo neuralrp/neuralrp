@@ -14,15 +14,35 @@
 
 ---
 
-## What's New in v1.9.0
+## What's New in v1.10.0
 
-### 📸 Scene Snapshots
+### 🎭 Danbooru Character Casting
+
+Automatic visual canon assignment for consistent character imagery.
+
+- **Semantic matching** — Analyzes your character's description (hair, eyes, clothing) to find matching Danbooru reference characters
+- **Smart assignment** — Auto-assigns visual canon with one checkbox; reroll 🎲 for different matches
+- **Block 1 priority** — Visual canon tags appear first in snapshot prompts for strongest image influence
+- **NPC parity** — Works for both global characters and chat-scoped NPCs
+- **3-character limit** — Top 3 active characters use visual canon in multi-character scenes
+
+### ⚧️ Gender System
+
+First-class gender awareness for both text and image generation.
+
+- **Character editor toggle** — Female (pink) / Male (blue) / Other (purple) with color-coded buttons
+- **LLM context** — Gender explicitly stated in character profiles and reinforcement
+- **Auto-counting** — Automatic `1girl/2girls/1boy/2boys` tags in snapshots based on active characters
+- **Gender override** — Gender field takes precedence over danbooru_tag count modifiers
+- **Full compatibility** — Stored in SillyTavern V2 format, backward compatible with blank gender
+
+### 📸 Scene Snapshots (Enhanced)
 
 One click generates images from your chat context. No prompting required.
 
 - **AI analyzes your scene** — Characters, setting, mood, action
-- **Automatic prompt construction** — 4-block system (quality, subject, environment, style)
-- **Character-aware** — Uses assigned Danbooru tags for visual consistency
+- **Automatic prompt construction** — 4-block system with visual canon priority (Block 1)
+- **Character-aware** — Uses assigned Danbooru tags and gender for visual consistency
 - **Learning system** — NeuralRP learns from your favorited images to improve future generations
 
 ### 🖼️ Favorites Gallery
@@ -43,7 +63,7 @@ NeuralRP analyzes your favorited images to understand your preferences:
 - **Works for both** — Snapshot and manual mode favorites both contribute to learning
 - **Natural library expansion** — Add your own custom tags via manual mode; they become part of the searchable library with semantic embeddings
 
-**Plus:** Database auto-setup (works out of the box!), double-click favorites to jump to source chat, and first-run guidance for model downloads.
+**Plus:** Database auto-setup (works out of the box!), Excel import for 1560+ Danbooru characters with embeddings, and first-run guidance for model downloads.
 
 ---
 
@@ -241,6 +261,19 @@ python main.py
 Navigate to http://localhost:8000
 
 Configure LLM and image generation endpoints in Settings panel.
+
+---
+
+## Danbooru Tag Generator (Optional)
+
+To enable one-click Danbooru character visual matching, run the fetch script to download character data from Danbooru API:
+
+```bash
+# Edit app/fetch_danbooru_characters.py with your Danbooru API key, then:
+python app/fetch_danbooru_characters.py
+```
+
+This generates `app/data/danbooru/book1.xlsx` from Danbooru's public API (~15-30 minutes for 1394 characters). See **[Quickstart Guide](docs/QUICKSTART.md)** for detailed setup instructions including API key acquisition.
 
 ---
 

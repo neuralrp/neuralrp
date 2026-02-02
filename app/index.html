@@ -594,6 +594,54 @@
                                     </div>
                                 </div>
 
+                                <!-- Gender Toggle -->
+                                <div class="mt-3">
+                                    <label class="text-[9px] text-slate-500 font-black uppercase">Gender</label>
+                                    <div class="flex gap-2 mt-1">
+                                        <button @click="editingChar.data.extensions.gender = 'female'"
+                                            :class="editingChar.data.extensions.gender === 'female' ? 'bg-pink-600 border-pink-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                                            class="flex-1 py-1.5 px-2 rounded-lg text-[10px] font-bold uppercase border transition-all">
+                                            Female
+                                        </button>
+                                        <button @click="editingChar.data.extensions.gender = 'male'"
+                                            :class="editingChar.data.extensions.gender === 'male' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                                            class="flex-1 py-1.5 px-2 rounded-lg text-[10px] font-bold uppercase border transition-all">
+                                            Male
+                                        </button>
+                                        <button @click="editingChar.data.extensions.gender = 'other'"
+                                            :class="editingChar.data.extensions.gender === 'other' ? 'bg-purple-600 border-purple-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                                            class="flex-1 py-1.5 px-2 rounded-lg text-[10px] font-bold uppercase border transition-all">
+                                            Other
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Danbooru Tag Generator -->
+                                <div class="mt-3" x-show="editingChar.data.extensions.gender">
+                                    <div class="flex items-center justify-between">
+                                        <button 
+                                            @click="generateDanbooruTags()"
+                                            :disabled="isGeneratingDanbooruTags"
+                                            class="text-[9px] text-cyan-400 hover:text-cyan-300 font-bold uppercase tracking-wide transition-colors disabled:opacity-50"
+                                        >
+                                            <span x-show="!isGeneratingDanbooruTags">
+                                                <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>
+                                                Generate Danbooru Character (Visual Canon)
+                                            </span>
+                                            <span x-show="isGeneratingDanbooruTags">
+                                                <i class="fa-solid fa-circle-notch fa-spin mr-1"></i>
+                                                Searching...
+                                            </span>
+                                        </button>
+                                        <span x-show="editingChar.data.extensions.danbooru_tag" 
+                                              x-text="'✓ Generated'"
+                                              class="text-[8px] text-green-400"></span>
+                                    </div>
+                                    <div class="text-[8px] text-slate-500 mt-1">
+                                        Tip: Include hair color, eye color, hair style, and body type for Danbooru tag matching.
+                                    </div>
+                                </div>
+
                                 <!-- Character Fields -->
                                 <div class="border-t border-slate-700 pt-3 space-y-3">
                                     <!-- Personality -->
@@ -2122,6 +2170,32 @@
                         placeholder="e.g., 'Captain Morgan' (leave empty for auto-generated)"
                         :disabled="isCreatingNPC">
                 </div>
+
+                <!-- Gender Toggle -->
+                <div class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Gender</label>
+                    <div class="flex gap-2">
+                        <button @click="npcGender = 'female'"
+                            :class="npcGender === 'female' ? 'bg-pink-600 border-pink-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                            class="flex-1 py-2 px-3 rounded-xl text-[10px] font-bold uppercase border transition-all"
+                            :disabled="isCreatingNPC">
+                            Female
+                        </button>
+                        <button @click="npcGender = 'male'"
+                            :class="npcGender === 'male' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                            class="flex-1 py-2 px-3 rounded-xl text-[10px] font-bold uppercase border transition-all"
+                            :disabled="isCreatingNPC">
+                            Male
+                        </button>
+                        <button @click="npcGender = 'other'"
+                            :class="npcGender === 'other' ? 'bg-purple-600 border-purple-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                            class="flex-1 py-2 px-3 rounded-xl text-[10px] font-bold uppercase border transition-all"
+                            :disabled="isCreatingNPC">
+                            Other
+                        </button>
+                    </div>
+                </div>
+
                 <div class="space-y-2">
                     <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Describe
                         NPC</label>
@@ -2132,6 +2206,7 @@
                 </div>
                 <div class="text-[9px] text-slate-500 leading-relaxed">
                     <p class="font-bold mb-1">AI will generate a complete character card from your description</p>
+                    <p class="mb-1">Tip: Include hair color, eye color, hair style, and body type for Danbooru tag matching.</p>
                     <p>This NPC will be saved to the current chat only (not global characters).</p>
                 </div>
             </div>
@@ -2199,6 +2274,28 @@
                             :disabled="!cardGen.char_name || isGenLoading">
                             <span x-show="!isGenLoading">Auto-Generate All</span>
                             <i x-show="isGenLoading" class="fa-solid fa-circle-notch fa-spin"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Gender Toggle -->
+                <div class="space-y-2">
+                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Gender</label>
+                    <div class="flex gap-2">
+                        <button @click="cardGen.gender = 'female'"
+                            :class="cardGen.gender === 'female' ? 'bg-pink-600 border-pink-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                            class="flex-1 py-2 px-3 rounded-xl text-[10px] font-bold uppercase border transition-all">
+                            Female
+                        </button>
+                        <button @click="cardGen.gender = 'male'"
+                            :class="cardGen.gender === 'male' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                            class="flex-1 py-2 px-3 rounded-xl text-[10px] font-bold uppercase border transition-all">
+                            Male
+                        </button>
+                        <button @click="cardGen.gender = 'other'"
+                            :class="cardGen.gender === 'other' ? 'bg-purple-600 border-purple-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'"
+                            class="flex-1 py-2 px-3 rounded-xl text-[10px] font-bold uppercase border transition-all">
+                            Other
                         </button>
                     </div>
                 </div>
@@ -3022,11 +3119,15 @@
             isGeneratingSnapshot: false,
             snapshotCharacterRef: null,  // "filename.json" or "npc_xxx"
 
+            // Danbooru Tag Generator (v1.10.0)
+            isGeneratingDanbooruTags: false,
+
             // Card Generation
             showCardGen: false,
             isGenLoading: false,
             cardGen: {
                 char_name: '',
+                gender: '',
                 source_mode: 'chat',
                 manual_text: '',
                 loading: {},
@@ -3110,6 +3211,7 @@
             showNPCCreateDialog: false,
             npcDescription: '',
             npcName: '',
+            npcGender: '',
             isCreatingNPC: false,
 
             // Search
@@ -4272,7 +4374,8 @@
                         field_type: 'full',
                         source_mode: 'manual',
                         save_as: 'local_npc',
-                        chat_id: this.currentChatId
+                        chat_id: this.currentChatId,
+                        gender: this.npcGender
                     });
 
                     if (res.data.success) {
@@ -4289,6 +4392,7 @@
                         await this.autosaveChat();
                         this.npcDescription = '';
                         this.npcName = '';
+                        this.npcGender = '';
                     } else {
                         // Handle duplicate NPC error
                         if (res.data.existing_entityid) {
@@ -4327,7 +4431,8 @@
                         field_type: 'full',
                         source_mode: 'chat',
                         save_as: 'local_npc',
-                        chat_id: this.currentChatId
+                        chat_id: this.currentChatId,
+                        gender: this.npcGender
                     });
 
                     if (res.data.success) {
@@ -4340,6 +4445,7 @@
                         await this.autosaveChat();
                         this.selectedText = '';
                         this.npcName = '';
+                        this.npcGender = '';
                     } else {
                         this.showNotification(res.data.error || 'Failed to create NPC', 'error');
                     }
@@ -4400,11 +4506,12 @@
                         tags: [],
                         creator: '',
                         character_version: '',
-                    extensions: {
+                        extensions: {
                             depth_prompt: { depth: 4, prompt: '' },
                             label_description: '',
                             danbooru_tag: '',
-                            genre: ''
+                            genre: '',
+                            gender: ''
                         }
                     }
                 };
@@ -4417,6 +4524,7 @@
                 if (!clone.data.extensions.depth_prompt) {
                     clone.data.extensions.depth_prompt = { depth: 4, prompt: '' };
                 }
+                if (!clone.data.extensions.gender) clone.data.extensions.gender = '';
                 if (!clone.data.personality) clone.data.personality = '';
                 if (!clone.data.scenario) clone.data.scenario = '';
                 if (!clone.data.tags) clone.data.tags = [];
@@ -4503,6 +4611,61 @@
                     alert('Failed to reimport characters.');
                 } finally {
                     this.isReimporting = false;
+                }
+            },
+
+            async generateDanbooruTags() {
+                if (!this.editingChar) return;
+                
+                // Check if gender is set
+                if (!this.editingChar.data.extensions.gender) {
+                    this.showNotification('Please select a gender (Female/Male/Other) first', 'warning');
+                    return;
+                }
+                
+                // Check if description exists
+                if (!this.editingChar.data.description || !this.editingChar.data.description.trim()) {
+                    this.showNotification('Please add a Description with physical details (hair color, eye color, etc.)', 'warning');
+                    return;
+                }
+                
+                this.isGeneratingDanbooruTags = true;
+                
+                try {
+                    const isNPC = this.editingChar.isNPC === true || typeof this.editingChar.npcId === "string";
+                    let res;
+                    
+                    const requestData = {
+                        description: this.editingChar.data.description,
+                        gender: this.editingChar.data.extensions.gender
+                    };
+                    
+                    if (isNPC) {
+                        const chatId = this.editingChar.chatId || this.currentChatId;
+                        const npcId = this.editingChar.npcId;
+                        res = await axios.post(
+                            `/api/chats/${chatId}/npcs/${npcId}/generate-danbooru-tags`,
+                            requestData
+                        );
+                    } else {
+                        res = await axios.post(
+                            `/api/characters/${this.editingChar._filename}/generate-danbooru-tags`,
+                            requestData
+                        );
+                    }
+                    
+                    if (res.data.success) {
+                        // Overwrite the Danbooru Tag field completely
+                        this.editingChar.data.extensions.danbooru_tag = res.data.suggested_tags;
+                        this.showNotification(`Generated Danbooru tags: ${res.data.suggested_tags.substring(0, 50)}...`, 'success');
+                    } else {
+                        this.showNotification(res.data.message || 'Could not generate Danbooru tags', 'warning');
+                    }
+                } catch (e) {
+                    console.error('Failed to generate Danbooru tags:', e);
+                    this.showNotification('Failed to generate Danbooru tags', 'error');
+                } finally {
+                    this.isGeneratingDanbooruTags = false;
                 }
             },
 
@@ -5543,7 +5706,8 @@
                         extensions: {
                             depth_prompt: { prompt: "", depth: 4 },
                             danbooru_tag: '',
-                            label_description: ''
+                            label_description: '',
+                            gender: this.cardGen.gender || ''
                         }
                     }
                 };
@@ -6228,16 +6392,11 @@
                     return;
                 }
 
-                // Character selection (reuse existing activeCharacters logic)
-                const characterRef = this.activeCharacters[0] || null;
-                this.snapshotCharacterRef = characterRef;
-
                 this.isGeneratingSnapshot = true;
 
                 try {
                     const response = await axios.post('/api/chat/snapshot', {
                         chat_id: this.currentChatId,
-                        character_ref: characterRef,
                         width: this.sdParams.width,
                         height: this.sdParams.height
                     });

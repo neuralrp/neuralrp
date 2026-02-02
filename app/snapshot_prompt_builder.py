@@ -133,16 +133,18 @@ class SnapshotPromptBuilder:
         return selected
 
     def build_4_block_prompt(self,
-                            scene_analysis: Dict[str, Any],
-                            character_tag: Optional[str] = None,
-                            variation_mode: bool = False) -> Tuple[str, str]:
+                             scene_analysis: Dict[str, Any],
+                             character_tag: Optional[str] = None,
+                             variation_mode: bool = False,
+                             active_chars_data: Optional[List[Dict]] = None) -> Tuple[str, str]:
         """
-        Build SD prompt using 4-block structure with learning support.
+        Build SD prompt using 4-block structure with learning + visual canon support.
 
         Args:
             scene_analysis: From SnapshotAnalyzer.analyze_scene()
-            character_tag: Danbooru tag for selected character (from dropdown)
+            character_tag: Danbooru tag for selected character (from dropdown, legacy)
             variation_mode: If True, apply novelty scoring (for "Regenerate" button)
+            active_chars_data: List of active characters with visual_canon bindings (NEW)
 
         Returns:
             (positive_prompt, negative_prompt)
@@ -166,9 +168,14 @@ class SnapshotPromptBuilder:
         block_0 = BLOCK_0[:target_0]  # First N quality tags
 
         # ========================================
-        # Block 1: Subject Tags (WITH LEARNING)
+        # Block 1: Subject Tags (WITH LEARNING + VISUAL CANON)
         # ========================================
-        block_1 = self._build_block_1(query_text, character_tag, variation_mode)
+        block_1 = self._build_block_1(
+            query_text,
+            character_tag,
+            variation_mode,
+            active_chars_data  # NEW PARAMETER
+        )
 
         # ========================================
         # Block 2: Environment Tags (WITH LEARNING)
@@ -216,14 +223,16 @@ class SnapshotPromptBuilder:
     def _build_block_1(self,
                        query_text: str,
                        character_tag: Optional[str],
-                       variation_mode: bool = False) -> List[str]:
+                       variation_mode: bool = False,
+                       active_chars_data: Optional[List[Dict]] = None) -> List[str]:
         """
-        Build Block 1: Subject tags with learning.
+        Build Block 1: Subject tags with learning + visual canon support.
 
         Args:
             query_text: Scene description for semantic matching
-            character_tag: Danbooru tag for selected character
+            character_tag: Danbooru tag for selected character (legacy dropdown)
             variation_mode: If True, apply novelty scoring
+            active_chars_data: List of active characters with visual_canon bindings (NEW)
 
         Returns:
             List[str]: Selected subject tags
@@ -232,7 +241,38 @@ class SnapshotPromptBuilder:
         target = get_block_target(1)
         min_matches = get_min_matches(1)
 
-        # Priority 1: Character tag (if provided via dropdown)
+        # ========================================================================
+        # NEW: Visual Canon Tags (PRIORITY 1)
+        # ========================================================================
+        if active_chars_data:
+            # Collect visual_canon_tags from all active characters
+            for char in active_chars_data[:3]:  # Limit to top 3 active characters
+                visual_canon_tags = char.get('visual_canon_tags', '')
+                if visual_canon_tags:
+                    # Parse comma-separated tags
+                    tags = [t.strip() for t in visual_canon_tags.split(',') if t.strip()]
+                    block_1.extend(tags[:5])  # Limit to 5 per character
+
+                    # Track frequency for learning
+                    from app.database import db_increment_tag_frequency
+                    for tag in tags[:5]:
+                        db_increment_tag_frequency(tag)
+
+                    print(f"[SNAPSHOT] Added visual_canon tags for {char.get('name', 'Unknown')}: {tags[:5]}")
+
+        # ========================================================================
+        # NEW: Character Count Tags (PRIORITY 2, after visual canon)
+        # ========================================================================
+        if active_chars_data:
+            from main import auto_count_characters_by_gender
+            count_tags = auto_count_characters_by_gender(active_chars_data)
+            if count_tags:
+                block_1.extend(count_tags)
+                print(f"[SNAPSHOT] Added character count tags: {count_tags}")
+
+        # ========================================================================
+        # LEGACY: Character Tag from Dropdown (PRIORITY 3)
+        # ========================================================================
         if character_tag:
             # Parse character danbooru_tag (comma-separated)
             char_tags = [t.strip() for t in character_tag.split(',') if t.strip()]

@@ -50,7 +50,7 @@ MIN_MATCHES: Dict[int, int] = {
 
 # Universal negative tags (always used, no scene-specific negatives)
 UNIVERSAL_NEGATIVES: List[str] = [
-    "low quality", "worst quality", "bad anatomy"
+    "low quality", "worst quality", "bad anatomy",
 ]
 
 # ============================================================================
