@@ -14,66 +14,25 @@
 
 ---
 
-## What's New in v1.10.0
+## Why It’s Different
 
-### 🎭 Danbooru Character Casting
+1. **Context hygiene engine** — Characters inject in full on their first 3 turns, then reinforce with minimal constraints. World lore appears only when semantically relevant. 70–80% of your context stays as live dialogue, even with 5–6 characters and deep worlds.
 
-Automatic visual canon assignment for consistent character imagery.
+2. **Emergent cast with visual canon** — Chat‑scoped NPCs have full parity with globals, can be promoted, and stay branch‑safe. v1.10 adds gender‑aware casting and Danbooru‑based visual canon, so those NPCs can also have stable, consistent imagery over long campaigns.
 
-- **Semantic matching** — Analyzes your character's description (hair, eyes, clothing) to find matching Danbooru reference characters
-- **Smart assignment** — Auto-assigns visual canon with one checkbox; reroll 🎲 for different matches
-- **Block 1 priority** — Visual canon tags appear first in snapshot prompts for strongest image influence
-- **NPC parity** — Works for both global characters and chat-scoped NPCs
-- **3-character limit** — Top 3 active characters use visual canon in multi-character scenes
-
-### ⚧️ Gender System
-
-First-class gender awareness for both text and image generation.
-
-- **Character editor toggle** — Female (pink) / Male (blue) / Other (purple) with color-coded buttons
-- **LLM context** — Gender explicitly stated in character profiles and reinforcement
-- **Auto-counting** — Automatic `1girl/2girls/1boy/2boys` tags in snapshots based on active characters
-- **Gender override** — Gender field takes precedence over danbooru_tag count modifiers
-- **Full compatibility** — Stored in SillyTavern V2 format, backward compatible with blank gender
-
-### 📸 Scene Snapshots (Enhanced)
-
-One click generates images from your chat context. No prompting required.
-
-- **AI analyzes your scene** — Characters, setting, mood, action
-- **Automatic prompt construction** — 4-block system with visual canon priority (Block 1)
-- **Character-aware** — Uses assigned Danbooru tags and gender for visual consistency
-- **Learning system** — NeuralRP learns from your favorited images to improve future generations
-
-### 🖼️ Favorites Gallery
-
-Your visual library, organized and accessible.
-
-- **Save snapshots and manual generations** — Heart icon on snapshots, "Save as Favorite" for manual
-- **Double-click to jump to source** — Returns you to the exact chat moment any image came from
-- **Tag filtering** — Filter by source type (snapshot/manual) and tags
-- **Persistent across chats** — Favorites available in all your sessions
-
-### 🎯 Visual Learning
-
-NeuralRP analyzes your favorited images to understand your preferences:
-
-- **Tag detection** — Identifies Danbooru tags in your favorite prompts
-- **Preference tracking** — Future generations biased toward your preferred styles
-- **Works for both** — Snapshot and manual mode favorites both contribute to learning
-- **Natural library expansion** — Add your own custom tags via manual mode; they become part of the searchable library with semantic embeddings
-
-**Plus:** Database auto-setup (works out of the box!), Excel import for 1560+ Danbooru characters with embeddings, and first-run guidance for model downloads.
+3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: performance‑aware presets, inpainting, character tag substitution, and per‑image metadata. v1.9+ adds scene snapshots, favorites, and tag‑based visual learning so the engine can auto‑compose prompts that match both the scene and your preferred style.
 
 ---
 
-## Why It's Different
+## What’s New in v1.9.0–v1.10.0
 
-1. **Context hygiene engine** — Characters inject in full on first 3 turns, then reinforce with minimal constraints. World lore appears when semantically relevant. 70-80% of context is your dialogue, not metadata.
+- **Danbooru character casting (v1.10)** – One‑click visual canon: NeuralRP analyzes your character’s description (hair, eyes, etc) and binds them to a matching Danbooru reference character. Works for both globals and NPCs, with reroll support and priority tags in snapshot prompts.
 
-2. **Emergent cast** — Chat-scoped NPCs with full parity to characters, promotion to globals, branch-safe IDs, plus real narrator mode so stories can start system-first and grow a cast.
+- **Gender‑aware engine (v1.10)** – First‑class gender field (female/male/other) wired into character profiles, reinforcement, and snapshots (automatic `1girl/2girls/1boy/2boys` tagging), while staying compatible with SillyTavern cards.
 
-3. **Native Stable Diffusion** — Deep A1111 integration, not a bolt-on. Performance-aware presets, inpainting with brush/eraser/undo, character tag substitution, per-image metadata, strict separation from text context.
+- **Scene snapshots + favorites (v1.9)** – One‑click, scene‑aware Stable Diffusion images using a 4‑block prompt builder; favorites gallery with jump‑to‑source, tag filtering, and persistent image history across chats.
+
+- **Visual learning (v1.9)** – NeuralRP learns from your favorited images, detecting Danbooru tags and biasing future generations toward your preferred styles. Custom tags from manual generations become part of a searchable, embedding‑backed visual library.
 
 ---
 
@@ -171,9 +130,9 @@ Fork any message to create alternate storylines. Characters, NPCs, world info, a
 
 Native integration, not an afterthought.
 
-### Performance-Aware Presets
+### Performance‑Aware Presets
 
-Automatic step/resolution reduction when context is large (>12K tokens) to prevent VRAM crashes.
+Automatic step/resolution reduction when context is large (>12K tokens) to prevent VRAM crashes, with sane defaults for 8–16 GB cards.
 
 ### Inpainting
 
@@ -183,18 +142,16 @@ Automatic step/resolution reduction when context is large (>12K tokens) to preve
 - Persistent mask between regenerations
 - Full A1111 parameter control
 
-### Character Tag Substitution
+### Character‑Aware Prompts
 
-Assign Danbooru tags to characters once, reference with `[CharacterName]` in prompts. Consistent appearance without memorizing tag lists.
+- **Character tag substitution** – Assign Danbooru tags to characters once, reference with `[CharacterName]` in prompts for consistent appearance without memorizing tag lists.
+- **Visual canon casting (v1.10)** – Optional Danbooru character binding so snapshots and manual prompts can use canon tags for that character first.
 
-### Persistent Metadata
+### Snapshot + Visual Learning (v1.9+)
 
-Every image saves generation parameters (prompt, model, steps, CFG, seed, etc.) for exact reproduction or variation generation.
-
-### Scene Snapshots (v1.9.0)
-
-Click 📸 to generate images from chat context automatically. No prompting. AI understands your scene and creates appropriate imagery.
-
+- **Scene snapshots** – Click 📸 to generate images from chat context automatically; AI analyzes characters, setting, mood, and action and builds a 4‑block prompt.
+- **Favorites and style learning** – Favorite images to build a visual library; NeuralRP detects Danbooru tags in those prompts and biases future generations toward your preferred styles.
+- **Jump‑to‑source** – Double‑click favorites to jump back to the exact chat moment they came from.
 ---
 
 ## Library-Scale Organization (v1.8.0)
