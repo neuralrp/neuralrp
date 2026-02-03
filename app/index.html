@@ -547,6 +547,23 @@
                     </div>
                 </template>
 
+                <!-- Summaries Sidebar -->
+                <template x-if="showSidebar === 'summaries'">
+                    <div class="space-y-4">
+                        <div class="space-y-2">
+                            <h3 class="text-[10px] font-black uppercase tracking-widest text-teal-500">Current Summary</h3>
+                            <textarea x-model="summary" @change="saveSummaryChange()"
+                                class="w-full bg-slate-950/50 border border-slate-700 rounded-lg p-3 text-xs flex-1 min-h-[400px] text-slate-300 outline-none focus:ring-1 focus:ring-teal-500/30"
+                                placeholder="Describe current story context..."></textarea>
+
+                            <div x-show="!summary" x-cloak class="text-center py-4 space-y-2 opacity-50">
+                                <i class="fa-solid fa-book-bookmark text-2xl text-teal-500/20"></i>
+                                <div class="text-[10px] text-slate-600">Ready for your story context</div>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
                 <!-- Character Sidebar -->
                 <template x-if="showSidebar === 'characters'">
                     <div class="space-y-4">
@@ -1395,18 +1412,6 @@
                             </div>
                         </div>
 
-                        <!-- Current Summary View -->
-                        <div x-show="summary" class="space-y-2 pt-4 border-t border-slate-700">
-                            <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">Long-Term Memory
-                            </h3>
-                            <textarea x-model="summary"
-                                class="w-full bg-slate-950/50 border border-slate-700 rounded-lg p-2 text-[10px] h-32 text-slate-400 outline-none focus:ring-1 focus:ring-blue-500/30"
-                                readonly></textarea>
-                            <button @click="if(confirm('Clear long-term memory?')) summary = ''"
-                                class="text-[8px] text-red-400 uppercase font-bold tracking-widest hover:text-red-300 transition-colors">Clear
-                                Memory</button>
-                        </div>
-
                         <div class="space-y-4 pt-4 border-t border-slate-700">
                             <h3 class="text-[10px] font-black uppercase tracking-widest text-slate-500">Performance
                                 Optimization</h3>
@@ -1541,6 +1546,35 @@
                     </div>
                 </template>
             </div>
+
+            <!-- Summaries Sidebar Sticky Footer -->
+            <template x-if="showSidebar === 'summaries'">
+                <div class="p-4 border-t border-slate-700 bg-slate-800 shrink-0">
+                    <div class="space-y-3">
+                        <h3 class="text-[10px] font-black uppercase tracking-widest text-teal-500">About Summaries</h3>
+                        <div class="bg-teal-500/10 border border-teal-500/30 rounded-lg p-3 space-y-2">
+                            <div class="flex items-start gap-2">
+                                <i class="fa-solid fa-wand-magic-sparkles text-teal-400 mt-0.5 text-[10px]"></i>
+                                <p class="text-[10px] text-slate-400 leading-relaxed">
+                                    <span class="text-teal-400 font-semibold">Auto-generated</span> when your chat exceeds context limit
+                                </p>
+                            </div>
+                            <div class="flex items-start gap-2">
+                                <i class="fa-solid fa-pen text-teal-400 mt-0.5 text-[10px]"></i>
+                                <p class="text-[10px] text-slate-400 leading-relaxed">
+                                    <span class="text-teal-400 font-semibold">Fully editable</span> - write your own to jump into any point in a story
+                                </p>
+                            </div>
+                            <div class="flex items-start gap-2">
+                                <i class="fa-solid fa-bolt text-teal-400 mt-0.5 text-[10px]"></i>
+                                <p class="text-[10px] text-slate-400 leading-relaxed">
+                                    <span class="text-teal-400 font-semibold">Auto-saved</span> - your edits are saved instantly
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </template>
         </div>
 
         <!-- Search Bar (Fixed Overlay) -->
@@ -1705,6 +1739,11 @@
                         class="hover:text-pink-400 flex items-center gap-2.5 text-xs font-black uppercase tracking-widest transition-all"
                         :class="showSidebar === 'favorites' ? 'text-pink-400' : 'text-slate-400'">
                         <i class="fa-solid fa-heart text-sm"></i><span class="hidden sm:inline">Favorites</span>
+                    </button>
+                    <button @click="showSidebar = 'summaries'"
+                        class="hover:text-teal-400 flex items-center gap-2.5 text-xs font-black uppercase tracking-widest transition-all"
+                        :class="showSidebar === 'summaries' ? 'text-teal-400' : 'text-slate-400'">
+                        <i class="fa-solid fa-book-bookmark text-sm"></i><span class="hidden sm:inline">Summaries</span>
                     </button>
                 </div>
                 <button @click="openExportDialog()"
@@ -4075,6 +4114,14 @@
                 });
                 p += "Narrator:";
                 return p;
+            },
+
+            // ========== SUMMARY MANAGEMENT ==========
+            saveSummaryChange() {
+                if (this.currentChatId) {
+                    this.autosaveChat();
+                    this.showNotification('Summary saved', 'success');
+                }
             },
 
             // ========== CHAT MANAGEMENT ==========

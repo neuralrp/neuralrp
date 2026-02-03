@@ -2533,6 +2533,13 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     summary = request.summary or ""
     mode = request.mode or "narrator"
     
+    # Calculate current turn number (counting user messages, 1-indexed)
+    # Turn 1 = first user message, Turn 2 = second user message, etc.
+    current_turn = sum(1 for msg in request.messages if msg.role == "user")
+    
+    # Initial turns (1 and 2) get special treatment for world info and canon law
+    is_initial_turn = current_turn <= 2
+    
     # Determine chat mode
     is_group_chat = len(request.characters) >= 2
     is_single_char = len(request.characters) == 1
@@ -2585,9 +2592,6 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     # === 5. WORLD KNOWLEDGE (moved up - world context frames characters) ===
     canon_law_entries = []
     if request.world_info:
-        # Detect if this is an initial turn (first turn or very early in conversation)
-        is_initial_turn = len(request.messages) <= 2  # First 2 turns are considered initial
-
         # Use latest user message only for initial turns, otherwise use last 5 messages
         if is_initial_turn:
             # Find the latest user message
@@ -2680,9 +2684,6 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     # Section only appears if recent_updates is non-empty (no wasted tokens)
     if recent_updates:
         full_prompt += "\n### Recent Updates:\n" + "\n\n".join(recent_updates) + "\n"
-    
-    # Calculate current turn number (turn = message_count // 2, each turn = user + assistant message)
-    current_turn = len(request.messages) // 2
     
     # === 6. CHARACTER PROFILES (characters exist in the world context) ===
     reinforcement_chunks = []
@@ -2845,9 +2846,8 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         full_prompt += f"{speaker}: {msg.content}\n"
 
     # === 8. CANON LAW (pinned for recency bias - right before generation) ===
-    # Show canon law on turn 0 (initial) and every world_reinforce_freq turns
-    is_initial_turn = len(request.messages) <= 2  # Same logic as line 2160
-    if canon_law_entries and world_reinforce_freq > 0 and (is_initial_turn or current_turn % world_reinforce_freq == 0):
+    # Show canon law on turns 1-2 (initial) and every world_reinforce_freq turns thereafter
+    if canon_law_entries and world_reinforce_freq > 0 and (is_initial_turn or (current_turn > 2 and (current_turn - 2) % world_reinforce_freq == 0)):
         full_prompt += "\n### Canon Law (World Rules):\n" + "\n".join(canon_law_entries) + "\n"
 
     # === 9. CONTINUE HINT + LEAD-IN ===

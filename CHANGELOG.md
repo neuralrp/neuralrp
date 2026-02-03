@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+ ## [1.10.2] - 2026-02-03
+
+ ### Addition
+- **Summaries Panel**: Auto-summaries now correctly append to existing manual summary text
+  - **Behavior**: Auto-summaries add new paragraphs underneath existing content (non-destructive)
+  - **Format**: Existing summary + newline + new auto-generated summary
+  - **Persistence**: Manual edits preserved, auto-summaries accumulate over time
+  - **UI**: Textarea updates automatically after each auto-summarization via x-model binding
+  - **Example**: Manual summary "Alice is brave" → After auto: "Alice is brave\n\nAlice discovered artifact."
+
+***
+
+### Fixed
+- **Turn Calculation**: Fixed incorrect turn numbering causing canon law and character reinforcement to fire on wrong turns
+  - **Old Logic**: `current_turn = len(messages) // 2` produced 0-indexed turns (0, 1, 1, 2, 2, 3, 3...)
+  - **New Logic**: `current_turn = sum(1 for msg in messages if msg.role == "user")` produces 1-indexed turns (1, 2, 3, 4, 5...)
+  - **Impact**: Canon law now correctly reinforces on turns 1, 2, 5, 8, 11... instead of incorrect pattern
+  - **Impact**: Character reinforcement now correctly reinforces on turns 5, 10, 15, 20... instead of wrong turns
+  - **is_initial_turn**: Updated to `current_turn <= 2` for consistency (turns 1 and 2)
+  - **Canon Law Formula**: Updated to `is_initial_turn OR (current_turn > 2 AND (current_turn - 2) % world_reinforce_freq == 0)`
+
+ ***
+
 ## [1.10.1] - 2026-02-03
 
 ### Changed

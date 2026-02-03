@@ -481,6 +481,42 @@ Want to see the original chat context for a favorited image?
 
 *Note: If the chat was deleted or the image was removed, you'll see an error message.*
 
+### Managing Chat Summaries
+
+NeuralRP automatically summarizes long conversations to maintain context efficiency while preserving message history.
+
+**How Summaries Work:**
+
+- **Automatic Trigger**: When chat reaches 85% context threshold (configurable in Settings)
+- **Smart Summarization**: Condenses conversation into 150-token summaries
+- **Soft Delete**: Old messages are archived (not deleted), preserving relationship tracking IDs
+- **Preserved History**: Archived messages remain searchable via Search panel
+
+**Viewing Summaries:**
+
+1. Click **Settings (⚙️)** in the header
+2. Scroll to **Long-Term Memory** section
+3. View current chat summary (read-only display)
+4. Click **Clear Memory** to reset summary (rarely needed)
+
+**Configuring Summarization:**
+
+- **Summ Threshold**: Default 85% - adjust to trigger earlier/later
+- Lower threshold = more frequent summarization = less context per turn
+- Higher threshold = less frequent summarization = more context per turn
+
+**Archive Management:**
+
+- Archived messages automatically deleted after 90 days (default)
+- Manual cleanup available via API endpoint
+- Full history search works across active and archived messages
+
+**Benefits:**
+
+- Enable indefinite conversations without hitting context limits
+- Maintain relationship continuity (persistent message IDs)
+- Keep historical conversation searchable after summarization
+
 ### Saving Chats
 
 1. Click **Chats (💬)** in the header

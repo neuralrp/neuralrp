@@ -471,6 +471,163 @@ Plus virtual tables for FTS5 search and sqlite-vec embeddings.
 
 On every generation request, NeuralRP builds a prompt in a specific layered order to maintain stable structure.
 
+### Prompt Assembly Flowchart
+
+```mermaid
+flowchart TD
+    Start([Start Generation Request]) --> CalculateTurn[Calculate Turn Number]
+    CalculateTurn --> |Count user messages| CurrentTurn[current_turn]
+    
+    CurrentTurn --> CheckWorldInfo{World Info Active?}
+    CheckWorldInfo --> |Yes| MatchWorld[Match World Entries]
+    MatchWorld --> CanonLaw[Canon Law Entries: Always Included]
+    CanonLaw --> TriggeredLore[Triggered Lore: Semantic + Keyword Match]
+    TriggeredLore --> AddWorld[Add World Knowledge to Prompt]
+    
+    CheckWorldInfo --> |No| CheckCharacters
+    
+    AddWorld --> CheckCharacters{Characters Present?}
+    
+    CheckCharacters --> |Yes| CheckChatMode{Chat Mode?}
+    
+    CheckChatMode --> |Single Char| SingleInjection[Single Character Injection]
+    SingleInjection --> CheckSticky1{Turn 1,2,3 Sticky Window?}
+    CheckSticky1 --> |Yes| SingleFullCard[Full Card: 1000 tokens]
+    CheckSticky1 --> |No| CheckReinforce1
+    
+    CheckChatMode --> |Multi Char| MultiInjection[Multi-Character Injection]
+    MultiInjection --> CheckSticky2{Turn 1,2,3 Sticky Window?}
+    CheckSticky2 --> |Yes| MultiCapsules[Capsules: 100 tokens each]
+    CheckSticky2 --> |No| CheckReinforce1
+    
+    CheckCharacters --> |No| AddHistory
+    
+    SingleFullCard --> CheckReinforce1
+    MultiCapsules --> CheckReinforce1
+    
+    CheckReinforce1{Reinforcement Turn?}
+    CheckReinforce1 --> |Yes current_turn % reinforce_freq == 0| Reinforce[Reinforce: Description + Personality]
+    CheckReinforce1 --> |No| AddHistory
+    
+    Reinforce --> AddHistory[Add Chat History to Prompt]
+    
+    AddHistory --> CanonReinforce{Canon Law Reinforcement?}
+    CanonReinforce --> |Turn 1,2 OR every N turns| CanonPinned[Pinned Canon Law at End]
+    CanonReinforce --> |No| AddLeadIn
+    
+    CanonPinned --> AddLeadIn[Add Generation Lead-In]
+    AddLeadIn --> End([Complete Prompt])
+    
+    subgraph "World Info Matching Logic"
+        MatchWorld --> Quoted{Key Quoted?}
+        Quoted --> |Yes| ExactMatch[Exact Phrase Match]
+        Quoted --> |No| Semantic[Semantic Search + Keyword Match]
+    end
+```
+
+**Key Concepts for Auditing:**
+
+- **Turn Calculation**: Count of user messages (1-indexed: Turn 1 = first user message)
+- **Sticky Window**: First 3 turns (1, 2, 3) get full card/capsule injection
+- **Reinforcement**: Every N turns (default 5) → Description + Personality only
+- **Canon Law**: Always shown, reinforced every 3 turns at prompt end
+- **World Info**:
+  - Quoted keys (`"Event Name"`): Exact phrase match only
+  - Unquoted keys (`dragon`): Semantic similarity + flexible keyword match
+- **Character Modes**:
+  - Single char: Full card (1000 tokens) on sticky turns
+  - Multi-char: Capsules (100 tokens each) on sticky turns
+
+### 8-Turn Reinforcement Cycle
+
+```mermaid
+flowchart LR
+    subgraph Turn1[Turn 1]
+        T1Char[Character: Full Card / Capsule<br/>Sticky Window]
+        T1World[World Info: Triggered Lore<br/>Semantic Match]
+        T1Canon[Canon Law: Always Included]
+        T1Reinf[Reinforcement: NO]
+        T1Canon --> T1World --> T1Char --> T1Reinf
+    end
+    
+    subgraph Turn2[Turn 2]
+        T2Char[Character: Full Card / Capsule<br/>Sticky Window]
+        T2World[World Info: If Relevant]
+        T2Canon[Canon Law: Reinforced<br/>Every 3 Turns]
+        T2Reinf[Reinforcement: NO]
+        T2Canon --> T2World --> T2Char --> T2Reinf
+    end
+    
+    subgraph Turn3[Turn 3]
+        T3Char[Character: Full Card / Capsule<br/>Sticky Window End]
+        T3World[World Info: If Relevant]
+        T3Canon[Canon Law: NO]
+        T3Reinf[Reinforcement: NO]
+        T3Canon --> T3World --> T3Char --> T3Reinf
+    end
+    
+    subgraph Turn4[Turn 4]
+        T4Char[Character: NO Injection]
+        T4World[World Info: If Relevant]
+        T4Canon[Canon Law: Reinforced]
+        T4Reinf[Reinforcement: NO]
+        T4Canon --> T4World --> T4Char --> T4Reinf
+    end
+    
+    subgraph Turn5[Turn 5]
+        T5Char[Character: Reinforcement<br/>Description + Personality]
+        T5World[World Info: If Relevant]
+        T5Canon[Canon Law: NO]
+        T5Reinf[Reinforcement: YES]
+        T5Canon --> T5World --> T5Char --> T5Reinf
+    end
+    
+    subgraph Turn6[Turn 6]
+        T6Char[Character: NO Injection]
+        T6World[World Info: If Relevant]
+        T6Canon[Canon Law: Reinforced]
+        T6Reinf[Reinforcement: NO]
+        T6Canon --> T6World --> T6Char --> T6Reinf
+    end
+    
+    subgraph Turn7[Turn 7]
+        T7Char[Character: NO Injection]
+        T7World[World Info: If Relevant]
+        T7Canon[Canon Law: NO]
+        T7Reinf[Reinforcement: NO]
+        T7Canon --> T7World --> T7Char --> T7Reinf
+    end
+    
+    subgraph Turn8[Turn 8]
+        T8Char[Character: NO Injection]
+        T8World[World Info: If Relevant]
+        T8Canon[Canon Law: Reinforced]
+        T8Reinf[Reinforcement: NO]
+        T8Canon --> T8World --> T8Char --> T8Reinf
+    end
+    
+    Turn1 --> Turn2 --> Turn3 --> Turn4 --> Turn5 --> Turn6 --> Turn7 --> Turn8
+    
+    style T1Char fill:#90EE90
+    style T2Char fill:#90EE90
+    style T3Char fill:#90EE90
+    style T5Reinf fill:#FFD700
+    style T1Canon fill:#87CEEB
+    style T2Canon fill:#87CEEB
+    style T4Canon fill:#87CEEB
+    style T6Canon fill:#87CEEB
+    style T8Canon fill:#87CEEB
+```
+
+**Legend:**
+- 🟢 **Green**: Sticky window (turns 1, 2, 3) - Full card/capsule injection
+- 🟡 **Gold**: Reinforcement turn (every N turns) - Description + Personality only
+- 🔵 **Blue**: Canon law reinforced (turns 1, 2, then every 3rd turn)
+
+**Configuration Settings:**
+- `reinforce_freq`: Default 5 (turns between character reinforcement)
+- `world_info_reinforce_freq`: Default 3 (turns between canon law reinforcement)
+
 ### Layer Structure
 
 1. **System and Mode Instructions**
@@ -581,10 +738,11 @@ Even after initial character/world injection, LLMs naturally "forget" or "drift"
 
 **Unified Reinforcement: Description + Personality for ALL Characters**
 - **Default**: Every 5 turns (configurable via `reinforce_freq` setting, range: 1-100)
+- **Turn Calculation**: 1-indexed (turn 1 = first user message, turn 2 = second user message, etc.)
 - **What's Reinforced**: Description + personality for ALL characters (single and multi-char)
 - **Format**: `[REINFORCEMENT: [Alice's Body= Tall, athletic...] [Alice's Personality= "Brave"...] | [Bob's Body=...] [Bob's Personality=...]]`
 - **Behavior**: Reinforces all active characters simultaneously (not individually)
-- **Turn Calculation**: `current_turn = (message_count + 1) // 2`
+- **Turn Calculation Method**: `current_turn = sum(1 for msg in request.messages if msg.role == "user")`
 - **Trigger Condition**: `current_turn > 0 AND current_turn % reinforce_freq == 0`
 
 **Context Hygiene Reasoning for Unified Reinforcement:**
@@ -610,10 +768,10 @@ Even after initial character/world injection, LLMs naturally "forget" or "drift"
 **World Info Canon Law Reinforcement:**
 
 - **Default**: Every 3 turns (configurable via `world_info_reinforce_freq` setting, range: 1-100)
-- **Turn Calculation**: Same as character reinforcement
-- **Trigger Condition**: `is_initial_turn OR current_turn % world_reinforce_freq == 0`
+- **Turn Calculation**: 1-indexed (turn 1 = first user message, turn 2 = second user message, etc.)
+- **Trigger Condition**: `is_initial_turn (turns 1-2) OR (current_turn > 2 AND (current_turn - 2) % world_reinforce_freq == 0)`
 - **Format**: `### Canon Law (World Rules):\n{canon entries}`
-- **Behavior**: Canon law entries shown on turn 0 (initial) and every Nth turn thereafter
+- **Behavior**: Canon law entries shown on turns 1-2 (initial) and every Nth turn thereafter
 
 **Context Hygiene Reasoning for World Reinforcement:**
 - **Hard Constraints**: Canon laws are rules that MUST NOT be violated (physics, magic system limits)
@@ -2000,8 +2158,8 @@ Copy chat data up to fork point
     ↓
 Remap NPC entity IDs:
     FOR EACH npc IN local_npcs:
-        old_id: 'npc_123_chat_123'
-        new_id: 'npc_456_branch_789'
+        old_id: 'npc_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
+        new_id: 'npc_{branch_chat_id}_{timestamp}_{index}'
         
         Register new entity: db_create_entity(branch_id, new_id, name, 'npc')
         Update npc.entity_id: new_id
@@ -2010,8 +2168,8 @@ Remap NPC entity IDs:
 Update activeCharacters with new IDs
     ↓
 Copy relationship states with remapping:
-    Relationship(Alice → npc_123) 
-        → Relationship(Alice → npc_456)
+    Relationship(Alice → npc_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6)
+        → Relationship(Alice → npc_{branch_chat_id}_{timestamp}_{index})
     ↓
 Save branch chat with independent NPCs
 ```
@@ -3350,9 +3508,9 @@ When forking a chat that contains NPCs, the system automatically remaps NPC enti
 
 **Remapping Process**:
 1. Generate new entity IDs for NPCs in branch
-   - Original: `npc_{origin_chat}_{timestamp}_{hash}`
-   - New: `npc_{branch_chat}_{timestamp}_{hash}`
-2. Register new entities in the `entities` table
+   - Original NPC (created during chat): `npc_{uuid}` (32-character UUID)
+   - Forked NPC: `npc_{branch_chat_id}_{timestamp}_{index}` (prevents millisecond collisions)
+2. Register new entities in `entities` table
 3. Update NPC metadata with new entity IDs
 4. Track entity ID mappings for relationship state copying
 
@@ -3364,13 +3522,13 @@ When forking a chat that contains NPCs, the system automatically remaps NPC enti
 
 **Example**:
 ```
-Original Chat:
-  - NPC: npc_123_original_abc (Guard Marcus)
-  - Relationship: Alice → npc_123_original_abc (Trust: 0.5)
+Original Chat (my_cool_story):
+  - NPC: npc_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 (Guard Marcus)
+  - Relationship: Alice → npc_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 (Trust: 0.5)
 
-Forked Chat:
-  - NPC: npc_456_branch_def (Guard Marcus) -- New entity ID
-  - Relationship: Alice → npc_456_branch_def (Trust: 0.5) -- Remapped
+Forked Chat (my_cool_story_1738601234):
+  - NPC: npc_my_cool_story_1738601234_1738601234567_0 (Guard Marcus) -- New entity ID
+  - Relationship: Alice → npc_my_cool_story_1738601234_1738601234567_0 (Trust: 0.5) -- Remapped
 ```
 
 **Database Functions**:
@@ -3397,6 +3555,8 @@ This keeps the mental model simple: each branch is its own story.
 
 ## Memory & Summarization
 
+**See Session 12 in [AGENTS.md](../AGENTS.md#session-12-soft-delete--automatic-summarization-v160-2026-01-13) for implementation details, design decisions, and key insights.**
+
 ### Automatic Summarization
 
 When conversation context grows too large, NeuralRP automatically summarizes older messages to stay within the model's context window.
@@ -3416,7 +3576,74 @@ When summarizing, active canon law entries are included in the summarization pro
 
 ### Summary Storage
 
-Summaries are stored in the chat's `summary` field and included in context assembly, but not displayed in the UI. This keeps the conversation focused on recent messages while preserving long-term context.
+Summaries are stored in the chat's `summary` field and included in context assembly. The summary is accessible and editable via the **Summaries tab** in the UI, allowing users to review and modify the story context as needed.
+
+### Summaries Tab UI
+
+The Summaries tab provides a dedicated interface for viewing and editing chat summaries.
+
+**Features:**
+
+- **Editable Summary Textarea**: Large textarea (min 400px height) displays the current summary with full editing capabilities
+- **Auto-Save on Edit**: Changes to the summary field automatically trigger a chat autosave via the `saveSummaryChange()` function
+- **Empty State**: When no summary exists, displays a "Ready for your story context" placeholder with a bookmark icon
+- **Navigation Button**: Teal-colored bookmark icon in the main header (next to the Favorites tab) for quick access
+- **Real-Time Persistence**: Summary updates are saved instantly to the SQLite database when edited
+
+**About Summaries Panel** (sticky footer):
+
+- **Auto-generated**: "Auto-generated when your chat exceeds context limit" - Summaries are created automatically at the 85% context threshold
+- **Fully Editable**: "Fully editable - write your own to jump into any point in a story" - Users can manually override auto-generated summaries
+- **Auto-Saved**: "Auto-saved - your edits are saved instantly" - No manual save required
+
+**UI Location:**
+
+```
+Main Header Navigation
+├── Chats
+├── Characters
+├── World Info
+├── Gen Card
+├── Gen World
+├── Search
+├── Favorites
+└── Summaries ← Teal bookmark icon
+```
+
+**Technical Implementation:**
+
+```javascript
+// Frontend: autosaveChat() includes summary in chatData
+const chatData = {
+    messages: this.messages,
+    summary: this.summary,  // Summary field
+    activeCharacters: normalizedActiveChars,
+    activeWI: this.activeWI,
+    settings: this.settings,
+};
+
+// Summary edit handler
+saveSummaryChange() {
+    if (this.currentChatId) {
+        this.autosaveChat();  // Auto-save on edit
+        this.showNotification('Summary saved', 'success');
+    }
+}
+```
+
+**User Workflow:**
+
+1. **View Summary**: Click the "Summaries" tab to view the current story context
+2. **Edit Summary**: Modify the textarea content to adjust the narrative focus
+3. **Auto-Save**: Changes are automatically saved to the database with a "Summary saved" notification
+4. **Context Update**: The modified summary is included in subsequent LLM generations
+
+**Design Philosophy:**
+
+- **Non-Intrusive**: Summary is displayed in a separate tab, not cluttering the main chat view
+- **Immediate Feedback**: Auto-save on edit with a success notification
+- **Flexible Storytelling**: Users can manually rewrite summaries to steer the narrative direction
+- **Context Continuity**: Provides long-term story context while keeping the chat view focused on recent messages
 
 ### What Gets Kept vs Summarized
 

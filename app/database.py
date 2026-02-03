@@ -3683,13 +3683,14 @@ def db_remap_entities_for_branch(
     """
     entity_mapping: Dict[str, str] = {}
     timestamp = int(time.time())
+    base_timestamp = int(time.time() * 1000)
 
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        for old_npc_id, npc_data in list(localnpcs.items()):
-            # Generate new entity ID for this branch
-            new_entity_id = f"npc_{branch_chat_id}_{int(time.time() * 1000)}"
+        for i, (old_npc_id, npc_data) in enumerate(localnpcs.items()):
+            # Generate new entity ID for this branch (with index to prevent collision)
+            new_entity_id = f"npc_{branch_chat_id}_{base_timestamp}_{i}"
 
             # Register new entity in entities table
             cursor.execute(

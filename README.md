@@ -15,6 +15,27 @@
 **Status**: Actively developed, v1.10.x is still under testing. Expect bugs. 
 ---
 
+## Table of Contents
+
+- [Why It's Different](#why-its-different)
+- [NeuralRP: Storytime](#neuralrp-storytime)
+- [Core Philosophy: Conversation First](#core-philosophy-conversation-first)
+- [Built for SillyTavern Ecosystem Compatibility](#built-for-sillytavern-ecosystem-compatibility)
+- [What This Enables](#what-this-enables)
+- [Image Generation with AUTOMATIC1111](#image-generation-with-automatic1111)
+- [Library-Scale Organization](#library-scale-organization)
+- [Additional Capabilities](#additional-capabilities)
+- [Built for Local Deployment](#built-for-local-deployment)
+- [Known Limitations](#known-limitations)
+- [Hardware Requirements](#hardware-requirements)
+- [Quick Start](#quick-start)
+- [Danbooru Tag Generator (Optional)](#danbooru-tag-generator-optional)
+- [Documentation](#documentation)
+- [Credits](#credits)
+- [License](#license)
+
+---
+
 ## Why It’s Different
 
 1. **Context hygiene engine** — With 7B-12B LLM's, every token you put into the context window matters, and everything about this app cares about that. Character cards present in full on the first 3 turns, then token-controlled portions appear on customizable fixed intervals. World lore appears only when semantically relevant. 70–80% of your context stays as live dialogue, even with 3+ characters and deep worlds.
