@@ -2,7 +2,7 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**tl;dr: NeuralRP is a local, no-cloud roleplay engine that keeps characters, NPCs, worlds, and images coherent across 30k+ tokens on midrange GPUs—without you babysitting templates or extensions.**
+**tl;dr: NeuralRP is a local, no-cloud roleplay engine that keeps characters, NPCs, worlds, and images coherent across 30k+ tokens on midrange GPUs. Think less about tuning and more about immersing in roleplay.**
 
 **Simple out of the box. Just drop your cards in the folders, there isn't a million different things to configure. Just go.**
 
@@ -16,21 +16,11 @@
 
 ## Why It’s Different
 
-1. **Context hygiene engine** — Characters inject in full on their first 3 turns, then reinforce with minimal constraints. World lore appears only when semantically relevant. 70–80% of your context stays as live dialogue, even with 5–6 characters and deep worlds.
+1. **Context hygiene engine** — With 7B-12B LLM's, every token you put into the context window matters, and everything about this app cares about that. Character cards present in full on the first 3 turns, then token-controlled portions appear on customizable fixed intervals. World lore appears only when semantically relevant. 70–80% of your context stays as live dialogue, even with 3+ characters and deep worlds.
 
-2. **Emergent cast with visual canon** — Chat‑scoped NPCs have full parity with globals, can be promoted, and stay branch‑safe. v1.10 adds gender‑aware casting and Danbooru‑based visual canon, so those NPCs can also have stable, consistent imagery over long campaigns.
+2. **Emergent cast with visual canon** — Quickly create NPCs on the fly that are isolated to one chat, have full parity with characters, can be promoted, and stay branch‑safe. Gender selection keeps both text and visuals targeted, and one-click Danbooru tag assignment based on character description solves the problem of visual drift, so you can stay immersed in the actual roleplay.
 
-3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: performance‑aware presets, inpainting, character tag substitution, and per‑image metadata. v1.9+ adds scene snapshots, favorites, and one-click danbooru tagging for seamless visual RP that doesn't take you out of the story.
-
----
-
-## What’s New in v1.9.0–v1.10.0
-
-- **Danbooru character casting (v1.10)** – One‑click visual canon: NeuralRP analyzes your character’s description (hair, eyes, etc) and binds them to a matching Danbooru reference character. Works for both globals and NPCs, with reroll support and priority tags in snapshot prompts.
-
-- **Gender‑aware engine (v1.10)** – First‑class gender field (female/male/other) wired into character profiles, LLM reinforcement, and snapshots, while staying compatible with SillyTavern cards.
-
-- **Scene snapshots + favorites (v1.9)** – One‑click, scene‑aware Stable Diffusion images, favorites gallery with jump‑to‑source, tag filtering, and persistent image history across chats.
+3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: inpainting, both manual and automatic generation via the "snapshot" feature, and per‑image metadata, carefully designed to not "leak" into the context window. A "Favorites" menu allows you to jump right to where the image appeared in it's original chat, so you can see the context. All designed to fit into the flow of roleplay, as unintrusively as possible.
 
 ---
 
@@ -48,7 +38,9 @@ Hence, NeuralRP was born.
 
 It's engineered from the ground up with context window in mind. No full character card dump every turn. Uses SQLite backend which syncs intelligently with SillyTavern cards, semantically finds and injects what matters, when it matters, no matter how deep your world is.
 
-The fact is, there are certain limitations with 7B-12B LLMs that you simply can't get past. But this app maximizes what locally runnable LLMs offer for roleplay.
+I've built up the SD integration to match - rather than being a bolt-on extension, its been carefully developed to natively fit into the flow of NeuralRP with a deep feature set, and as automated or manual as you want it to be (or ignore it).
+
+The fact is, there are certain limitations with 7B-12B LLMs that you simply can't get past. But this app maximizes what 7B-14B LLMs offer for roleplay.
 
 ---
 
@@ -59,7 +51,8 @@ The fact is, there are certain limitations with 7B-12B LLMs that you simply can'
 - **Inject on first 3 turns** — Full character cards (single) or capsules (multi-char) for early-turn consistency
 - **Just-in-time grounding** — World lore appears when semantically relevant
 - **Directional relationships** — Alice→Bob ≠ Bob→Alice, tracked automatically
-- **Scalability by design** — 1 character = ~4-6% of context. 5 characters = ~20-30%. After sticky window, ~80% for dialogue.
+- **Scalability by design** — 1 character = ~4-6% of context. 3 characters = ~20-30%. After sticky window, ~80% for dialogue.
+- **Narrator Mode** - "Just chat", no world or character cards needed. Let it all develop naturally, elevating NPC's and worlds with AI-powered tools within the app. Or, easily use your pre-built deep worlds and characters from v2 cards.
 
 ---
 
@@ -86,11 +79,11 @@ Both output SillyTavern V2-compatible JSON. Prototype NPCs in conversation, then
 
 ### Multi-Character Chats That Scale
 
-Optimized for 5-6 active characters with distinct voices. Capsules (compressed summaries with dialog examples) enable group chats without context overflow.
+Optimized for multiple active characters with distinct voices. Capsules (compressed summaries with dialog examples) enable group chats without context overflow.
 
 ### Emergent NPCs
 
-Create background characters mid-chat (bartender, guard, merchant) with full personality and relationship tracking. Promote them to global characters when they matter.
+Create background characters mid-chat with full personality, automatic Danbooru tagging, and relationship tracking. Promote them to global characters when they matter.
 
 ### Semantic World Information
 
@@ -109,6 +102,7 @@ Five emotional dimensions tracked between all entities (trust, bond, conflict, p
 - Automatic updates via semantic analysis
 - Only injected when relevant to current scene
 - Preserved through summarization
+- User is also tracked and develops relationships with Characters and NPC's
 
 ### Intelligent Summarization
 
@@ -118,21 +112,23 @@ Continue conversations beyond context limits. When context approaches 85%:
 - Relationship states preserved
 - Story continuity maintained
 
+Relationship state is one of the most difficult things to maintain when summaries happen. The relationship system brings continuity without having to update character cards manually.
+
 ### Branching Timelines
 
-Fork any message to create alternate storylines. Characters, NPCs, world info, and relationships copied. NPCs develop independently across branches.
+Fork any message to create alternate storylines. Characters, NPCs, world info, and relationships copied. NPCs and relationships develop independently across branches.
 
 ---
 
 ## Image Generation with AUTOMATIC1111
 
-Native integration, not an afterthought.
+Native integration, not an afterthought:
 
-### Performance‑Aware Presets
+### 1. Performance‑Aware Presets
 
-Automatic step/resolution reduction when context is large (>12K tokens) to prevent VRAM crashes, with sane defaults for 8–16 GB cards.
+Automatic selectable step/resolution reduction when context is large (>12K tokens) to prevent VRAM crashes, with sane defaults for 8–16 GB cards.
 
-### Inpainting
+### 2. Inpainting
 
 - Adjustable brush size
 - Ctrl+Z undo
@@ -140,19 +136,25 @@ Automatic step/resolution reduction when context is large (>12K tokens) to preve
 - Persistent mask between regenerations
 - Full A1111 parameter control
 
-### Character‑Aware Prompts
+### 3. Manual-Mode Generation
 
+- **Pop-out Window** - Easily accesssable pop out window, prompt stays in browser memory so you don't have to retype every time, re-size generation on the fly.
 - **Character tag substitution** – Assign Danbooru tags to characters once, reference with `[CharacterName]` in prompts for consistent appearance without memorizing tag lists.
-- **Visual canon casting (v1.10)** – Optional Danbooru character binding so snapshots and manual prompts can use canon tags for that character first.
 
-### Snapshot + Visual Learning (v1.9+)
+### 4. Snapshots
 
-- **Scene snapshots** – Click 📸 to generate images from chat context automatically; AI analyzes characters, setting, mood, and action and builds a 4‑block prompt.
-- **Favorites and style learning** – Favorite images to build a visual library; NeuralRP detects Danbooru tags in those prompts and biases future generations toward your preferred styles.
+- **Generated from Context** – Generate images from chat context automatically; AI analyzes the last turn, providing location, actions, and dress, which is then directly matched to a LLM-optimized prompt. Semantic matching is used as a fallback.
+- **How is it Different?** - It doesn't just ask the LLM for a complete prompt and shove it into A1111, it doesn't leak text into the context window. It takes a specific framework optimized for Anime-based LLM generation models, using Danbooru tags that those models are specifically trained on, to create consistent images. The LLM is just delivering keywords - action, location, and dress. This is a fundamentally different process from every other solution out there. 
+
+### 5. Browse and Save Your Images
+- **Images Folder** - separate images folder where every generation is saved, even if you delete it in the chat
+- **Favorites menu** – Favorite images to build a visual library; click on the image and go straight to the image's original location in the chat. Filter by tag.
 - **Jump‑to‑source** – Double‑click favorites to jump back to the exact chat moment they came from.
+- **Recreate images** - Image metadata saved, so you can see exactly what prompt generated what image. Easily recreate images with a click of a button.
+
 ---
 
-## Library-Scale Organization (v1.8.0)
+## Library-Scale Organization
 
 Tag management for character and world cards:
 
@@ -190,7 +192,7 @@ All data in SQLite (neuralrp.db) with automatic JSON export for SillyTavern comp
 ## Hardware Requirements
 
 **Recommended:**
-- 12-16GB VRAM GPU (NVIDIA/AMD)
+- 12-16GB VRAM GPU (for running both LLM's at the same time)
 - Python 3.8+
 - KoboldCpp (LLM inference)
 - AUTOMATIC1111 WebUI (image generation)
