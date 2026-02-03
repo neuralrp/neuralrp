@@ -253,9 +253,9 @@ If you've assigned Danbooru tags to a character (in Character Editor), use `[Cha
 
 This ensures consistent character appearance across all generations.
 
-**Danbooru Tag Generator (v1.10.0):**
+**Danbooru Tag Generator (v1.10.1):**
 
-One-click generation of Danbooru tags from character descriptions using semantic matching.
+One-click generation of Danbooru tags from character descriptions using two-stage semantic matching.
 
 **Directions to make it work**
 
@@ -268,19 +268,25 @@ Type "python fetch_danbooru_characters.py"
 
 That command pulls 1300 character's worth of tags in, which get uploaded to the database the next time you open NeuralRP!
 
-**How It Works:**
+**How It Works (v1.10.1 Semantic System):**
 1. **Edit a Character** with a physical Description (hair color, eye color, body type)
 2. **Select Gender** (Female/Male/Other) - required for the generator
 3. **Click "Generate Danbooru Character"** hyperlink (appears below Gender toggle)
-4. **Auto-Population**: NeuralRP analyzes Description and populates the Danbooru Tag field with matching tags
-5. **Reroll for Variety**: Click the hyperlink again to overwrite with different matching character
+4. **Two-Stage Semantic Matching**:
+   - Stage 1: Natural language → Danbooru tags via semantic search (1304 tags in database)
+   - Stage 2: Tags → Danbooru characters via semantic search (1394 characters in database)
+5. **Auto-Population**: NeuralRP populates the Danbooru Tag field with best-matching tags
+6. **Reroll for Variety**: Click the hyperlink again to get different matching character
 
 **Key Features:**
-- **Physical Trait Extraction**: Maps natural language to Danbooru vocabulary (e.g., "elf" → `pointy_ears`)
-- **Progressive Search**: Removes traits one-by-one until match found (handles sparse descriptions)
-- **Gender Filtering**: Hard 1girl/1boy filter on all searches
-- **Creature Types**: Auto-detects elves, fairies, demons, etc. and adds appropriate features
+- **Natural Language Support**: "grey" → "gray", "skinny" → "slender", understands context
+- **No Keyword Maps**: Pure semantic matching handles synonyms, variants, context automatically
+- **Performance**: ~1.4 seconds per generation (50% faster than LLM-based approach)
+- **Deterministic**: Same input always produces same results (caching works)
+- **Gender Filtering**: Hard 1girl/1boy filter on all searches for consistent results
+- **Creature Types**: Auto-detects elves, fairies, demons, etc. via semantic matching
 - **NPC Parity**: Works identically for both global characters and chat-scoped NPCs
+- **Added Tags**: "perky breasts", "tiny breasts" for better breast size matching
 
 **Best Suited For:**
 This feature works best with **anime-trained Stable Diffusion models**:
@@ -296,7 +302,7 @@ The generated tags follow Danbooru tagging conventions which these models unders
 
 **Importing Danbooru Characters:**
 
-The system includes 1560+ pre-tagged Danbooru characters from a reference database:
+The system includes 1394 pre-tagged Danbooru characters from a reference database:
 
 ```bash
 # Run the import script (one-time setup)
@@ -305,9 +311,9 @@ python app/import_danbooru_characters.py
 
 This takes ~60 seconds and generates semantic embeddings for all characters.
 
-**Note on Semantic Search:**
-- ✅ Normal operation: Uses semantic search with progressive tag reduction
-- ⚠️ Warning if vec0 fails: Falls back to trait-based random selection (still works!)
+**Note on Semantic Search (v1.10.1):**
+- ✅ Normal operation: Uses semantic search with natural language → tags → characters pipeline
+- ⚠️ Warning if embeddings fail: Falls back to no-op (still generates tags, just no character matching)
 - Check startup logs for: `[SETUP WARNING] Could not create vec_danbooru_characters table`
 
 **Fetching Danbooru Character Data (Optional):**
@@ -360,14 +366,12 @@ Don't have `book1.xlsx`? Generate it automatically from Danbooru API:
 3. Click **"Generate Danbooru Character"** → System populates field with: `1girl, blonde_hair, blue_eyes, small_breasts, pointy_ears, elf`
 4. Generate snapshot → Prompt uses generated tags: `1girl, blonde_hair, blue_eyes, small_breasts, pointy_ears, elf, masterpiece, best quality`
 
-**Favorites and Personalized Learning:**
+**Favorites System:**
 
-NeuralRP learns your visual preferences from your favorited images:
-- **❤️ Favorite Images**: Save your best snapshots and manual generations
-- **Automatic Tag Learning**: System detects Danbooru tags you prefer
-- **Personalized Suggestions**: Future generations biased toward your favorite styles
+Save your best snapshots and manual generations to a persistent library:
+- **❤️ Favorite Images**: Heart icon on snapshots, "Save as Favorite" button on manual generations
 - **Persistent Library**: Favorites saved across all chat sessions
-- **Variation Mode**: Regenerate snapshots with novel tag combinations
+- **Jump to Source**: Double-click any favorite image to return to the original chat message
 - **Works for Both**: Snapshots (📸) and manual images (Vision Panel) support favorites
 
 See "Favoriting Images (Snapshot and Manual)" section below for detailed instructions.
@@ -376,19 +380,24 @@ See "Favoriting Images (Snapshot and Manual)" section below for detailed instruc
 
 NeuralRP can automatically generate scene images based on your chat context - no manual prompts needed!
 
-**How Snapshots Work:**
+**How Snapshots Work (v1.10.1 Simplified System):**
 
 1. **📸 Snapshot Button**: Click the camera icon in the chat toolbar to generate an image
-2. **Automatic Scene Analysis**: NeuralRP reads your last 2 turns of conversation to understand:
-   - What's happening (scene type: combat, dialogue, exploration, romance, magic, or other)
-   - Where it's taking place (setting: tavern, forest, castle, etc.)
-   - The mood and atmosphere (relaxed, tense, romantic, intense, etc.)
+2. **LLM Scene Analysis**: NeuralRP uses the LLM to extract 3 key fields from your conversation:
+    - **Location**: Where the scene takes place (e.g., "tavern", "forest", "castle")
+    - **Action**: What characters are doing (e.g., "standing", "sitting", "fighting")
+    - **Dress**: Clothing details (e.g., "wearing armor", "in casual clothes")
 3. **Smart Prompt Construction**: Builds a Stable Diffusion prompt using:
-   - **Quality tags**: masterpiece, best quality, high quality
-   - **Subject tags**: Character appearance (from danbooru tags or semantic matching)
-   - **Environment tags**: Setting elements (forest, tavern, castle, etc.)
-   - **Style tags**: Lighting, rendering style, mood colors
-4. **Image Generation**: Sends prompt to Stable Diffusion and displays result in chat
+    - **Quality tags**: masterpiece, best quality, high quality
+    - **Character tags**: From assigned Danbooru tags (or semantic matching)
+    - **Location**: Scene setting extracted from conversation
+    - **Action**: Character activity extracted from conversation
+    - **Dress**: Clothing details extracted from conversation
+4. **3-Tier Fallback System**: If LLM extraction fails:
+    - Tier 1: JSON extraction (primary method)
+    - Tier 2: Pattern matching (keyword detection)
+    - Tier 3: Empty scene (basic character tags only)
+5. **Image Generation**: Sends prompt to Stable Diffusion and displays result in chat
 
 **Character Tag Integration:**
 
@@ -396,14 +405,21 @@ If your character has **Danbooru tags** assigned (Character Editor → Danbooru 
 - **Example**: `1girl, blonde hair, blue eyes, school uniform`
 - **Benefit**: Ensures consistent character appearance across all snapshots
 
+**User Inclusion (v1.10.1):**
+
+Include yourself in snapshots by checking the "Include in Snapshots" checkbox:
+- Your user card settings (Name, Gender) are used for tag generation
+- Auto-counting adjusts character counts (e.g., "1girl, 1boy" for you + character)
+- Persists per chat - check once, applies to all snapshots in that conversation
+
 **Viewing Snapshot Details:**
 
 Each snapshot message shows:
 - **Image**: The generated scene image
 - **📋 Show Prompt Details** button (click to reveal):
   - Positive Prompt (all tags used)
-  - Negative Prompt (quality filters)
-  - Scene Analysis (detected scene type, setting, mood)
+  - Negative Prompt (quality filters: low quality, worst quality, bad anatomy)
+  - Scene Analysis (extracted location, action, dress)
 
 **Snapshot History:**
 
@@ -441,10 +457,8 @@ Save your favorite images for future reference:
 **What Happens When You Favorite:**
 
 - **Image Saved**: Stored in your favorites library
-- **Tags Learned**: NeuralRP learns from your visual preferences
-  - Automatically detects Danbooru tags in your favorite images
-  - Uses this data to improve future generation suggestions
 - **Persistent**: Favorites saved across chat sessions
+- **Jump to Source**: Double-click any favorite image to return to the original chat message
 
 **Viewing Your Favorites:**
 
@@ -466,36 +480,6 @@ Want to see the original chat context for a favorited image?
 - Works for both snapshot and manual images
 
 *Note: If the chat was deleted or the image was removed, you'll see an error message.*
-
-**Note on Tag Learning:**
-
-When you favorite an image, NeuralRP analyzes its prompt:
-- If the prompt contains **2+ Danbooru tags**, those tags are "learned"
-- Future generations are biased toward your preferred tags
-- This creates a personalized style that matches your taste
-
-### Regenerating Snapshots (Variation Mode)
-
-Want a different version of the same scene? Use variation mode:
-
-**How It Works:**
-- Same scene analysis (understands your conversation)
-- Different tag selection based on novelty scoring
-- Explores less-used tag combinations for variety
-- Maintains scene relevance while changing visual elements
-
-**To Regenerate:**
-
-1. Generate a snapshot (📸 button)
-2. Click **🔄 Regenerate** button below the image
-3. New variation appears in chat with different tags
-4. Repeat as many times as you want for variety
-
-**What Makes Variations Different:**
-- Novelty scoring prioritizes tags you've used less
-- Explores alternative lighting, camera angles, style tags
-- Keeps scene type, setting, and mood consistent
-- Provides visual variety while maintaining narrative relevance
 
 ### Saving Chats
 

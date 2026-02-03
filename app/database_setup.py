@@ -30,7 +30,7 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Schema version - increment when making schema changes
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
@@ -88,7 +88,6 @@ def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
         _create_entities_table(c)
         _create_danbooru_tags_table(c)
         _create_sd_favorites_table(c)
-        _create_danbooru_tag_favorites_table(c)
         _create_change_log_table(c)
         _create_performance_metrics_table(c)
         _create_image_metadata_table(c)
@@ -163,24 +162,41 @@ def _apply_migrations(c, from_version: int, to_version: int):
         
         print("[MIGRATION] v1.8.0 → v1.9.0 complete")
     
-    # Migration 1 → 2 (v1.10.0 → v1.11.0: Danbooru Character Casting)
+    # Migration 1 → 2 (v1.10.0: Danbooru Character Casting)
     if from_version < 2:
-        print("[MIGRATION] Applying v1.10.0 → v1.11.0 updates...")
-        
+        print("[MIGRATION] Applying v1.10.0 updates...")
+
         # Add visual canon columns to characters table
         _add_column_if_not_exists(c, "characters", "visual_canon_id", "INTEGER")
         _add_column_if_not_exists(c, "characters", "visual_canon_tags", "TEXT")
-        
+
         # Add visual canon columns to chat_npcs table
         _add_column_if_not_exists(c, "chat_npcs", "visual_canon_id", "INTEGER")
         _add_column_if_not_exists(c, "chat_npcs", "visual_canon_tags", "TEXT")
-        
+
         # Note: New tables (danbooru_characters, vec_danbooru_characters) are created automatically
         # by _create_danbooru_characters_table() with IF NOT EXISTS
-        
-        print("[MIGRATION] v1.10.0 → v1.11.0 complete")
 
+        print("[MIGRATION] v1.10.0 complete")
 
+    # Migration 2 → 3 (v1.10.1: NPC Key Consolidation)
+    if from_version < 3:
+        print("[MIGRATION] Applying v1.10.1 updates...")
+
+        # Consolidate NPCs from local_npcs to localnpcs
+        _consolidate_npc_metadata_keys(c)
+
+        print("[MIGRATION] v1.10.1 complete")
+
+    # Migration 3 → 4 (v1.10.1: Remove Learning System)
+    if from_version < 4:
+        print("[MIGRATION] Applying v1.10.1 remove learning system...")
+
+        # Drop danbooru_tag_favorites table (learning system no longer used)
+        _drop_table_if_exists(c, "danbooru_tag_favorites")
+
+        print("[MIGRATION] v1.10.1 remove learning system complete")
+  
 def _add_column_if_not_exists(c, table: str, column: str, dtype: str):
     """Add a column to a table if it doesn't already exist."""
     try:
@@ -196,6 +212,68 @@ def _add_column_if_not_exists(c, table: str, column: str, dtype: str):
     except sqlite3.Error as e:
         print(f"[MIGRATION WARNING] Could not add column {column} to {table}: {e}")
 
+
+def _drop_table_if_exists(c, table: str):
+    """Drop a table if it exists."""
+    try:
+        # Check if table exists
+        c.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
+        if c.fetchone():
+            c.execute(f"DROP TABLE {table}")
+            print(f"[MIGRATION] Dropped table '{table}'")
+        else:
+            print(f"[MIGRATION] Table '{table}' does not exist, skipping")
+    except sqlite3.Error as e:
+        print(f"[MIGRATION WARNING] Could not drop table {table}: {e}")
+
+def _consolidate_npc_metadata_keys(c):
+    """
+    Consolidate NPCs from local_npcs to localnpcs.
+    
+    Fixes split-key issue caused by migrate_npcs_to_db.py script that
+    renamed localnpcs → local_npcs. This migration merges both keys
+    back to single localnpcs key for consistency.
+    """
+    import json
+    
+    print("[MIGRATION] Consolidating NPC metadata keys (local_npcs → localnpcs)...")
+    
+    # Get all chats
+    c.execute("SELECT id, metadata FROM chats")
+    chats = c.fetchall()
+    
+    total_consolidated = 0
+    
+    for chat in chats:
+        chat_id = chat[0]
+        metadata = json.loads(chat[1]) if chat[1] else {}
+        
+        # Check if local_npcs exists
+        if 'local_npcs' in metadata:
+            local_npcs = metadata['local_npcs']
+            localnpcs = metadata.get('localnpcs', {})
+            
+            # Merge: localnpcs takes precedence (newer data)
+            merged_npcs = {**local_npcs, **localnpcs}
+            
+            # Update metadata to use only localnpcs
+            metadata['localnpcs'] = merged_npcs
+            del metadata['local_npcs']  # Remove old key
+            
+            # Update chat
+            metadata_json = json.dumps(metadata, ensure_ascii=False)
+            c.execute(
+                "UPDATE chats SET metadata = ? WHERE id = ?",
+                (metadata_json, chat_id)
+            )
+            
+            total_consolidated += len(local_npcs)
+            print(f"[MIGRATION]   Consolidated {len(local_npcs)} NPCs for chat {chat_id}")
+    
+    if total_consolidated > 0:
+        print(f"[MIGRATION] [SUCCESS] Consolidated {total_consolidated} NPCs across all chats")
+    else:
+        print("[MIGRATION] No NPC consolidation needed (all chats already use localnpcs)")
 
 def _create_characters_table(c):
     """Create characters table."""
@@ -398,17 +476,6 @@ def _create_sd_favorites_table(c):
             source_type TEXT DEFAULT 'snapshot',
             created_at INTEGER DEFAULT (strftime('%s', 'now')),
             note TEXT
-        )
-    """)
-
-
-def _create_danbooru_tag_favorites_table(c):
-    """Create danbooru_tag_favorites table."""
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS danbooru_tag_favorites (
-            tag_text TEXT PRIMARY KEY,
-            favorite_count INTEGER DEFAULT 0,
-            last_used INTEGER DEFAULT (strftime('%s', 'now'))
         )
     """)
 

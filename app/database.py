@@ -542,15 +542,6 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sd_favorites_source_type ON sd_favorites(source_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sd_favorites_created ON sd_favorites(created_at DESC)")
 
-        # Danbooru tag favorites table (v1.9.0+)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS danbooru_tag_favorites (
-                tag_text TEXT PRIMARY KEY,
-                favorite_count INTEGER DEFAULT 0,
-                last_used INTEGER DEFAULT (strftime('%s', 'now'))
-            )
-        """)
-
         # Danbooru characters table (v1.10.0+)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS danbooru_characters (
@@ -1399,6 +1390,7 @@ def db_get_chat(chat_id: str, include_summarized: bool = False) -> Optional[Dict
         metadata = json.loads(row['metadata']) if row['metadata'] else {}
         
         return {
+            'id': chat_id,
             'messages': messages,
             'summary': row['summary'] or '',
             'activeCharacters': metadata.get('activeCharacters', []),
@@ -1453,7 +1445,10 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
             metadata["activeCharacters"] = data.get("activeCharacters", metadata.get("activeCharacters", []))
             metadata["activeWI"] = data.get("activeWI", metadata.get("activeWI"))
             metadata["settings"] = data.get("settings", metadata.get("settings", {}))
+            # Preserve localnpcs for NPC metadata
             metadata["localnpcs"] = data.get("metadata", {}).get("localnpcs", metadata.get("localnpcs", {}))
+            # Preserve snapshot_settings for snapshot feature
+            metadata["snapshot_settings"] = data.get("metadata", {}).get("snapshot_settings", metadata.get("snapshot_settings", {}))
 
             # Preserve backend-managed metadata (characterFirstTurns, characterCapsules)
             # These are set by /api/chat and should not be overwritten by frontend autosave
@@ -4556,9 +4551,9 @@ def db_get_all_favorite_tags() -> List[str]:
 
 def db_get_popular_favorite_tags(limit: int = 5) -> List[Tuple[str, int]]:
     """
-    Get the most popular tags from favorites.
+    Get most popular tags from favorites.
 
-    Queries danbooru_tag_favorites table for top N tags by favorite_count.
+    Queries sd_favorites.tags JSON to count tag occurrences across all favorites.
 
     Args:
         limit: Maximum number of tags to return (default: 5)
@@ -4569,8 +4564,11 @@ def db_get_popular_favorite_tags(limit: int = 5) -> List[Tuple[str, int]]:
     with get_connection() as conn:
         c = conn.cursor()
         c.execute("""
-            SELECT tag_text, favorite_count
-            FROM danbooru_tag_favorites
+            SELECT json_each.value as tag, COUNT(*) as favorite_count
+            FROM sd_favorites
+            CROSS JOIN json_each(sd_favorites.tags)
+            WHERE sd_favorites.tags != '[]' AND sd_favorites.tags != 'null'
+            GROUP BY json_each.value
             ORDER BY favorite_count DESC
             LIMIT ?
         """, (limit,))
@@ -4595,85 +4593,7 @@ def db_get_favorite_by_image(image_filename: str) -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
 
 
-# ============================================================================
-# TAG DETECTION FUNCTIONS
-# ============================================================================
 
-def db_detect_danbooru_tags(prompt: str, threshold: int = 2) -> List[str]:
-    """
-    Detect which tags in a custom prompt are danbooru tags.
-
-    Args:
-        prompt: User's custom prompt text (comma-separated)
-        threshold: Minimum number of danbooru tags to consider it worth learning (default: 2)
-
-    Returns:
-        List[str]: Found danbooru tags
-    """
-    from app.danbooru_tags_config import get_all_tags
-
-    # Get all danbooru tags from config (case-insensitive lookup)
-    all_tags = get_all_tags()
-    tag_set = set()
-    for block_tags in all_tags.values():
-        for tag in block_tags:
-            tag_set.add(tag.lower())
-
-    # Check prompt for danbooru tags
-    prompt_lower = prompt.lower()
-    found_tags = []
-
-    for tag in tag_set:
-        if tag in prompt_lower:
-            found_tags.append(tag)
-
-    return found_tags
-
-
-# ============================================================================
-# DANBOORU TAG FREQUENCY FUNCTIONS (Learning Data)
-# ============================================================================
-
-def db_get_favorite_tag_frequency(tag_text: str) -> int:
-    """
-    Get favorite count for a tag.
-
-    Args:
-        tag_text: Tag name (e.g., "1girl", "forest")
-
-    Returns:
-        int: Favorite count (0 if not found)
-    """
-    with get_connection() as conn:
-        c = conn.cursor()
-        c.execute(
-            "SELECT favorite_count FROM danbooru_tag_favorites WHERE tag_text = ?",
-            (tag_text,)
-        )
-        row = c.fetchone()
-        return row[0] if row else 0
-
-
-def db_increment_favorite_tag(tag_text: str):
-    """
-    Increment favorite count for a tag.
-
-    Creates record if not exists, otherwise increments.
-    Applies to BOTH snapshot and manual mode favorites.
-
-    Args:
-        tag_text: Tag name to increment
-    """
-    with get_connection() as conn:
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO danbooru_tag_favorites (tag_text, favorite_count, last_used)
-            VALUES (?, 1, strftime('%s', 'now'))
-            ON CONFLICT(tag_text) DO UPDATE SET
-                favorite_count = favorite_count + 1,
-                last_used = strftime('%s', 'now')
-        """, (tag_text,))
-        conn.commit()
 
 
 # ============================================================================
@@ -4790,6 +4710,71 @@ def db_search_danbooru_characters_semantically(
     except Exception as e:
         print(f"[WARN] Semantic search failed: {e}, using random selection")
         return db_get_danbooru_characters(gender=gender, limit=k)
+
+
+def db_search_danbooru_tags_semantically(
+    query_text: str,
+    k: int = 3,
+    threshold: float = 0.6
+) -> List[Dict[str, Any]]:
+    """
+    Search Danbooru tags (from config) using semantic matching.
+    
+    Args:
+        query_text: Natural language trait (e.g., "perky breasts")
+        k: Number of results to return
+        threshold: Minimum similarity threshold (0.0-1.0)
+    
+    Returns:
+        List of matched tags with similarity scores
+        Example: [{'tag_text': 'small breasts', 'similarity': 0.85}]
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+        import numpy as np
+        import sqlite_vec
+    except ImportError:
+        print("[WARN] sentence-transformers or sqlite-vec not available, returning empty results")
+        return []
+    
+    if not query_text or not query_text.strip():
+        return []
+    
+    # Generate query embedding
+    model = SentenceTransformer('all-mpnet-base-v2')
+    query_embedding = model.encode(query_text).astype(np.float32)
+    query_bytes = query_embedding.tobytes()
+    
+    try:
+        with get_connection() as conn:
+            # Load sqlite-vec extension
+            sqlite_vec.load(conn)
+            cursor = conn.cursor()
+            
+            # Use vec_distance_cosine for cosine similarity
+            cursor.execute("""
+                SELECT dt.tag_text, dt.block_num,
+                       (1 - vec_distance_cosine(vd.embedding, ?)) as similarity
+                FROM danbooru_tags dt
+                JOIN vec_danbooru_tags vd ON dt.id = vd.rowid
+                WHERE similarity >= ?
+                ORDER BY similarity DESC
+                LIMIT ?
+            """, (query_bytes, threshold, k))
+            
+            # Collect results
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    'tag_text': row['tag_text'],
+                    'block_num': row['block_num'],
+                    'similarity': row['similarity']
+                })
+            
+            return results
+    except Exception as e:
+        print(f"[ERROR] Danbooru tag semantic search failed: {e}")
+        return []
 
 
 def db_assign_visual_canon_to_character(

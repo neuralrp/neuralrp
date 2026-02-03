@@ -1,89 +1,83 @@
 """
-Snapshot Scene Analyzer
+Snapshot Scene Analyzer - Simplified Version
 
-Analyzes conversation context to determine scene type, setting, action, and mood.
-Uses hybrid approach:
-1. Keyword detection (fast path, always runs first)
-2. LLM summary (async, optional enhancement)
-3. Semantic tag matching (via all-mpnet-base-v2)
+Analyzes conversation context and extracts scene description via LLM as JSON.
+Uses progressive fallback chain when LLM fails.
 
-Falls back to keyword-only detection if LLM is unavailable.
+EXAMPLE:
+Input: "Alice and Bob are sitting in a tavern. Alice is drinking a beer."
+Output: {
+    "location": "cozy tavern interior",
+    "action": "sitting",
+    "dress": ""
+}
+
+FALLBACK CHAIN:
+1. LLM JSON extraction (up to 3 retry attempts)
+2. Simple pattern extraction (key:value or line-based)
+3. Basic keyword matching (small curated lists)
+4. Empty scene (fail-safe)
 """
 
 import json
 import re
-import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
-
-# Predefined scene type keywords (minimum required for keyword detection)
-SCENE_KEYWORDS: Dict[str, List[str]] = {
-    'combat': [
-        'battle', 'fight', 'sword', 'attack', 'defend', 'weapon',
-        'war', 'kill', 'die', 'wound', 'blood', 'shield',
-        'strike', 'slash', 'stab', 'punch', 'kick', 'block',
-        'parry', 'dodge', 'enemy', 'foe', 'opponent', 'duel'
-    ],
-    'dialogue': [
-        'speak', 'say', 'tell', 'ask', 'reply', 'conversation',
-        'discuss', 'argue', 'whisper', 'shout', 'call', 'talk',
-        'respond', 'answer', 'question', 'explain', 'describe',
-        'narrate', 'mention', 'comment', 'remark', 'state'
-    ],
-    'exploration': [
-        'explore', 'travel', 'walk', 'journey', 'path', 'road',
-        'forest', 'mountain', 'discover', 'search', 'find', 'map',
-        'venture', 'trek', 'hike', 'wander', 'roam', 'navigate',
-        'investigate', 'examine', 'inspect', 'scout', 'survey'
-    ],
-    'romance': [
-        'love', 'kiss', 'hug', 'hold', 'embrace', 'romantic',
-        'heart', 'emotion', 'feeling', 'care', 'affection', 'date',
-        'blush', 'tender', 'gentle', 'intimate', 'passion', 'desire',
-        'adore', 'cherish', 'devotion', 'longing', 'yearning'
-    ],
-    'tavern': [
-        'tavern', 'inn', 'drink', 'ale', 'bar', 'food', 'meal',
-        'rest', 'sleep', 'room', 'bed', 'warmth', 'fireplace',
-        'mug', 'wine', 'beer', 'toast', 'cheers', 'patron',
-        'bartender', 'innkeeper', 'lodging', 'accommodation'
-    ],
-    'magic': [
-        'spell', 'magic', 'fireball', 'heal', 'curse', 'summon',
-        'mana', 'wizard', 'sorcery', 'enchant', 'potion', 'wand',
-        'incantation', 'ritual', 'arcane', 'mystical', 'rune',
-        'conjure', 'transmute', 'teleport', 'illusion', 'ward'
-    ]
-}
 
 
 class SnapshotAnalyzer:
-    """Analyzes conversation context for snapshot generation."""
+    """Analyzes conversation context for snapshot generation using LLM JSON extraction."""
 
-    def __init__(self, semantic_search_engine, http_client=None, config=None):
+    def __init__(self, semantic_search_engine=None, http_client=None, config=None):
         """
         Initialize the snapshot analyzer.
-
+        
         Args:
-            semantic_search_engine: The SemanticSearchEngine instance for embeddings
+            semantic_search_engine: DEPRECATED - kept for API compatibility
             http_client: httpx.AsyncClient for LLM requests (optional)
             config: Application config dict with kobold_url (optional)
         """
-        self.semantic_search_engine = semantic_search_engine
+        self.semantic_search_engine = semantic_search_engine  # Kept for compatibility, not used
         self.http_client = http_client
         self.config = config or {}
-        self._char_tag_cache: Dict[str, Optional[str]] = {}  # Cache for character tags
 
+    def _strip_character_names(self, text: str, character_names: List[str]) -> str:
+        """
+        Strip character names from text, replacing with generic 'Character'.
+        
+        Args:
+            text: Original text content
+            character_names: List of character names to strip
+            
+        Returns:
+            Text with character names replaced by 'Character'
+        """
+        if not character_names or not text:
+            return text
+        
+        result = text
+        for name in character_names:
+            if not name:
+                continue
+            # Replace whole word matches only (case-insensitive)
+            # Use word boundaries to avoid partial matches
+            pattern = r'\b' + re.escape(name) + r'\b'
+            result = re.sub(pattern, 'Character', result, flags=re.IGNORECASE)
+        
+        return result
+    
     def extract_conversation_context(self, messages: List[Dict],
-                                     message_count: int = 4) -> str:
+                                     message_count: int = 2,
+                                     character_names: Optional[List[str]] = None) -> str:
         """
         Extract last N messages and format for analysis.
-
+        
         Args:
             messages: Message list from chat
-            message_count: Number of recent messages to extract (default: 4 = 2 turns)
-
+            message_count: Number of recent messages to extract (default: 2 = 1 turn)
+            character_names: List of character names to strip from content (prevents name leakage)
+        
         Returns:
-            Formatted conversation text
+            Formatted conversation text with character names replaced by 'Character'
         """
         if not messages:
             return ""
@@ -101,6 +95,15 @@ class SnapshotAnalyzer:
             # Truncate long messages to prevent prompt bloat
             if len(content) > 500:
                 content = content[:500] + "..."
+            
+            # Strip character names from content (prevents name leakage to LLM)
+            if character_names:
+                content = self._strip_character_names(content, character_names)
+                # Also strip from speaker name to anonymize
+                speaker = self._strip_character_names(speaker, character_names)
+                if speaker != msg.get('speaker', role) and speaker != role:
+                    # Speaker was a character name, replace with 'Character'
+                    speaker = 'Character'
 
             if role == 'user':
                 context_lines.append(f"User: {content}")
@@ -109,249 +112,300 @@ class SnapshotAnalyzer:
 
         return '\n'.join(context_lines)
 
-    def detect_scene_type_keywords(self, conversation_text: str) -> Tuple[str, List[str]]:
+    async def extract_scene_json(self, conversation_context: str, max_retries: int = 3) -> Dict[str, str]:
         """
-        Detect scene type via keyword matching (fast path).
-
-        Returns:
-            Tuple of (scene_type, matched_keywords)
-        """
-        text_lower = conversation_text.lower()
-
-        best_scene = 'other'
-        best_matches: List[str] = []
-        best_count = 0
-
-        # Check each scene type's keywords and count matches
-        for scene_type, keywords in SCENE_KEYWORDS.items():
-            matches = [kw for kw in keywords if kw in text_lower]
-            if len(matches) > best_count:
-                best_count = len(matches)
-                best_scene = scene_type
-                best_matches = matches
-
-        # Require at least 2 keyword matches to be confident
-        if best_count < 2:
-            return 'other', []
-
-        return best_scene, best_matches
-
-    async def summarize_scene_via_llm(self, conversation_context: str) -> Dict[str, str]:
-        """
-        Use LLM to summarize scene (last 2 turns).
-
-        Returns:
-            {'scene_type': str, 'setting': str, 'action': str, 'mood': str}
-            Returns empty dict if LLM is unavailable.
-        """
-        # Check if we have the required components
-        if self.http_client is None or not self.config.get('kobold_url'):
-            print("[SNAPSHOT] LLM unavailable, skipping scene summary")
-            return {}
-
-        # Simplified prompt for faster response
-        prompt = f"""Analyze this roleplay scene briefly.
-
-{conversation_context[:800]}
-
-Reply with ONLY this JSON (no explanation):
-{{"scene_type":"combat|dialogue|exploration|romance|magic|other","setting":"brief place","mood":"emotion"}}"""
-
-        try:
-            response = await self.http_client.post(
-                f"{self.config['kobold_url']}/api/v1/generate",
-                json={
-                    "prompt": prompt,
-                    "max_length": 80,
-                    "temperature": 0.3,
-                    "top_p": 0.9
-                },
-                timeout=10.0
-            )
-
-            result = response.json().get('results', [{}])[0].get('text', '')
-
-            # Parse JSON from response (handle potential markdown code blocks)
-            json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
-            if json_match:
-                try:
-                    parsed = json.loads(json_match.group())
-                    return {
-                        'scene_type': parsed.get('scene_type', 'other'),
-                        'setting': parsed.get('setting', ''),
-                        'mood': parsed.get('mood', '')
-                    }
-                except json.JSONDecodeError:
-                    pass
-
-            return {}
-
-        except Exception as e:
-            print(f"[SNAPSHOT] LLM summary failed: {e}")
-            return {}
-
-    def match_tags_semantically(self, query_text: str,
-                               block_num: Optional[int] = None,
-                               k: int = 15,
-                               threshold: float = 0.35) -> List[Tuple[str, float]]:
-        """
-        Match danbooru tags via semantic search.
-
+        Extract scene description as JSON with progressive retry strategy.
+        
+        Priority hierarchy for actions:
+        1. Physical interactions with others: hugging another, embracing another, holding hands, dancing together, fighting, attacking, carrying another
+        2. Physical actions (solo): sitting, standing, walking, running, jumping, drinking, eating, sleeping, casting spell, fighting stance
+        3. Speaking or gestures: talking, whispering, shouting, hand gestures (ONLY if no physical action)
+        4. Generic: "standing" or "sitting" (last resort)
+        
+        CONSTRAINTS:
+        - NO proper names: Use generic terms only (e.g., "hugging another", not "Alice hugging Bob")
+        - SINGLE action only: Describe ONE action (e.g., "sitting", not "sitting and drinking")
+        - Third-person: Use "he/she/they", NEVER use "you" or "your"
+        
         Args:
-            query_text: Text to search for
-            block_num: Filter by block (optional)
-            k: Maximum number of results
-            threshold: Similarity threshold (default: 0.35)
-
+            conversation_context: Last 2 turns of conversation
+            max_retries: Number of LLM attempts (default: 3)
+        
         Returns:
-            List of (tag_text, similarity_score) tuples
+            {'location': str, 'action': str, 'dress': str}
+            Returns empty dict on all retries failed.
         """
-        if not self.semantic_search_engine or not self.semantic_search_engine.load_model():
-            print("[SNAPSHOT] Semantic search unavailable")
-            return []
+        prompts = [
+            # Attempt 1: Standard with full instructions
+            f"""Summarize the last two messages as JSON with these keys:
+- "location": where the scene is happening (short phrase, 3-5 words). Generic terms only - NO proper names.
+- "action": what the main character is doing (single action, 2-3 words). ONE action only - NOT multiple actions. Third-person only.
+- "dress": how the character is dressed (short phrase, 2-3 words). Leave empty if no clothing description available.
 
-        if not query_text or not query_text.strip():
-            return []
+ACTION PRIORITY (use this order):
+1. Physical interactions: hugging another, embracing another, holding hands, dancing together, fighting, attacking, carrying another
+2. Physical actions (solo): sitting, standing, walking, running, jumping, drinking, eating, sleeping, casting spell, fighting stance
+3. Speaking or gestures: talking, whispering, shouting (ONLY if no physical action)
+4. Generic: "standing" or "sitting" (last resort)
 
-        # Generate embedding for query
-        try:
-            query_embedding = self.semantic_search_engine.model.encode(
-                [query_text], convert_to_numpy=True
-            )[0]
-        except Exception as e:
-            print(f"[SNAPSHOT] Failed to generate embedding: {e}")
-            return []
+CONSTRAINTS - FOLLOW STRICTLY:
+- NO proper names: Use "another" or generic terms (e.g., "hugging another", NOT "Alice hugging Bob")
+- SINGLE action only: One verb (e.g., "sitting", NOT "sitting and drinking")
+- Third-person: Use "he/she/they" context, NEVER use "you" or "your"
+- Empty dress: Leave blank "" if clothing info is unknown
 
-        # Import database function (avoid circular import by importing here)
-        from app.database import db_search_danbooru_embeddings
+Reply with ONLY valid JSON, no extra text.
 
-        # Search danbooru tags
-        results = db_search_danbooru_embeddings(
-            query_embedding,
-            block_num=block_num,
-            k=k,
-            threshold=threshold
-        )
+Recent conversation:
+{conversation_context[:1000]}
 
-        return results
+Assistant:""",
+            
+            # Attempt 2: More strict
+            f"""MUST reply with ONLY valid JSON. No explanations, no extra text.
 
-    async def analyze_scene(self, messages: List[Dict], chat_id: str) -> Dict[str, Any]:
+Keys:
+- "location": where the scene is happening (3-5 words, NO proper names)
+- "action": ONE single action only (2-3 words, third-person, NEVER "you")
+- "dress": clothing description or leave empty "" if unknown
+
+Action priority: interactions → solo actions → speaking → standing.
+
+Recent conversation:
+{conversation_context[:1000]}
+
+Assistant:""",
+            
+            # Attempt 3: Ultra-strict
+            f"""Your ENTIRE response must be ONLY this format:
+{{{{"location": "...", "action": "...", "dress": ""}}}}
+
+RULES:
+- location: 3-5 words, generic only, NO proper names like "Alice's" or "The Golden Dragon"
+- action: ONE single action word (e.g., "sitting", "hugging another"), NOT "sitting and drinking"
+- dress: clothing description OR empty string "" if unknown
+- NEVER use "you" or "your"
+
+Do not write ANYTHING else.
+
+Recent conversation:
+{conversation_context[:1000]}"""
+        ]
+        
+        for attempt in range(max_retries):
+            # Check if we have LLM available
+            if self.http_client is None or not self.config.get('kobold_url'):
+                print("[SNAPSHOT] LLM unavailable, skipping JSON extraction")
+                return {}
+                
+            try:
+                prompt = prompts[min(attempt, len(prompts) - 1)]
+                
+                response = await self.http_client.post(
+                    f"{self.config['kobold_url']}/api/v1/generate",
+                    json={
+                        "prompt": prompt,
+                        "max_length": 150,
+                        "temperature": 0.3,
+                        "top_p": 0.9,
+                        "stop_sequence": ["###", "\n\n", "Assistant:"]
+                    },
+                    timeout=30.0
+                )
+                
+                result = response.json().get('results', [{}])[0].get('text', '').strip()
+                print(f"[SNAPSHOT DEBUG] Attempt {attempt + 1}: '{result[:100]}...'")
+                
+                # Parse JSON
+                parsed = json.loads(result)
+                
+                # Validate required fields
+                if all(k in parsed for k in ['location', 'action', 'dress']):
+                    print(f"[SNAPSHOT] JSON extraction succeeded on attempt {attempt + 1}")
+                    return parsed
+                else:
+                    print(f"[SNAPSHOT] Attempt {attempt + 1}: Missing required fields: {list(parsed.keys())}")
+                    
+            except json.JSONDecodeError as e:
+                print(f"[SNAPSHOT] Attempt {attempt + 1}: JSON parsing failed - {e}")
+            except Exception as e:
+                print(f"[SNAPSHOT] Attempt {attempt + 1}: Error - {e}")
+        
+        print(f"[SNAPSHOT] JSON extraction failed after {max_retries} attempts, trying fallback")
+        return {}
+
+    def _extract_from_patterns(self, text: str) -> Dict[str, str]:
         """
-        Complete scene analysis: keyword detection + LLM summary (if available).
+        Fallback: Extract from key:value or line-based patterns.
+        
+        Handles:
+        - Location: tavern
+        - Action: drinking
+        - Dress: leather armor
+        
+        Or:
+        location: tavern
+        action: drinking
+        dress: leather armor
+        """
+        text_lower = text.lower()
+        result = {'location': '', 'action': '', 'dress': ''}
+        
+        # Pattern 1: Key: Value format
+        patterns = {
+            'location': r'(?:location|where)[\s:]+([^\n]+)',
+            'action': r'(?:action|doing)[\s:]+([^\n]+)',
+            'dress': r'(?:dress|wearing|outfit)[\s:]+([^\n]+)'
+        }
+        
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text_lower)
+            if match:
+                result[key] = match.group(1).strip()[:50]  # Limit length
+        
+        # Pattern 2: Line-based (each line is a value)
+        lines = text.strip().split('\n')
+        if len(lines) >= 3:
+            # Assume order: location, action, dress
+            if not result['location']:
+                result['location'] = lines[0].strip()[:50]
+            if not result['action']:
+                result['action'] = lines[1].strip()[:50]
+            if not result['dress']:
+                result['dress'] = lines[2].strip()[:50]
+        
+        # Check if we got at least one value
+        if any(result.values()):
+            print(f"[SNAPSHOT] Pattern extraction: {result}")
+            return result
+        
+        return {}
 
-        Falls back to keyword-only if LLM unavailable.
+    def _extract_from_keywords(self, text: str) -> Dict[str, str]:
+        """
+        Fallback: Simple keyword matching.
+        
+        Uses small curated lists, not semantic search.
+        """
+        text_lower = text.lower()
+        result = {'location': '', 'action': '', 'dress': ''}
+        
+        # Small curated lists
+        LOCATION_KEYWORDS = [
+            'tavern', 'inn', 'bar', 'castle', 'palace', 'forest', 'woods', 'cave',
+            'room', 'bedroom', 'kitchen', 'hall', 'street', 'road', 'river',
+            'beach', 'mountain', 'garden', 'temple', 'church', 'library',
+            'throne room', 'dungeon', 'market', 'shop'
+        ]
+        
+        ACTION_KEYWORDS = [
+            'sitting', 'standing', 'walking', 'running', 'jumping', 'drinking', 'eating',
+            'fighting', 'attacking', 'defending', 'hugging', 'kissing', 'embracing',
+            'holding hands', 'dancing', 'sleeping', 'casting spell', 'talking',
+            'hugging another', 'embracing another', 'dancing together'
+        ]
+        
+        DRESS_KEYWORDS = [
+            'armor', 'dress', 'casual', 'formal', 'robe', 'cloak', 'shirt',
+            'uniform', 'leather', 'naked', 'clothing', 'outfit'
+        ]
+        
+        # Check each category
+        for loc in LOCATION_KEYWORDS:
+            if loc in text_lower:
+                result['location'] = loc
+                break
+        
+        for act in ACTION_KEYWORDS:
+            if act in text_lower:
+                result['action'] = act
+                break
+        
+        for dress in DRESS_KEYWORDS:
+            if dress in text_lower:
+                result['dress'] = dress
+                break
+        
+        # Fallback action: standing if none found
+        if not result['action']:
+            result['action'] = 'standing'
+        
+        if any(result.values()):
+            print(f"[SNAPSHOT] Keyword fallback: {result}")
+            return result
+        
+        return {}
 
+    async def analyze_scene(self, messages: List[Dict], chat_id: str,
+                           character_names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Simplified scene analysis: extract JSON from LLM with fallback chain.
+        
+        Args:
+            messages: Chat messages
+            chat_id: Chat ID for context
+            character_names: List of character names to strip from context (prevents name leakage)
+        
         Returns:
             {
-                'scene_type': str,
-                'setting': str,
-                'mood': str,
-                'keyword_detected': bool,
-                'matched_keywords': List[str],
-                'llm_used': bool
+                'scene_json': {'location': str, 'action': str, 'dress': str},
+                'recent_context': str,
+                'error': str  # Empty on success, error message otherwise
             }
         """
-        # Step 1: Extract conversation context (last 2 turns = 4 messages)
-        conversation_text = self.extract_conversation_context(messages, message_count=4)
-
-        if not conversation_text:
+        recent_context = self.extract_conversation_context(
+            messages, 
+            message_count=2,
+            character_names=character_names
+        )
+        
+        if not recent_context:
             return {
-                'scene_type': 'other',
-                'setting': '',
-                'mood': '',
-                'keyword_detected': False,
-                'matched_keywords': [],
-                'llm_used': False
+                'scene_json': {},
+                'recent_context': '',
+                'error': 'No conversation context'
             }
-
-        # Step 2: Keyword detection (fast path, always runs)
-        scene_type, matched_keywords = self.detect_scene_type_keywords(conversation_text)
-        keyword_detected = scene_type != 'other'
-
-        # Step 3: LLM summary (optional enhancement)
-        llm_summary = await self.summarize_scene_via_llm(conversation_text)
-        llm_used = bool(llm_summary)
-
-        # Step 4: Combine results
-        # Keyword detection takes priority for scene_type (more reliable)
-        # LLM provides setting and mood details
-        final_scene_type = scene_type if keyword_detected else llm_summary.get('scene_type', 'other')
-        final_setting = llm_summary.get('setting', '')
-        final_mood = llm_summary.get('mood', '')
-
-        # If no setting from LLM, infer from scene type
-        if not final_setting and keyword_detected:
-            setting_hints = {
-                'combat': 'battlefield',
-                'dialogue': 'conversation scene',
-                'exploration': 'outdoor adventure',
-                'romance': 'intimate setting',
-                'tavern': 'tavern interior',
-                'magic': 'magical atmosphere'
-            }
-            final_setting = setting_hints.get(scene_type, '')
-
-        # If no mood from LLM, infer from scene type
-        if not final_mood and keyword_detected:
-            mood_hints = {
-                'combat': 'intense',
-                'dialogue': 'conversational',
-                'exploration': 'adventurous',
-                'romance': 'romantic',
-                'tavern': 'relaxed',
-                'magic': 'mystical'
-            }
-            final_mood = mood_hints.get(scene_type, '')
-
-        result = {
-            'scene_type': final_scene_type,
-            'setting': final_setting,
-            'mood': final_mood,
-            'keyword_detected': keyword_detected,
-            'matched_keywords': matched_keywords,
-            'llm_used': llm_used
+        
+        # Chain 1: JSON extraction (up to 3 retries)
+        scene_json = await self.extract_scene_json(recent_context)
+        
+        if not scene_json:
+            # Chain 2: Simple pattern extraction
+            print("[SNAPSHOT] JSON failed, trying pattern extraction")
+            scene_json = self._extract_from_patterns(recent_context)
+        
+        if not scene_json:
+            # Chain 3: Keyword fallback
+            print("[SNAPSHOT] Pattern failed, trying keyword fallback")
+            scene_json = self._extract_from_keywords(recent_context)
+        
+        if not scene_json or not any(scene_json.values()):
+            # Chain 4: Empty scene (fail-safe)
+            print("[SNAPSHOT] All fallbacks failed, using empty scene")
+            scene_json = {'location': '', 'action': '', 'dress': ''}
+        
+        return {
+            'scene_json': scene_json,
+            'recent_context': recent_context,
+            'error': ''
         }
-
-        print(f"[SNAPSHOT] Scene analysis: type={final_scene_type}, "
-              f"keyword={keyword_detected}, llm={llm_used}")
-
-        return result
 
     def get_character_tag(self, char_ref: str, chat_data: Dict) -> Optional[str]:
         """
-        Get danbooru tag for a character with caching.
-
+        Get danbooru tag for a character (DEPRECATED - kept for compatibility).
+        
+        This function is kept for API compatibility but should not be used
+        in the new simplified system.
+        
         Args:
             char_ref: Character reference (filename or npc_xxx)
             chat_data: Chat data dict with metadata
-
+        
         Returns:
             Danbooru tag string or None
         """
-        # Check cache first
-        if char_ref in self._char_tag_cache:
-            return self._char_tag_cache[char_ref]
-
-        danbooru_tag = None
-
-        if char_ref.startswith('npc_'):
-            # Load NPC from chat metadata
-            npcs = chat_data.get('metadata', {}).get('localnpcs', {})
-            npc_data = npcs.get(char_ref)
-            if npc_data:
-                danbooru_tag = npc_data.get('data', {}).get('extensions', {}).get('danbooru_tag', '')
-        else:
-            # Load global character (import here to avoid circular import)
-            from app.database import db_get_character
-            char_data = db_get_character(char_ref)
-            if char_data:
-                danbooru_tag = char_data.get('data', {}).get('extensions', {}).get('danbooru_tag', '')
-
-        # Cache result (even if None)
-        self._char_tag_cache[char_ref] = danbooru_tag or None
-
-        return danbooru_tag or None
+        return None
 
     def clear_cache(self):
-        """Clear the character tag cache."""
-        self._char_tag_cache.clear()
+        """Clear the character tag cache (DEPRECATED - kept for compatibility)."""
+        pass

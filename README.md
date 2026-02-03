@@ -20,7 +20,7 @@
 
 2. **Emergent cast with visual canon** — Chat‑scoped NPCs have full parity with globals, can be promoted, and stay branch‑safe. v1.10 adds gender‑aware casting and Danbooru‑based visual canon, so those NPCs can also have stable, consistent imagery over long campaigns.
 
-3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: performance‑aware presets, inpainting, character tag substitution, and per‑image metadata. v1.9+ adds scene snapshots, favorites, and tag‑based visual learning so the engine can auto‑compose prompts that match both the scene and your preferred style.
+3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: performance‑aware presets, inpainting, character tag substitution, and per‑image metadata. v1.9+ adds scene snapshots, favorites, and one-click danbooru tagging for seamless visual RP that doesn't take you out of the story.
 
 ---
 
@@ -28,11 +28,9 @@
 
 - **Danbooru character casting (v1.10)** – One‑click visual canon: NeuralRP analyzes your character’s description (hair, eyes, etc) and binds them to a matching Danbooru reference character. Works for both globals and NPCs, with reroll support and priority tags in snapshot prompts.
 
-- **Gender‑aware engine (v1.10)** – First‑class gender field (female/male/other) wired into character profiles, reinforcement, and snapshots (automatic `1girl/2girls/1boy/2boys` tagging), while staying compatible with SillyTavern cards.
+- **Gender‑aware engine (v1.10)** – First‑class gender field (female/male/other) wired into character profiles, LLM reinforcement, and snapshots, while staying compatible with SillyTavern cards.
 
-- **Scene snapshots + favorites (v1.9)** – One‑click, scene‑aware Stable Diffusion images using a 4‑block prompt builder; favorites gallery with jump‑to‑source, tag filtering, and persistent image history across chats.
-
-- **Visual learning (v1.9)** – NeuralRP learns from your favorited images, detecting Danbooru tags and biasing future generations toward your preferred styles. Custom tags from manual generations become part of a searchable, embedding‑backed visual library.
+- **Scene snapshots + favorites (v1.9)** – One‑click, scene‑aware Stable Diffusion images, favorites gallery with jump‑to‑source, tag filtering, and persistent image history across chats.
 
 ---
 
@@ -173,7 +171,7 @@ Tag management for character and world cards:
 - **Soft delete** — Messages archived instead of deleted, searchable across history
 - **Export for training** — Export to Alpaca/ShareGPT/ChatML formats for Unsloth
 - **Built on SQLite + SQLite-vec** - Unified data system makes it easy to "bolt on" features, tune and mod this to you heart's content. Just add another table. 
-- **Migration system** — Seamless upgrades (v1 → v2 schemas) without data loss.
+- **Migration system** — Seamless upgrades (v2 → v3 schemas) without data loss.
 
 ---
 

@@ -54,7 +54,6 @@ from app.database import (
     # Snapshot favorites operations
     db_add_snapshot_favorite, db_get_favorites, db_delete_favorite, db_get_favorite_by_image,
     db_get_all_favorite_tags, db_get_popular_favorite_tags,
-    db_detect_danbooru_tags, db_get_favorite_tag_frequency, db_increment_favorite_tag,
     # Performance metrics
     db_save_performance_metric, db_get_recent_performance_metrics,
     db_get_median_performance, db_cleanup_old_metrics,
@@ -507,6 +506,7 @@ class SDParams(BaseModel):
     sampler_name: str = "Euler a"
     scheduler: str = "Automatic"
     context_tokens: Optional[int] = 0  # Context length for SD optimization
+    chat_id: Optional[str] = None  # For loading NPCs in manual generation
 
 class InpaintRequest(BaseModel):
     image: str  # Base64 encoded image
@@ -528,6 +528,7 @@ class CardGenRequest(BaseModel):
     source_mode: Optional[str] = "chat" # "chat" or "manual"
     chat_id: Optional[str] = None  # Chat ID for NPC creation
     save_as: Optional[str] = "global" # "global" (default) or "local_npc"
+    gender: Optional[str] = ""
 
 async def generate_dialogue_for_edit(
     char_name: str,
@@ -2141,26 +2142,26 @@ async def check_ai_services():
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(f"{kobold_url}/api/v1/model")
             if response.status_code == 200:
-                print(f"  ✅ KoboldCpp found at {kobold_url}")
+                print(f"  [OK] KoboldCpp found at {kobold_url}")
             else:
-                print(f"  ⚠️  KoboldCpp responded but may not be ready")
+                print(f"  [WARN] KoboldCpp responded but may not be ready")
     except Exception:
-        print(f"  ❌ KoboldCpp not found at {kobold_url}")
-        print(f"     💡 Tip: Start KoboldCpp with your model before chatting")
-        print(f"     💡 Download: https://github.com/LostRuins/koboldcpp")
+        print(f"  [ERROR] KoboldCpp not found at {kobold_url}")
+        print(f"     [TIP] Start KoboldCpp with your model before chatting")
+        print(f"     [TIP] Download: https://github.com/LostRuins/koboldcpp")
     
     # Check Stable Diffusion
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(f"{sd_url}/sdapi/v1/samplers")
             if response.status_code == 200:
-                print(f"  ✅ Stable Diffusion found at {sd_url}")
+                print(f"  [OK] Stable Diffusion found at {sd_url}")
             else:
-                print(f"  ⚠️  Stable Diffusion responded but may not be ready")
+                print(f"  [WARN] Stable Diffusion responded but may not be ready")
     except Exception:
-        print(f"  ❌ Stable Diffusion not found at {sd_url}")
-        print(f"     💡 Tip: Start A1111 WebUI with --api flag for image generation")
-        print(f"     💡 Download: https://github.com/AUTOMATIC1111/stable-diffusion-webui")
+        print(f"  [ERROR] Stable Diffusion not found at {sd_url}")
+        print(f"     [TIP] Start A1111 WebUI with --api flag for image generation")
+        print(f"     [TIP] Download: https://github.com/AUTOMATIC1111/stable-diffusion-webui")
     
     print()  # Empty line for readability
 
@@ -2173,11 +2174,11 @@ async def startup_event():
     
     # Verify database integrity before proceeding
     if not verify_database_health():
-        print("⚠️  Database health check failed - app may not function correctly")
+        print("[WARNING] Database health check failed - app may not function correctly")
         print("   Try running: python migrate_to_sqlite.py")
     
     # Check for external AI services
-    print("\n🔍 Checking for AI services...")
+    print("\n[CHECK] Checking for AI services...")
     await check_ai_services()
     
     # Auto-import any new JSON files dropped into folders
@@ -2216,7 +2217,7 @@ async def startup_event():
         http_client=snapshot_http_client,
         config=CONFIG
     )
-    prompt_builder = SnapshotPromptBuilder(snapshot_analyzer)
+    prompt_builder = SnapshotPromptBuilder()
     print("[SNAPSHOT] Snapshot feature initialized")
 
     # Migrate danbooru tags on first run
@@ -3195,7 +3196,7 @@ async def generate_card_field(req: CardGenRequest):
                     },
                     "talkativeness": 100,
                     "multi_char_summary": "",
-                    "gender": "",
+                    "gender": req.gender or "",
                     "danbooru_tag": ""
                 }
             }
@@ -4316,15 +4317,33 @@ async def generate_image(params: SDParams):
         # Load all characters from database (primary source)
         all_chars = db_get_all_characters()
         
+        # Load NPCs from chat metadata if chat_id provided
+        npcs = {}
+        if params.chat_id:
+            chat_data = db_get_chat(params.chat_id)
+            if chat_data:
+                npcs = chat_data.get('metadata', {}).get('localnpcs', {})
+        
         for name in bracketed_names:
-            # Case-insensitive match for name
+            danbooru_tag = None
+            
+            # First, try to match global characters
             matched_char = next((c for c in all_chars if c.get("data", {}).get("name", "").lower() == name.lower()), None)
             if matched_char:
-                # Get danbooru_tag from extensions (already injected by db_get_all_characters)
                 danbooru_tag = matched_char.get("data", {}).get("extensions", {}).get("danbooru_tag", "")
-                if danbooru_tag:
-                    # Replace [Name] with the tag
-                    processed_prompt = processed_prompt.replace(f"[{name}]", danbooru_tag)
+            
+            # If no global character matched, try NPCs
+            if not danbooru_tag and npcs:
+                for npc_id, npc_data in npcs.items():
+                    npc_name = npc_data.get('name', '')
+                    if npc_name.lower() == name.lower():
+                        danbooru_tag = npc_data.get('data', {}).get('extensions', {}).get('danbooru_tag', '')
+                        break
+            
+            # Replace if we found a danbooru_tag
+            if danbooru_tag:
+                processed_prompt = processed_prompt.replace(f"[{name}]", danbooru_tag)
+                print(f"[MANUAL SD] Replaced [{name}] with Danbooru tag: {danbooru_tag}")
 
     # Define the SD operation to be managed
     async def sd_operation():
@@ -4477,21 +4496,34 @@ def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_ca
     
     return chars_data
 
-def auto_count_characters_by_gender(chars_data: List[Dict]) -> str:
+def auto_count_characters_by_gender(chars_data: List[Dict], user_gender: Optional[str] = None, include_user: bool = False) -> str:
     """Generate danbooru count tags based on character genders.
     
     Args:
         chars_data: List of character dicts with 'gender' field
+        user_gender: Optional user gender ('female', 'male', 'other')
+        include_user: Whether to include user in the count
         
     Returns:
         Comma-separated count tags (e.g., "2girls, 1boy") or None if no genders set
     """
+    print(f"[SNAPSHOT DEBUG] auto_count called with: {len(chars_data)} chars, "
+          f"user_gender={user_gender}, include_user={include_user}")
+    
     gender_counts = {'female': 0, 'male': 0, 'other': 0}
     
     for char in chars_data:
         gender = char.get('gender', '').lower()
         if gender in gender_counts:
             gender_counts[gender] += 1
+    
+    # Include user in count if enabled
+    if include_user and user_gender:
+        user_gender = user_gender.lower()
+        if user_gender in gender_counts:
+            gender_counts[user_gender] += 1
+            print(f"[SNAPSHOT DEBUG] User count added: 1{user_gender}")
+            print(f"[SNAPSHOT DEBUG] All counts after adding user: {dict(gender_counts)}")
     
     count_tags = []
     if gender_counts['female'] == 1:
@@ -4515,37 +4547,50 @@ def auto_count_characters_by_gender(chars_data: List[Dict]) -> str:
 
 def aggregate_danbooru_tags(chars_data: List[Dict], override_count: Optional[str] = None) -> str:
     """Aggregate danbooru tags from all characters with gender count override.
-    
+
     Args:
         chars_data: List of character dicts with 'danbooru_tag' field
         override_count: Count tag(s) from auto-counting (overrides danbooru_tag count)
-        
+
     Returns:
         Comma-separated danbooru tags for Block 1
     """
     all_tags = []
-    
+    total_filtered = 0
+
     for char in chars_data:
         danbooru_tag = char.get('danbooru_tag', '').strip()
         if not danbooru_tag:
             continue
-        
+
         # Parse comma-separated tags
         tags = [t.strip() for t in danbooru_tag.split(',') if t.strip()]
-        
+
         # Filter out count tags if override provided (gender wins)
+        # Use EXACT match only to avoid filtering tags containing count patterns
         if override_count:
-            # Common count patterns to filter
-            count_patterns = ['1girl', '1boy', '2girls', '2boys', '3girls', '3boys',
-                           '4girls', '4boys', '5girls', '5boys', '6+girls', '6+boys',
+            # Common count patterns to filter (exact matches only)
+            count_patterns = {'1girl', '1boy', '2girls', '2boys', '3girls', '3boys',
+                           '4girls', '4boys', '5girls', '5boys', '6girls', '6boys',
+                           '7girls', '7boys', '8girls', '8boys',
                            'solo', 'duo', 'trio', 'quartet', 'group', 'crowd',
-                           'multiple girls', 'multiple boys', 'multiple']
-            tags = [t for t in tags if t.lower() not in count_patterns]
-        
+                           'multiple girls', 'multiple boys', 'multiple'}
+            filtered_tags = []
+            for tag in tags:
+                if tag.lower() in count_patterns:
+                    total_filtered += 1
+                    print(f"[AGGREGATE] Filtered count tag from {char.get('name', 'Unknown')}: {tag}")
+                else:
+                    filtered_tags.append(tag)
+            tags = filtered_tags
+
         all_tags.extend(tags)
-    
-    # Limit to first 8 tags (5 for block 1, 3 for semantic matching buffer)
-    return ', '.join(all_tags[:8])
+
+    if total_filtered > 0:
+        print(f"[AGGREGATE] Total count tags filtered: {total_filtered}, remaining: {len(all_tags)}")
+
+    # Limit to first 12 tags (more space for visual details)
+    return ', '.join(all_tags[:12])
 
 @app.post("/api/chat/snapshot")
 async def generate_chat_snapshot(request: SnapshotRequest):
@@ -4557,6 +4602,18 @@ async def generate_chat_snapshot(request: SnapshotRequest):
             return {"error": "Chat not found"}
 
         messages = chat.get('messages', [])
+        
+        # RELOAD chat from database to get latest snapshot settings
+        # Settings may have been updated via /api/chats/{id}/snapshot-settings endpoint
+        chat = db_get_chat(request.chat_id)
+        if chat:
+            # Get snapshot settings from dedicated metadata key (now using fresh chat data)
+            chat_settings = chat.get('metadata', {}).get('snapshot_settings', {})
+            print(f"[SNAPSHOT DEBUG] Chat reloaded from database, metadata keys: {list(chat.get('metadata', {}).keys())}")
+            print(f"[SNAPSHOT DEBUG] Snapshot settings loaded: {chat_settings}")
+        else:
+            chat_settings = {}
+            print(f"[SNAPSHOT DEBUG] Chat reload failed, using empty settings")
 
         # Calculate context tokens for chat messages (enables context-aware presets)
         chat_text = "\n".join([msg.get('content', '') for msg in messages])
@@ -4565,25 +4622,65 @@ async def generate_chat_snapshot(request: SnapshotRequest):
         # Extract active characters' gender and danbooru tags WITH visual canon data (NEW)
         chars_data = get_active_characters_data(chat, max_chars=3, include_visual_canon=True)
         
-        # Auto-count characters by gender
-        count_tags = auto_count_characters_by_gender(chars_data)
+        # Build user data for snapshot if enabled
+        user_data = None
+        
+        # Debug user settings
+        print(f"[SNAPSHOT DEBUG] User settings loaded: include_user={chat_settings.get('include_user_in_snapshots', False)}, "
+              f"user_gender='{chat_settings.get('user_gender', 'NOT_SET')}', "
+              f"user_danbooru_tag='{chat_settings.get('user_danbooru_tag', 'NOT_SET')}'")
+        
+        include_user = chat_settings.get('include_user_in_snapshots', False)
+        if include_user:
+            user_data = {
+                'gender': chat_settings.get('user_gender', ''),
+                'danbooru_tag': chat_settings.get('user_danbooru_tag', ''),
+                'include_user': True
+            }
+            print(f"[SNAPSHOT DEBUG] user_data created: {user_data}")
+            user_data = {
+                'gender': chat_settings.get('user_gender', ''),
+                'danbooru_tag': chat_settings.get('user_danbooru_tag', ''),
+                'include_user': True
+            }
+            print(f"[SNAPSHOT] Including user in snapshot: gender={user_data['gender']}")
+        
+        # Auto-count characters by gender (including user if enabled)
+        user_gender = user_data.get('gender') if user_data else None
+        count_tags = auto_count_characters_by_gender(chars_data, user_gender=user_gender, include_user=bool(user_data))
         print(f"[SNAPSHOT] Auto-counted: {count_tags}")
         
         # Aggregate danbooru tags with gender override
         character_tags = aggregate_danbooru_tags(chars_data, override_count=count_tags if count_tags else None)
         print(f"[SNAPSHOT] Aggregated character tags: {character_tags}")
         
-        # Analyze scene
+        # Extract character names for name-stripping (prevents name leakage to LLM)
+        character_names = [c.get('name', '') for c in chars_data if c.get('name')]
+        
+        # Analyze scene using new JSON extraction
         scene_analysis = await snapshot_analyzer.analyze_scene(
-            messages, request.chat_id
+            messages, request.chat_id, character_names=character_names
         )
         
-        # Build prompt with multi-character support + visual canon (NEW)
-        positive_prompt, negative_prompt = prompt_builder.build_4_block_prompt(
-            scene_analysis,
-            character_tags,
-            variation_mode=False,
-            active_chars_data=chars_data  # NEW: Pass visual canon bindings
+        # Extract scene JSON for simplified prompt building
+        scene_json = scene_analysis.get('scene_json', {})
+        
+        # Build user tags list from user_data if present
+        user_tags = []
+        if user_data and user_data.get('danbooru_tag'):
+            user_tags = [t.strip() for t in user_data['danbooru_tag'].split(',') if t.strip()]
+        
+        # Build character tags list from aggregated tags
+        char_tags = []
+        if character_tags:
+            char_tags = [t.strip() for t in character_tags.split(',') if t.strip()]
+        
+        # Build prompt using new simplified builder
+        positive_prompt, negative_prompt = prompt_builder.build_simple_prompt(
+            scene_json=scene_json,
+            character_tags=char_tags,
+            user_tags=user_tags,
+            character_count_tags=count_tags
         )
 
         # Use size parameters from request, default to 512x512
@@ -4639,16 +4736,6 @@ async def generate_chat_snapshot(request: SnapshotRequest):
         logger.error(f"Snapshot generation failed: {e}")
         return {"error": str(e)}
 
-@app.get("/api/snapshot/status")
-async def get_snapshot_status():
-    """Check if Stable Diffusion is available."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{CONFIG['sd_url']}/sdapi/v1/sd-models")
-            return {"available": True, "sd_url": CONFIG['sd_url']}
-    except Exception as e:
-        return {"available": False, "error": str(e)}
-
 @app.get("/api/chat/{chat_id}/snapshots")
 async def get_snapshot_history(chat_id: str):
     """Retrieve snapshot history for a chat."""
@@ -4658,6 +4745,59 @@ async def get_snapshot_history(chat_id: str):
 
     snapshots = chat.get('metadata', {}).get('snapshot_history', [])
     return {"snapshots": snapshots}
+
+
+class SnapshotSettingsRequest(BaseModel):
+    """Request model for saving snapshot user settings."""
+    include_user_in_snapshots: bool = False
+    user_gender: str = ""
+    user_danbooru_tag: str = ""
+
+
+@app.post("/api/chats/{chat_id}/snapshot-settings")
+async def save_snapshot_settings(chat_id: str, request: SnapshotSettingsRequest):
+    """
+    Save user snapshot settings to chat metadata.
+    
+    These settings control whether the user is included in snapshots
+    and their gender/danbooru tag configuration.
+    """
+    try:
+        print(f"[SNAPSHOT] save_snapshot_settings called for chat {chat_id}")
+        print(f"[SNAPSHOT] Request data: include_user={request.include_user_in_snapshots}, gender={request.user_gender}, tag={request.user_danbooru_tag}")
+        
+        chat = db_get_chat(chat_id)
+        if not chat:
+            print(f"[SNAPSHOT] Chat {chat_id} not found!")
+            return {"error": "Chat not found"}
+        
+        print(f"[SNAPSHOT] Loaded chat {chat_id}, current metadata keys: {list(chat.get('metadata', {}).keys())}")
+        
+        # Get or create metadata
+        metadata = chat.get('metadata', {})
+        if metadata is None:
+            metadata = {}
+        
+        # Save snapshot settings in dedicated key
+        metadata['snapshot_settings'] = {
+            'include_user_in_snapshots': request.include_user_in_snapshots,
+            'user_gender': request.user_gender,
+            'user_danbooru_tag': request.user_danbooru_tag
+        }
+        
+        chat['metadata'] = metadata
+        db_save_chat(chat_id, chat)
+        
+        print(f"[SNAPSHOT] Saved settings for chat {chat_id}: include_user={request.include_user_in_snapshots}, gender={request.user_gender}")
+        
+        return {
+            "success": True,
+            "settings": metadata['snapshot_settings']
+        }
+        
+    except Exception as e:
+        print(f"[SNAPSHOT] Error saving settings for chat {chat_id}: {e}")
+        return {"error": str(e)}
 
 
 class SnapshotFavoriteRequest(BaseModel):
@@ -4702,15 +4842,28 @@ async def regenerate_snapshot(chat_id: str):
         character_tags = aggregate_danbooru_tags(chars_data, override_count=count_tags if count_tags else None)
         print(f"[SNAPSHOT] Regenerate aggregated tags: {character_tags}")
         
-        # Analyze scene (re-run for current context)
-        scene_analysis = await snapshot_analyzer.analyze_scene(messages, chat_id)
+        # Extract character names for name-stripping (prevents name leakage to LLM)
+        character_names = [c.get('name', '') for c in chars_data if c.get('name')]
         
-        # Build prompt with VARIATION MODE + visual canon (NEW)
-        positive_prompt, negative_prompt = prompt_builder.build_4_block_prompt(
-            scene_analysis,
-            character_tags,
-            variation_mode=True,  # VARIATION MODE
-            active_chars_data=chars_data  # NEW: Pass visual canon bindings
+        # Analyze scene (re-run for current context)
+        scene_analysis = await snapshot_analyzer.analyze_scene(
+            messages, chat_id, character_names=character_names
+        )
+        
+        # Extract scene JSON for simplified prompt building
+        scene_json = scene_analysis.get('scene_json', {})
+        
+        # Build character tags list from aggregated tags
+        char_tags = []
+        if character_tags:
+            char_tags = [t.strip() for t in character_tags.split(',') if t.strip()]
+        
+        # Build prompt using simplified builder (no variation mode needed - simpler is better)
+        positive_prompt, negative_prompt = prompt_builder.build_simple_prompt(
+            scene_json=scene_json,
+            character_tags=char_tags,
+            user_tags=[],  # Regenerate doesn't include user by default
+            character_count_tags=count_tags
         )
 
         # Generate image
@@ -4767,10 +4920,7 @@ async def regenerate_snapshot(chat_id: str):
 @app.post("/api/chat/{chat_id}/snapshot/favorite")
 async def add_snapshot_favorite(chat_id: str, request: SnapshotFavoriteRequest):
     """
-    Mark snapshot as favorite and learn tag preferences.
-
-    Increment favorite counts for all tags in snapshot.
-    This data biases future snapshot and manual generation.
+    Mark snapshot as favorite.
     """
     try:
         # Extract tags from prompt
@@ -4795,16 +4945,12 @@ async def add_snapshot_favorite(chat_id: str, request: SnapshotFavoriteRequest):
             'note': request.note
         })
 
-        # Increment tag frequencies for learning
-        for tag in tags:
-            db_increment_favorite_tag(tag)
-
-        logger.info(f"[SNAPSHOT] Added snapshot favorite: {request.image_filename}, learned {len(tags)} tags")
+        logger.info(f"[SNAPSHOT] Added snapshot favorite: {request.image_filename}, saved {len(tags)} tags")
 
         return {
             "success": True,
             "favorite_id": fav_id,
-            "tags_learned": len(tags),
+            "tags_saved": len(tags),
             "source_type": "snapshot"
         }
 
@@ -4831,55 +4977,13 @@ class ManualFavoriteRequest(BaseModel):
 @app.post("/api/manual-generation/favorite")
 async def add_manual_favorite(request: ManualFavoriteRequest):
     """
-    Add manual mode generation to favorites and learn from detected tags.
-
-    Process:
-    1. Detect danbooru tags in user's custom prompt (lenient threshold=1 for counting)
-    2. If >=2 danbooru tags detected (hedge pass), parse ALL tags (danbooru + NSFW + custom)
-       and learn from ALL tags
-    3. If <2 danbooru tags (hedge fail), skip learning and save with empty tags
-    4. Save to sd_favorites with source_type='manual'
+    Add manual mode generation to favorites.
     """
     try:
-        from app.snapshot_learning_config import TAG_DETECTION_THRESHOLD
+        # Extract tags from prompt (comma-separated)
+        tags = [tag.strip() for tag in request.prompt.split(',') if tag.strip()]
 
-        # Step 1: Detect danbooru tags with lenient threshold (for counting purposes)
-        detected_danbooru = db_detect_danbooru_tags(request.prompt, threshold=1)
-        print(f"[SNAPSHOT] Detected {len(detected_danbooru)} danbooru tags (lenient) in manual prompt")
-
-        # Step 2: Hedge check - only learn if >=2 danbooru tags
-        tags_learned = 0
-        all_tags = []
-        learned = False
-
-        if len(detected_danbooru) >= TAG_DETECTION_THRESHOLD:
-            # Hedge pass: Parse ALL tags (danbooru + NSFW + custom)
-            all_tags = [tag.strip() for tag in request.prompt.split(',') if tag.strip()]
-            print(f"[SNAPSHOT] Tag-based prompt: {len(all_tags)} total tags, {len(detected_danbooru)} danbooru, {len(all_tags) - len(detected_danbooru)} custom")
-
-            # Learn from ALL tags
-            for tag in all_tags:
-                db_increment_favorite_tag(tag)
-                tags_learned += 1
-            
-            # Add custom tags (not in pre-defined 1560) to semantic search system
-            custom_tags = [tag for tag in all_tags if tag.lower() not in [dt.lower() for dt in detected_danbooru]]
-            if custom_tags:
-                print(f"[SNAPSHOT] Adding {len(custom_tags)} custom tags to semantic search library...")
-                from app.database import db_add_dynamic_danbooru_tag
-                for custom_tag in custom_tags:
-                    success = db_add_dynamic_danbooru_tag(custom_tag)
-                    if success:
-                        print(f"[SNAPSHOT] Added custom tag: '{custom_tag}'")
-            
-            learned = True
-            print(f"[SNAPSHOT] Learned from {tags_learned} tags")
-        else:
-            # Hedge fail: Skip learning (sentence-based prompt)
-            print(f"[SNAPSHOT] Sentence-based prompt: {len(detected_danbooru)} danbooru tags (<{TAG_DETECTION_THRESHOLD} threshold)")
-            all_tags = []
-
-        # Step 3: Save to favorites (source_type='manual')
+        # Save to favorites (source_type='manual')
         fav_id = db_add_snapshot_favorite({
             'chat_id': request.chat_id,  # Optional: associate with current chat for jump-to-source
             'image_filename': request.image_filename,
@@ -4889,7 +4993,7 @@ async def add_manual_favorite(request: ManualFavoriteRequest):
             'setting': None,  # Manual mode has no LLM analysis
             'mood': None,  # Manual mode has no LLM analysis
             'character_ref': None,  # Manual mode has no character context
-            'tags': all_tags,
+            'tags': tags,
             'steps': request.steps,
             'cfg_scale': request.cfg_scale,
             'width': request.width,
@@ -4898,19 +5002,12 @@ async def add_manual_favorite(request: ManualFavoriteRequest):
             'note': request.note
         })
 
-        logger.info(f"[SNAPSHOT] Added manual favorite: {request.image_filename}, "
-                   f"total_tags: {len(all_tags)}, danbooru_tags: {len(detected_danbooru)}, custom_tags: {len(all_tags) - len(detected_danbooru) if learned else 0}, learned: {learned}")
+        logger.info(f"[SNAPSHOT] Added manual favorite: {request.image_filename}, saved {len(tags)} tags")
 
         return {
             "success": True,
             "favorite_id": fav_id,
-            "detected_tags": detected_danbooru,
-            "total_tags": len(all_tags),
-            "danbooru_tags": len(detected_danbooru),
-            "custom_tags": len(all_tags) - len(detected_danbooru) if learned else 0,
-            "tags_learned": tags_learned,
-            "learned": learned,
-            "threshold_met": len(detected_danbooru) >= TAG_DETECTION_THRESHOLD,
+            "tags_saved": len(tags),
             "source_type": "manual"
         }
 
@@ -6184,7 +6281,7 @@ async def update_npc(chat_id: str, npc_id: str, request: Request):
                     "promoted": False,
                     "created_at": int(time.time())
                 }
-            
+
             metadata["localnpcs"] = localnpcs
             chat["metadata"] = metadata
             db_save_chat(chat_id, chat)
@@ -6256,18 +6353,12 @@ async def promote_npc_to_global(chat_id: str, npc_id: str):
         # If not in database, check metadata
         if not npc_data:
             metadata = chat.get('metadata', {}) or {}
-            localnpcs = metadata.get('localnpcs', {})
+            localnpcs = metadata.get('localnpcs', {}) or {}
+
             if npc_id in localnpcs:
                 metadata_npc = localnpcs[npc_id]
-                npc_data = {
-                    "entityid": npc_id,
-                    "entity_id": npc_id,
-                    "name": metadata_npc.get("name", "Unknown"),
-                    "data": metadata_npc.get("data", {}),
-                    "is_active": metadata_npc.get("is_active", True),
-                    "promoted": metadata_npc.get("promoted", False)
-                }
-                print(f"[NPC_PROMOTE] NPC {npc_id} found in metadata only, proceeding with promotion")
+                npc_data = {...}  # build from localnpcs
+                print(f"[NPC_PROMOTE] NPC {npc_id} found in metadata, proceeding with promotion")
         
         if not npc_data:
             return {"success": False, "error": "NPC not found in database or metadata"}
@@ -6314,21 +6405,20 @@ async def promote_npc_to_global(chat_id: str, npc_id: str):
         # 7. Update chat - remove NPC from metadata and add global character to activeCharacters
         metadata = chat.get('metadata', {}) or {}
         localnpcs = metadata.get('localnpcs', {}) or {}
+
         if npc_id in localnpcs:
             del localnpcs[npc_id]
-        
+            metadata['localnpcs'] = localnpcs
+
         # 8. Update activeCharacters to use global character filename
         active_chars = chat.get('activeCharacters', [])
         if npc_id in active_chars:
             active_chars.remove(npc_id)
         if filename not in active_chars:
             active_chars.append(filename)
-        
+
         # 9. Mark NPC as promoted in database (if it exists there)
         db_set_npc_active(chat_id, npc_id, False)  # Deactivate in DB if exists
-        
-        # 10. Save updated chat with NPC removed from metadata
-        metadata['localnpcs'] = localnpcs
         chat['metadata'] = metadata
         chat['activeCharacters'] = active_chars
         db_save_chat(chat_id, chat)
@@ -6381,18 +6471,17 @@ async def delete_npc(chat_id: str, npc_id: str):
             npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id
             for npc in db_npcs
         )
-        
+
         metadata = chat.get("metadata", {}) or {}
         localnpcs = metadata.get("localnpcs", {}) or {}
         npc_in_metadata = npc_id in localnpcs
-        
+
         if not npc_in_db and not npc_in_metadata:
             return JSONResponse(
                 {"success": False, "error": "NPC not found in database or metadata"},
                 status_code=404
             )
-        
-        npc_name = "Unknown"
+
         if npc_in_metadata:
             npc_name = localnpcs[npc_id].get("name", "Unknown")
         elif npc_in_db:
@@ -6471,8 +6560,9 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
             return {"success": False, "error": "Chat not found"}
         
         metadata = chat.get('metadata', {}) or {}
+        # Check metadata for NPC
         localnpcs = metadata.get('localnpcs', {}) or {}
-        
+
         # Check database first (authoritative source)
         db_npcs = db_get_chat_npcs(chat_id)
         db_npc = None
@@ -6480,14 +6570,14 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
             if npc.get('entityid') == npc_id or npc.get('entity_id') == npc_id:
                 db_npc = npc
                 break
-        
+
         # Check metadata as fallback
-        metadata_npc = localnpcs.get(npc_id)
-        
+        metadata_npc = localnpcs.get(npc_id) if npc_id in localnpcs else None
+
         # NPC must exist in at least one location
         if not db_npc and not metadata_npc:
             return {"success": False, "error": f"NPC '{npc_id}' not found in database or metadata"}
-        
+
         # Get current active state (prefer database)
         if db_npc:
             current_active = db_npc.get('isactive', db_npc.get('is_active', True))
@@ -6495,16 +6585,17 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
         else:
             current_active = metadata_npc.get('is_active', True)
             npc_name = metadata_npc.get('name', 'Unknown')
-        
+
         # Toggle active state
         new_active = not current_active
-        
+
         # Update NPC in database (authoritative)
         db_set_npc_active(chat_id, npc_id, new_active)
-        
+
         # Update NPC in metadata (for compatibility)
         if npc_id in localnpcs:
             localnpcs[npc_id]['is_active'] = new_active
+            metadata['localnpcs'] = localnpcs
         
         # Update activeCharacters array
         active_chars = chat.get('activeCharacters', [])

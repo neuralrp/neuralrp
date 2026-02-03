@@ -1286,6 +1286,50 @@
                                         class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs h-24 outline-none focus:ring-1 focus:ring-blue-500"
                                         placeholder="Describe your character..."></textarea>
                                 </div>
+
+                                <!-- User Snapshot Settings -->
+                                <div class="space-y-3 border-t border-slate-700 pt-3 mt-3">
+                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Include User in Snapshots</label>
+                                    <div class="flex items-center gap-3">
+                                        <input type="checkbox" x-model="settings.include_user_in_snapshots"
+                                            class="w-4 h-4 text-blue-600 bg-slate-900 border-slate-700 rounded focus:ring-blue-500">
+                                        <span class="text-[9px] text-slate-500">Show user in generated scene images</span>
+                                    </div>
+                                    
+                                    <template x-if="settings.include_user_in_snapshots">
+                                        <div class="space-y-3 pl-4 border-l-2 border-slate-700">
+                                            <div class="space-y-1">
+                                                <label class="text-[10px] text-slate-450 uppercase font-bold">Your Gender</label>
+                                                <div class="flex gap-2">
+                                                    <button @click="settings.user_gender = 'female'"
+                                                        :class="settings.user_gender === 'female' ? 'bg-pink-600 text-white' : 'bg-slate-800 text-slate-400'"
+                                                        class="px-3 py-1 rounded text-xs font-medium transition-colors">
+                                                        Female
+                                                    </button>
+                                                    <button @click="settings.user_gender = 'male'"
+                                                        :class="settings.user_gender === 'male' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400'"
+                                                        class="px-3 py-1 rounded text-xs font-medium transition-colors">
+                                                        Male
+                                                    </button>
+                                                    <button @click="settings.user_gender = 'other'"
+                                                        :class="settings.user_gender === 'other' ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-400'"
+                                                        class="px-3 py-1 rounded text-xs font-medium transition-colors">
+                                                        Other
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            
+                                            <div class="space-y-1">
+                                                <label class="text-[10px] text-slate-450 uppercase font-bold">Your Appearance (Danbooru Tags)</label>
+                                                <input x-model="settings.user_danbooru_tag"
+                                                    class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500"
+                                                    placeholder="e.g., 1boy, brown hair, blue eyes, casual clothes">
+                                                <p class="text-[8px] text-slate-500">Comma-separated tags for image generation</p>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+
                                 <div class="space-y-1">
                                     <label class="text-[10px] text-slate-450 uppercase font-bold">Reinforce Character
                                         Info Every X Turns</label>
@@ -2096,7 +2140,7 @@
                             title="Generate Scene Snapshot">
                             <i class="fa-solid fa-camera"></i>
                             <!-- SD Unavailable Indicator (Red Light) -->
-                            <div x-show="!sdAvailable"
+                            <div x-show="!canGenerateImages()"
                                 class="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full shadow-lg shadow-red-900/40 animate-pulse">
                             </div>
                         </button>
@@ -3085,6 +3129,9 @@
                 system_prompt: 'Write a highly detailed, creative, and immersive response. Stay in character at all times.',
                 user_persona: '',
                 userName: '',
+                user_gender: '',
+                user_danbooru_tag: '',
+                include_user_in_snapshots: false,
                 reinforce_freq: 5,
                 world_info_reinforce_freq: 3,
                 world_info_enabled: true,
@@ -3115,7 +3162,6 @@
             },
 
             // Snapshot feature (v1.9.0)
-            sdAvailable: true,
             isGeneratingSnapshot: false,
             snapshotCharacterRef: null,  // "filename.json" or "npc_xxx"
 
@@ -3331,13 +3377,15 @@
                 await this.fetchSearchFilters()
                 await this.checkAllServices()
 
-                // Check SD availability for snapshot feature
-                await this.checkSnapshotStatus()
-
                 // Use Alpine's $watch magic
                 this.$watch('settings', () => this.saveSettings())
                 this.$watch('sdParams', () => this.saveSettings())
                 
+                // Watch snapshot settings and sync to chat metadata
+                this.$watch('settings.include_user_in_snapshots', () => this.syncSnapshotSettings())
+                this.$watch('settings.user_gender', () => this.syncSnapshotSettings())
+                this.$watch('settings.user_danbooru_tag', () => this.syncSnapshotSettings())
+                 
                  // Load tags when sidebar changes to world-info or favorites
                    this.$watch('showSidebar', async (value) => {
                        if (value === 'world-info' && !this.allWorldTags.length) {
@@ -3456,6 +3504,33 @@
             saveSettings() {
                 const toSave = { settings: this.settings, sdParams: this.sdParams };
                 localStorage.setItem('ai_chat_settings', JSON.stringify(toSave));
+            },
+            
+            async syncSnapshotSettings() {
+                // Only sync if we have a chat loaded
+                if (!this.currentChatId) {
+                    console.log('[SNAPSHOT] Cannot sync - no chat loaded');
+                    return;
+                }
+                
+                console.log('[SNAPSHOT] Syncing settings to chat:', this.currentChatId);
+                console.log('[SNAPSHOT] Settings to sync:', {
+                    include_user_in_snapshots: this.settings.include_user_in_snapshots,
+                    user_gender: this.settings.user_gender,
+                    user_danbooru_tag: this.settings.user_danbooru_tag
+                });
+                
+                try {
+                    const response = await axios.post(`/api/chats/${this.currentChatId}/snapshot-settings`, {
+                        include_user_in_snapshots: this.settings.include_user_in_snapshots || false,
+                        user_gender: this.settings.user_gender || '',
+                        user_danbooru_tag: this.settings.user_danbooru_tag || ''
+                    });
+                    console.log('[SNAPSHOT] Settings synced successfully:', response.data);
+                } catch (e) {
+                    console.error('[SNAPSHOT] Failed to sync settings:', e);
+                    console.error('[SNAPSHOT] Error details:', e.response?.data || e.message);
+                }
             },
 
             // ========== API CALLS ==========
@@ -4061,10 +4136,27 @@
                     this.summary = d.summary || '';
                     this.activeWI = d.activeWI || null;
                     this.settings = { ...this.settings, ...(d.settings || {}) };
+                    
+                    // Load snapshot settings from metadata if available
+                    const snapshotSettings = d.metadata?.snapshot_settings || {};
+                    if (snapshotSettings.include_user_in_snapshots !== undefined) {
+                        this.settings.include_user_in_snapshots = snapshotSettings.include_user_in_snapshots;
+                    }
+                    if (snapshotSettings.user_gender !== undefined) {
+                        this.settings.user_gender = snapshotSettings.user_gender;
+                    }
+                    if (snapshotSettings.user_danbooru_tag !== undefined) {
+                        this.settings.user_danbooru_tag = snapshotSettings.user_danbooru_tag;
+                    }
+                    
                     this.currentChatName = name;
                     this.currentChatId = d.id || name;
 
                     localStorage.setItem('currentChatId', this.currentChatId);
+                    
+                    // Sync snapshot settings to server to ensure consistency
+                    // This handles cases where the watcher might not have triggered
+                    await this.syncSnapshotSettings();
 
                     // Load NPCs BEFORE restoring activeCharacters
                     await this.loadChatNPCs(this.currentChatId);
@@ -4874,7 +4966,12 @@
                 this.isLoading = true;
                 this.showImagePanel = false;
                 try {
-                    const res = await axios.post('/api/generate-image', this.sdParams);
+                    // Include chat_id to support NPC name replacement in manual generation
+                    const params = {
+                        ...this.sdParams,
+                        chat_id: this.currentChatId || null
+                    };
+                    const res = await axios.post('/api/generate-image', params);
 
                     const imageMsg = {
                         role: 'assistant',
@@ -6370,24 +6467,13 @@
             // SNAPSHOT FUNCTIONS (v1.9.0)
             // ============================================================================
 
-            async checkSnapshotStatus() {
-                try {
-                    const response = await axios.get('/api/snapshot/status');
-                    this.sdAvailable = response.data.available;
-                    console.log('[SNAPSHOT] SD available:', this.sdAvailable);
-                } catch (e) {
-                    console.error('[SNAPSHOT] Status check failed:', e);
-                    this.sdAvailable = false;
-                }
-            },
-
             async generateSnapshot() {
                 if (!this.currentChatId) {
                     alert('Please start a chat first');
                     return;
                 }
 
-                if (!this.sdAvailable) {
+                if (!this.canGenerateImages()) {
                     alert('Stable Diffusion is not available. Please check SD settings.');
                     return;
                 }
@@ -6504,7 +6590,7 @@
                             msg.favorite_id = response.data.favorite_id;
                             msg.is_favorite = true;
                             console.log('[MANUAL] Added favorite:', response.data.favorite_id);
-                            console.log('[MANUAL] Learned tags:', response.data.tags_learned);
+                            console.log('[MANUAL] Saved tags:', response.data.tags_saved);
                         } else {
                             alert('Failed to add favorite: ' + response.data.error);
                         }
@@ -6554,7 +6640,7 @@
                             snapshot.favorite_id = response.data.favorite_id;
                             snapshot.is_favorite = true;
                             console.log('[SNAPSHOT] Added favorite:', response.data.favorite_id);
-                            console.log('[SNAPSHOT] Learned tags:', response.data.tags_learned);
+                            console.log('[SNAPSHOT] Saved tags:', response.data.tags_saved);
                         } else {
                             alert('Failed to add favorite: ' + response.data.error);
                         }

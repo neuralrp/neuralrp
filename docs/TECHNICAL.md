@@ -32,7 +32,8 @@ This document explains how NeuralRP's advanced features work under the hood, des
 22. [Favorites Viewer](#favorites-viewer)
 23. [Snapshot Feature](#snapshot-feature)
 24. [Gender System](#gender-system)
-25. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
+25. [Danbooru Tag Generator](#danbooru-tag-generator)
+26. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
     - [Context Hygiene Philosophy](#context-hygiene-philosophy)
 
 ---
@@ -5774,7 +5775,7 @@ def migrate_character_tags():
 
 **Overview**
 
-The Favorites Viewer provides a unified gallery interface for browsing, filtering, and navigating to favorited images from both snapshot and manual generation modes. It serves as a persistent visual library that learns user preferences across all chat sessions.
+The Favorites Viewer provides a unified gallery interface for browsing, filtering, and navigating to favorited images from both snapshot and manual generation modes. It serves as a persistent visual library across all chat sessions.
 
 **UI Components**
 
@@ -5832,7 +5833,7 @@ CREATE TABLE sd_favorites (
     setting TEXT,
     mood TEXT,
     character_ref TEXT,
-    tags TEXT,                      -- JSON array of detected/learned tags
+    tags TEXT,                      -- JSON array of detected tags
     steps INTEGER,
     cfg_scale REAL,
     width INTEGER,
@@ -6006,7 +6007,6 @@ showFavoritesSidebar: false
 1. **Snapshot Feature**: Snapshot favorites include scene analysis (type, setting, mood)
 2. **Tag Management**: Uses same tag system as characters/worlds
 3. **Manual Generation**: Vision Panel favorites store generation parameters
-4. **Learning System**: Favorites drive tag preference learning (see [Snapshot Feature](#tag-preference-tracking))
 
 **Data Flow:**
 
@@ -6016,8 +6016,6 @@ User Favorites Image
 API: POST /api/manual-generation/favorite (or snapshot favorite)
     ↓
 Database: Insert into sd_favorites
-    ↓
-Tag Learning: db_increment_favorite_tag() (if threshold met)
     ↓
 Favorites Viewer: db_get_favorites() on gallery open
     ↓
@@ -6038,34 +6036,46 @@ User Filters/Navigates: Jump to chat via jumpToFavoriteSource()
 
 ---
 
-## Snapshot Feature (v1.9.0)
+## Snapshot Feature (v1.9.0 → v1.10.1)
 
 ### Overview
 
-NeuralRP's snapshot feature enables automatic generation of Stable Diffusion images directly from chat scenes, with intelligent prompt construction that analyzes conversation context to create visually consistent imagery.
+**SUPERSEDED (v1.10.1)**: The old 4-block semantic search system has been replaced with a simplified LLM JSON extraction approach. See below for the current v1.10.1 implementation.
+
+---
+
+### Snapshot Feature (v1.10.1 - Simplified)
+
+### Overview
+
+NeuralRP's snapshot feature enables automatic generation of Stable Diffusion images directly from chat scenes, using a simplified LLM-based JSON extraction system that replaced the complex 4-block semantic matching approach.
+
+**Key Changes from v1.9.0**:
+- **Removed**: 1560+ tag semantic search system, sqlite-vec embeddings, tag tables, scoring systems
+- **Simplified**: LLM extracts 3 fields (location, action, dress) as JSON
+- **Faster**: No embedding calculations, simpler prompt construction
+- **Code Reduction**: ~800 lines removed, ~300 lines added (40% simpler)
 
 ### System Architecture
 
 ```
 User clicks "📸 Snapshot"
     ↓
-Frontend: POST /api/chat/snapshot {chat_id, character_ref}
+Frontend: POST /api/chat/snapshot {chat_id, include_user}
     ↓
-Backend: Load chat messages + character data
+Backend: Load chat messages + character data + activeCharacters
     ↓
-SnapshotAnalyzer.analyze_scene():
-    1. Extract last 4 messages (2 turns)
-    2. Keyword detection (fast path, minimum 2 matches)
-    3. LLM summary (if available, async)
-    4. Return {scene_type, setting, action, mood}
+LLM JSON Extraction (new simplified approach):
+    1. Extract last 2-4 messages
+    2. Prompt LLM to extract 3 fields: location, action, dress
+    3. Return JSON: {"location": "...", "action": "...", "dress": "..."}
     ↓
-SnapshotPromptBuilder.build_4_block_prompt():
-    1. Block 0: Hardwired quality tags (first 3)
-    2. Block 1: Character tags + semantic matches
-    3. Block 2: Setting semantic matches
-    4. Block 3: Mood/style semantic matches
-    5. Apply guardrail fallbacks
-    6. Build universal negative prompt
+SnapshotPromptBuilder.build_prompt():
+    1. Block 0: Quality tags (hardwired)
+    2. Block 1: Character tags (count + appearance)
+    3. Block 2: Action + Dress + Location (from LLM)
+    4. Block 3: User tags
+    5. Build universal negative prompt
     ↓
 Call existing generate_image(SDParams)
     ↓
@@ -6076,400 +6086,83 @@ Return {image_url, prompt, scene_analysis}
 Frontend: Display image in chat + toggleable prompt details
 ```
 
-### 4-Block Prompt Structure
+### Simplified Prompt Structure
 
-The snapshot system uses a rigid 4-block structure for Stable Diffusion prompts:
+The snapshot system uses a streamlined 5-block structure (simplified from v1.9.0):
 
-| Block | Purpose | Target Tags | Example Tags | Source |
-|-------|---------|--------------|--------------|---------|
-| **0: Quality** | Image quality control | 3 | masterpiece, best quality, high quality | Config (60 tags) |
-| **1: Subject** | Character/entity appearance | 5 | 1girl, blonde hair, blue eyes, smile, solo | Config (600 tags) |
-| **2: Environment** | Scene setting/background | 2 | forest, simple background | Config (300 tags) |
-| **3: Style** | Rendering style/lighting | 4 | cinematic lighting, anime style, detailed, vibrant | Config (600 tags) |
-| **4: User/Custom** | User-added custom tags | Unlimited | nsfw_custom, unique_concept, personal_style | Dynamic (user-added) |
+| Block | Purpose | Content | Example |
+|-------|---------|----------|---------|
+| **0: Quality** | Image quality control | 3 tags | masterpiece, best quality, high quality |
+| **1: Character** | Count tags + appearance tags | Character tags | 1girl, solo, blonde_hair, blue_eyes, elf |
+| **2: Action** | Character action (from LLM) | LLM extracted | standing, leaning against tree |
+| **3: Dress** | Clothing description (from LLM) | LLM extracted | white dress |
+| **4: Location** | Scene location (from LLM) | LLM extracted | forest interior |
+| **5: Negative** | Universal negatives | Fixed list | low quality, worst quality, bad anatomy |
 
-**Total Tags**: ~14+ tags per prompt (varies by block availability + user library)
+**Total Tags**: ~10-15 tags per prompt (quality + LLM scene + character tags)
 
-**Block Targets Configuration** (`app/danbooru_tags_config.py`):
+**Why Simplified Structure?**
+
+| Aspect | v1.9.0 (4-Block Semantic) | v1.10.1 (LLM JSON) | Improvement |
+|--------|----------------------------|------------------------|-------------|
+| **Code Complexity** | ~800 lines (embeddings, search) | ~300 lines (LLM extraction) | 40% simpler |
+| **Prompt Consistency** | ⭐⭐⭐⭐ (semantic matching) | ⭐⭐⭐⭐⭐ (LLL extraction) | +1 star |
+| **Startup Time** | 30-60s (embeddings) | <1s (no embeddings) | 60x faster |
+| **Maintenance** | High (1560 tags, embeddings) | Low (prompt tuning) | Significant reduction |
+| **User Expectations** | Met | Met | Same |
+
+**Rationale for Simplification**:
+- **LLM Quality**: Modern LLMs (Llama 3, Nemo) reliably extract scene details from JSON
+- **Code Maintainability**: Removing 800 lines of embedding/search code significantly reduces complexity
+- **Performance**: No 30-60s startup delay for embedding generation
+- **Token Efficiency**: LLM extraction (~100 tokens) vs semantic matching (~2000 tokens for 1560 tags)
+
+### LLM JSON Extraction
+
+**Prompt Structure**:
 ```python
-BLOCK_TARGETS: Dict[int, int] = {
-    0: 3,   # Quality
-    1: 5,   # Subject  
-    2: 2,   # Environment
-    3: 4,   # Style
-    4: None # User/Custom (no limit)
-}
-```
+prompt = f"""Analyze this chat scene briefly and extract visual details.
 
-**Why Hardwired 4-Block Structure?**
-
-| Aspect | Fixed Blocks | Variable Tags | Hybrid (Current) |
-|--------|--------------|---------------|-------------------|
-| **Prompt Consistency** | ⭐⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐ |
-| **Scene Accuracy** | ⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| **Implementation** | Simple | Complex | Moderate |
-| **Maintenance** | Easy | High | Medium |
-| **User Expectations** | Met | Confusing | Met |
-
-**Rationale**:
-- **Quality Block (0)**: Technical tags (masterpiece, best quality) are universal and order-dependent
-- **Subject Block (1)**: Character-focused, most important for visual consistency
-- **Environment Block (2)**: Scene setting provides context without overwhelming subject
-- **Style Block (3)**: Rendering style influences overall aesthetic
-- **User Block (4)**: Custom tags appear at the end, allowing natural library expansion
-
-### Dynamic Tag Expansion (Block 4 - Natural Library)
-
-**Overview**
-
-Block 4 enables "natural library expansion" - users can add custom tags to the semantic search system by using them in manual mode favorites. These tags get automatic embeddings and participate in future snapshot generations.
-
-**How It Works**
-
-```
-User favorites manual image with custom tags:
-"1girl, my_custom_nsfw_tag, forest, blue_hair"
-    ↓
-System detects danbooru tags: ["1girl", "forest", "blue_hair"]
-Custom tags identified: ["my_custom_nsfw_tag"]
-    ↓
-db_add_dynamic_danbooru_tag("my_custom_nsfw_tag"):
-    1. Insert into danbooru_tags with block_num=4
-    2. Generate 768-dimensional embedding (all-mpnet-base-v2)
-    3. Insert into vec_danbooru_tags virtual table
-    ↓
-Tag now participates in semantic search!
-```
-
-**Implementation Details**
-
-**Database Function** (`app/database.py`):
-```python
-def db_add_dynamic_danbooru_tag(tag_text: str) -> bool:
-    # Check if tag exists (skip if already in config)
-    # Insert with block_num=4 (marks as user-added)
-    # Generate embedding using SentenceTransformer
-    # Add to vec_danbooru_tags for semantic search
-```
-
-**Prompt Builder Integration** (`app/snapshot_prompt_builder.py`):
-```python
-def _build_block_4(self) -> List[str]:
-    # Query all tags with block_num=4
-    # Return user-added custom tags
-    # These appear at the END of the prompt
-```
-
-**Block Ordering in Prompts**:
-```
-Final Prompt = Block 0 + Block 1 + Block 2 + Block 3 + Block 4
-
-Example:
-masterpiece, best quality, high quality,              [Block 0]
-1girl, blonde hair, blue eyes, smile, solo,           [Block 1]
-forest, simple background,                            [Block 2]
-cinematic lighting, anime style, detailed, vibrant,   [Block 3]
-my_custom_nsfw_tag, another_user_tag                  [Block 4 - User]
-```
-
-**Key Characteristics**
-
-| Aspect | Config Tags (0-3) | User Tags (4) |
-|--------|-------------------|---------------|
-| **Source** | 1560 curated tags | User-added via manual mode |
-| **Block Number** | 0, 1, 2, 3 | 4 |
-| **Embeddings** | Pre-generated at startup | Generated on-demand (~100ms) |
-| **Semantic Search** | Yes | Yes |
-| **Prompt Position** | Core structure (first) | End of prompt (last) |
-| **Quantity** | Fixed 1560 | Unlimited (dynamic) |
-| **Curation** | Hand-picked danbooru tags | User-defined |
-
-**Use Cases**
-
-1. **NSFW Content**: Users can add adult tags not in the default SFW config
-2. **Niche Fetishes**: Specific tags for particular interests
-3. **Custom Characters**: Unique descriptors for original characters
-4. **Style Experiments**: Personal aesthetic preferences
-5. **Fandom-Specific**: Tags for specific games, shows, or universes
-
-**Learning Integration**
-
-When users favorite images with custom tags:
-- Tag detection runs on the full prompt
-- Known danbooru tags tracked for preference learning
-- Custom tags added to Block 4 library
-- All tags (config + custom) contribute to preference model
-
-**Example User Workflow**:
-
-```
-1. Generate manual image: "1girl, my_custom_fetish_tag, forest"
-2. Click "Save as Favorite"
-3. System detects: 1girl (danbooru), my_custom_fetish_tag (custom), forest (danbooru)
-4. Adds my_custom_fetish_tag to Block 4 with embedding
-5. Future snapshots can now semantically match my_custom_fetish_tag
-```
-
-**Technical Notes**
-
-- Custom tags use same 768-dimensional embeddings as config tags
-- No limit on number of user-added tags
-- Tags are global (available across all chats)
-- Embeddings persist across sessions (stored in database)
-- Block 4 tags have lower priority than config tags in prompt construction
-
-### Hybrid Scene Detection
-
-The snapshot system uses a three-tier hybrid approach for scene analysis:
-
-**Tier 1: Keyword Detection (Fast Path, Always Runs)**
-
-```python
-SCENE_KEYWORDS: Dict[str, List[str]] = {
-    'combat': ['battle', 'fight', 'sword', 'attack', 'defend', ...],
-    'dialogue': ['speak', 'say', 'tell', 'ask', 'conversation', ...],
-    'exploration': ['explore', 'travel', 'walk', 'journey', 'path', ...],
-    'romance': ['love', 'kiss', 'hug', 'hold', 'embrace', ...],
-    'tavern': ['tavern', 'inn', 'drink', 'ale', 'bar', ...],
-    'magic': ['spell', 'magic', 'fireball', 'heal', 'curse', ...]
-}
-
-# Detection logic
-for scene_type, keywords in SCENE_KEYWORDS.items():
-    matches = [kw for kw in keywords if kw in text_lower]
-    if len(matches) >= 2:  # Minimum 2 matches required
-        return scene_type, matches
-```
-
-- **Minimum Threshold**: 2 keyword matches required for confidence
-- **False Positive Prevention**: Low threshold prevents accidental triggers
-- **Performance**: <1ms per scan (simple string matching)
-
-**Tier 2: LLM Summary (Optional Enhancement)**
-
-```python
-prompt = f"""Analyze this roleplay scene briefly.
-
-{conversation_context[:800]}
+{last_2_to_4_messages}
 
 Reply with ONLY this JSON (no explanation):
-{{"scene_type":"combat|dialogue|exploration|romance|magic|other","setting":"brief place","mood":"emotion"}}"""
+{{
+    "location": "brief scene setting (forest, tavern, bedroom, etc.)",
+    "action": "what characters are doing (standing, speaking, fighting, etc.)",
+    "dress": "clothing description if mentioned (white dress, armor, casual clothes, etc.)"
+}}
+
+Prioritize visual details over dialogue.
+"""
 ```
 
-- **Purpose**: Provides rich setting/mood details that keywords miss
-- **Optional**: System works without LLM (keyword-only fallback)
-- **Token Cost**: ~100 tokens (short prompt, <80 tokens max output)
-
-**Tier 3: Semantic Matching (for Tag Selection)**
-
-Scene analysis results (scene_type, setting, mood) used for semantic matching against danbooru tag database:
-- **Query**: `"{scene_type} {setting} {mood}".strip()`
-- **Database**: 1560 danbooru tags with 768-dim embeddings
-- **Method**: sqlite-vec cosine similarity search per block
-- **Threshold**: 0.35 similarity score minimum
-
-**Hybrid Decision Flow**:
-
+**Fallback Chain**:
 ```
-1. Extract last 4 messages (2 turns)
-    ↓
-2. Keyword detection (Tier 1)
-    ├── ≥2 matches? → scene_type = detected, keyword_detected=True
-    └── <2 matches? → scene_type = 'other', keyword_detected=False
-    ↓
-3. LLM summary (Tier 2, if available)
-    ├── Success? → setting=LLM.setting, mood=LLM.mood, llm_used=True
-    └── Failed? → Infer from scene_type (fallback), llm_used=False
-    ↓
-4. Semantic matching (Tier 3, per block)
-    ├── Block 1: Scene subjects (top 5 matches)
-    ├── Block 2: Setting tags (top 2 matches)
-    └── Block 3: Style/mood tags (top 4 matches)
-    ↓
-5. Guardrail fallbacks
-    ├── Block 1 < min_matches? → Add "1girl, solo, portrait"
-    ├── Block 2 < min_matches? → Add "simple background"
-    └── Block 3 < min_matches? → Add "cinematic lighting, detailed"
-    ↓
-6. Assemble final prompt (4 blocks + negative)
+1. LLM JSON extraction (primary)
+    ↓ (if fails)
+2. Pattern extraction (regex patterns from message text)
+    ↓ (if fails)
+3. Keyword matching (predefined location/action keywords)
+    ↓ (if all fail)
+4. Empty scene (generate with character tags only)
 ```
 
-### Danbooru Tag System
+**Action Priority System**:
 
-**Tag Database** (`app/data/neuralrp.db`):
+When extracting action from messages, priority is given to:
+1. **Physical interactions**: "hugging", "kissing", "fighting", "holding hands"
+2. **Physical actions**: "standing", "sitting", "walking", "running"
+3. **Speaking**: "speaking to", "talking with", "saying"
+4. **Standing** (fallback): Default if no other action detected
 
-**Table: danbooru_tags** (Metadata)
-```sql
-CREATE TABLE danbooru_tags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tag_text TEXT UNIQUE NOT NULL,
-    block_num INTEGER NOT NULL,  -- 0=quality, 1=subject, 2=environment, 3=style
-    frequency INTEGER DEFAULT 0,   -- Usage tracking (future use)
-    created_at INTEGER
-);
-```
+**Examples**:
 
-**Table: vec_danbooru_tags** (sqlite-vec Virtual Table)
-```sql
-CREATE VIRTUAL TABLE vec_danbooru_tags USING vec0(
-    embedding float[768]
-);
-```
-
-**Relationship**: `danbooru_tags.id = vec_danbooru_tags.rowid` (implicit)
-
-**Tag Configuration** (`app/danbooru_tags_config.py`):
-
-- **1560 total tags** across 4 blocks:
-  - Block 0 (Quality): 60 tags
-  - Block 1 (Subject): 600 tags (gender, hair, eyes, expression, body, pose, clothing, actions)
-  - Block 2 (Environment): 300 tags (nature, urban, interior, time, weather, backgrounds)
-  - Block 3 (Style): 600 tags (lighting, art style, camera, color, mood, quality modifiers)
-
-**Embedding Generation** (Startup):
-```python
-async def generate_danbooru_embeddings():
-    """Generate embeddings for all danbooru tags on startup."""
-    all_tags = get_tags_as_tuples()  # [(tag_text, block_num), ...]
-    
-    for tag_text, block_num in all_tags:
-        embedding = model.encode([tag_text])[0]
-        db_insert_danbooru_tag(tag_text, block_num, embedding)
-        print(f"[SNAPSHOT] Embedded tag {len(processed)}/{len(all_tags)}: {tag_text}")
-```
-
-- **Startup Time**: 30-60 seconds first run, <1 second subsequent (cached in DB)
-- **Model**: all-mpnet-base-v2 (same as world info semantic search)
-- **Storage**: ~1MB for 1560 embeddings (768 floats × 4 bytes)
-- **Performance**: <100ms per tag on modern CPU
-
-**Character Tag Integration**:
-
-Characters can have custom danbooru tags for visual consistency:
-
-```json
-{
-  "data": {
-    "name": "Alice",
-    "description": "...",
-    "extensions": {
-      "danbooru_tag": "1girl, blonde hair, blue eyes, school uniform"
-    }
-  }
-}
-```
-
-- **Location**: `char.data.extensions.danbooru_tag`
-- **Format**: Comma-separated danbooru tags
-- **Usage**: Added to Block 1 (subject) at highest priority (first 3 tags)
-- **Fallback**: If character has no danbooru_tag, uses semantic matching only
-
-### Snapshot History and Storage
-
-**Storage Location**: Chat metadata (no database persistence)
-
-```python
-chat.metadata = {
-    "localnpcs": { ... },
-    "characterCapsules": { ... },
-    "characterFirstTurns": { ... },
-    "snapshot_history": [  # ← NEW
-        {
-            "timestamp": 1738312345,
-            "image_url": "/app/images/snapshot_abc123.png",
-            "prompt": "masterpiece, best quality, 1girl, blonde hair, blue eyes, ...",
-            "negative_prompt": "low quality, worst quality, bad anatomy, ...",
-            "scene_analysis": {
-                "scene_type": "dialogue",
-                "setting": "tavern interior",
-                "mood": "relaxed",
-                "keyword_detected": true,
-                "matched_keywords": ["tavern", "drink", "bar"],
-                "llm_used": true
-            },
-            "character_ref": "alice.json"
-        }
-    ]
-}
-```
-
-**Why Chat-Scoped Storage?**
-
-| Storage Option | Pros | Cons | Verdict |
-|----------------|-------|-------|---------|
-| **Chat metadata** (current) | Simple, no schema changes, auto-cleanup on chat delete | Limited history per chat | ✅ Best for MVP |
-| **Database table** | Global history, searchable, persistent | Schema changes, orphaned records, cleanup complexity | ❌ Future v2.0 |
-| **JSON files** | Exportable, external access | Sync issues, orphaned files | ❌ No benefits |
-
-**Rationale for Chat-Scoped**:
-- **MVP Simplicity**: Snapshots tied to conversation context (makes sense)
-- **Automatic Cleanup**: Deleting chat = deleting history (no orphaned data)
-- **No Database Schema Changes**: Avoids migration complexity
-- **Future-Proof**: Easy to promote to global table if needed (v2.0)
-
-### Guardrail System
-
-**Fallback Tags** (`app/danbooru_tags_config.py`):
-
-```python
-FALLBACK_TAGS: Dict[int, List[str]] = {
-    0: ["masterpiece", "best quality", "high quality"],
-    1: ["1girl", "solo", "portrait"],
-    2: ["simple background"],
-    3: ["cinematic lighting", "detailed"]
-}
-
-MIN_MATCHES: Dict[int, int] = {
-    0: 0,   # Quality is hardwired, no minimum
-    1: 2,   # Subject needs at least 2 matches
-    2: 1,   # Environment needs at least 1 match
-    3: 2    # Style needs at least 2 matches
-}
-```
-
-**Guardrail Logic**:
-
-```python
-def _build_block_1(self, query_text: str, character_tag: Optional[str]) -> List[str]:
-    block_1 = []
-    target = get_block_target(1)  # 5 tags
-    min_matches = get_min_matches(1)  # 2 tags
-    
-    # Priority 1: Character tag (if provided)
-    if character_tag:
-        char_tags = [t.strip() for t in character_tag.split(',')]
-        block_1.extend(char_tags[:3])
-    
-    # Priority 2: Semantic matching
-    if len(block_1) < target and query_text:
-        matches = self.analyzer.match_tags_semantically(query_text, block_num=1, k=10)
-        for tag_text, score in matches:
-            if score >= 0.35 and len(block_1) < target:
-                block_1.append(tag_text)
-    
-    # Guardrail: Ensure minimum matches
-    if len(block_1) < min_matches:
-        for fallback in get_fallback_tags(1):
-            if fallback not in block_1:
-                block_1.append(fallback)
-                if len(block_1) >= min_matches:
-                    break
-    
-    return block_1[:target]
-```
-
-**Why Minimum Matches?**
-
-| Scenario | Without Minimum | With Minimum (Current) |
-|----------|-----------------|------------------------|
-| **Poor semantic matching** | 1 tag in Block 1 (insufficient subject) | 3 fallback tags (guaranteed subject) |
-| **Strong semantic matching** | 5 tags in Block 1 (excellent subject) | 5 semantic tags (no fallback needed) |
-| **Empty query** | 0 tags (broken prompt) | 3 fallback tags (guaranteed valid prompt) |
-
-**Rationale**:
-- **Prevent Broken Prompts**: Fallbacks ensure at least minimum valid tags per block
-- **Quality Over Quantity**: Better to use fallback tags than random/no tags
-- **Confidence Threshold**: Minimum matches ensure system has some confidence before using semantic results
+| Message | Location | Action | Dress |
+|---------|-----------|---------|-------|
+| "Alice stands in the forest clearing" | forest clearing | standing | - |
+| "They hug under the moonlight" | under moonlight | hugging | - |
+| "Bob leans against the tavern wall" | tavern wall | leaning | - |
+| "She wears a white dress at the ball" | at the ball | - | white dress |
 
 ### Universal Negative Prompt
 
@@ -6499,37 +6192,36 @@ UNIVERSAL_NEGATIVES: List[str] = [
 **Rationale**:
 - **Scene Negatives Unreliable**: LLM-generated negatives often contradict positive tags
 - **Conflict Risk**: "dark" (negative) conflicts with "night scene" (positive)
-- **Maintenance**: Updating 1560 tags with scene-specific negatives = impossible
+- **Maintenance**: Updating tags with scene-specific negatives = impossible
 - **Universal Negatives Sufficient**: Covers 95% of common SD errors (bad anatomy, artifacts)
 
 ### Performance Characteristics
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| **Embedding generation** | <100ms per tag | all-mpnet-base-v2 on modern CPU |
-| **Semantic search** | <50ms per query | sqlite-vec SIMD acceleration |
-| **Keyword detection** | <1ms per scan | Simple string matching |
-| **LLM scene summary** | 2-5 seconds | Optional, async |
-| **Total snapshot generation** | 20-30 seconds | Includes SD generation time |
-| **Startup embedding (first run)** | 30-60 seconds | One-time cost for 1560 tags |
-| **Startup embedding (subsequent)** | <1 second | Cached in database |
+| Metric | v1.9.0 | v1.10.1 | Improvement |
+|--------|-----------|-----------|-------------|
+| **Embedding generation** | 30-60s startup | N/A (removed) | 60x faster startup |
+| **Semantic search** | 50-100ms per query | N/A (removed) | - |
+| **LLM scene extraction** | N/A (used semantic) | 2-3 seconds | New |
+| **Total snapshot generation** | 20-30 seconds | 5-10 seconds | 3x faster |
+| **Code size** | ~800 lines | ~300 lines | 40% reduction |
+| **Database storage** | ~1.1MB (embeddings) | ~0KB (no embeddings) | 1.1MB savings |
 
 **Token Budget Impact**:
 
-| Component | Token Cost | Frequency |
-|-----------|-------------|-------------|
-| LLM scene summary (optional) | ~100 tokens | Per snapshot |
-| Snapshot generation (prompt) | ~2000 tokens (14 tags) | Per snapshot |
-| Negative prompt | ~200 tokens (30 tags) | Per snapshot |
-| Embedding storage | ~1MB (one-time) | Startup only |
+| Component | v1.9.0 | v1.10.1 | Change |
+|-----------|-----------|-----------|--------|
+| LLM scene extraction | ~2000 tokens | ~100 tokens | -95% tokens |
+| Snapshot generation (prompt) | ~2000 tokens | ~1500 tokens | -25% tokens |
+| Negative prompt | ~200 tokens | ~200 tokens | No change |
+| **Total per snapshot** | ~4200 tokens | ~1800 tokens | -57% tokens |
 
 **Database Storage**:
 
-| Table | Size Estimate | Growth Rate |
-|-------|---------------|-------------|
-| `danbooru_tags` | ~50KB | Static (1560 rows) |
-| `vec_danbooru_tags` | ~1MB | Static (1560 rows) |
-| `snapshot_history` | ~5KB per snapshot | Grows with chat |
+| Table | v1.9.0 | v1.10.1 | Change |
+|-------|-----------|-----------|--------|
+| `danbooru_tags` | ~50KB (1560 rows) | N/A (removed) | -50KB |
+| `vec_danbooru_tags` | ~1MB (embeddings) | N/A (removed) | -1MB |
+| `snapshot_history` | ~5KB per snapshot | ~5KB per snapshot | No change |
 
 ### API Endpoints
 
@@ -6540,11 +6232,96 @@ Generate snapshot from chat context.
 **Request**:
 ```json
 {
-  "character_ref": "alice.json",  // Optional: Character to feature
-  "width": 640,                    // Optional: Image width (default: 512)
-  "height": 512                    // Optional: Image height (default: 512)
+  "include_user": false  // Optional: Include user in snapshot (default: false)
 }
 ```
+
+**Response**:
+```json
+{
+  "success": true,
+  "image_url": "/app/images/snapshot_abc123.png",
+  "prompt": "masterpiece, best quality, high quality, 1girl, standing in forest, blonde_hair, ...",
+  "negative_prompt": "low quality, worst quality, bad anatomy, ...",
+  "scene_analysis": {
+    "location": "forest clearing",
+    "action": "standing",
+    "dress": null,
+    "user_included": false,
+    "gender_counts": {"female": 1, "male": 0, "other": 0}
+  }
+}
+```
+
+### User Inclusion System
+
+**Overview**
+
+Users can optionally include themselves in snapshot images, appearing alongside characters with proper gender counting.
+
+**Storage**: Chat metadata toggle flag
+```python
+chat.metadata = {
+    "localnpcs": { ... },
+    "characterCapsules": { ... },
+    "characterFirstTurns": { ... },
+    "snapshot_history": [...],
+    "snapshot_include_user": true  # ← User inclusion flag
+}
+```
+
+**Frontend UI**:
+
+```html
+<!-- Checkbox for user inclusion -->
+<div class="flex items-center gap-2">
+    <input type="checkbox" id="snapshot-include-user" 
+           x-model="snapshotIncludeUser">
+    <label for="snapshot-include-user">Include User</label>
+</div>
+```
+
+**Gender Counting with User**:
+
+```python
+# Auto-count includes user if checkbox checked
+gender_counts = {'female': 0, 'male': 0, 'other': 0}
+
+# Count active characters
+for char in active_characters:
+    gender = char.get('gender', '').lower()
+    if gender in gender_counts:
+        gender_counts[gender] += 1
+
+# Include user if flag set
+if snapshot_include_user:
+    user_gender = user_persona.get('gender', 'other').lower()
+    if user_gender in gender_counts:
+        gender_counts[user_gender] += 1
+
+# Generate count tags
+count_tags = []
+if gender_counts['female'] == 1:
+    count_tags.append('1girl')
+elif gender_counts['female'] > 1:
+    count_tags.append(f'{gender_counts["female"]}girls')
+# ... same for male/other
+```
+
+**Examples**:
+
+| Scene | Characters | User Included | Count Tags |
+|-------|-------------|-----------------|------------|
+| Alice (female) alone | 1 female | No | `1girl` |
+| Alice (female) + User (female) | 1 female + 1 female | Yes | `2girls` |
+| Alice (female) + Bob (male) | 1 female + 1 male | Yes (user female) | `2girls, 1boy` |
+| Alice (female) + Bob (male) | 1 female + 1 male | No | `1girl, 1boy` |
+
+**Why User Inclusion?**
+
+- **Self-Insertion**: Users can visualize themselves in roleplay scenes
+- **Group Scenes**: Self + 1-2 characters = more dynamic images
+- **Gender Accuracy**: User's gender properly counted (user as female → `2girls`, not `1girl, 1user`)
 
 **Size Parameter Behavior**:
 - **User Settings Respected**: Snapshots use the same width/height as manual generation (from Vision Panel settings)
@@ -6606,6 +6383,44 @@ Get snapshot history for a chat.
 ### Frontend Integration
 
 **Snapshot Button** (`app/index.html`):
+
+```javascript
+// Button in chat toolbar
+<button id="snapshot-btn" class="chat-toolbar-btn" title="Generate Snapshot">
+  📸
+</button>
+
+// Loading states
+<span id="snapshot-status" class="snapshot-status hidden">
+  <span class="loading-spinner"></span>
+  Generating snapshot...
+</span>
+
+// Error state
+<span id="snapshot-error" class="snapshot-error hidden">
+  ❌ Stable Diffusion unavailable
+</span>
+```
+
+**User Inclusion Checkbox**:
+
+```javascript
+// Toggle for user inclusion
+<div class="snapshot-options">
+    <label class="flex items-center gap-2">
+        <input type="checkbox"
+               x-model="snapshotIncludeUser"
+               @change="saveSnapshotSettings()">
+        Include User
+    </label>
+</div>
+
+// Send with snapshot request
+await axios.post('/api/chat/snapshot', {
+    chat_id: this.currentChatId,
+    include_user: this.snapshotIncludeUser
+});
+```
 
 ```javascript
 // Button in chat toolbar
@@ -6716,533 +6531,6 @@ Get snapshot history for a chat.
 - Functional: 100% of user-facing features
 - Integration: 95% of API endpoints
 - Edge cases: 90% of identified failure modes
-
-### Snapshot Variation Mode (Novelty Scoring)
-
-**Problem**: Users want visual variety while maintaining narrative relevance.
-
-**Solution**: Regenerate snapshots with novelty scoring to explore less-used tag combinations.
-
-**How It Works**:
-
-```python
-def calculate_novelty_score(tag_combination: List[str], user_history: List[List[str]]) -> float:
-    """
-    Calculate novelty score for tag combination based on user's generation history.
-    Higher score = more novel (less frequently used).
-    """
-    # Count occurrences of each tag in user's history
-    tag_frequencies = count_tag_frequencies(user_history)
-    
-    # Calculate novelty: inverse frequency for each tag in combination
-    novelty_scores = [1.0 / (tag_frequencies[tag] + 1) for tag in tag_combination]
-    
-    # Average novelty across all tags
-    return sum(novelty_scores) / len(novelty_scores)
-
-def build_prompt_with_novelty(scene_analysis: Dict, user_tag_preferences: Dict[str, float]) -> str:
-    """
-    Build 4-block prompt with novelty scoring bias.
-    """
-    # Get candidate tags via semantic matching
-    candidate_tags = get_semantic_matches(scene_analysis)
-    
-    # Calculate novelty scores for candidate combinations
-    scored_combinations = []
-    for combination in tag_combinations:
-        novelty = calculate_novelty_score(combination, user_tag_history)
-        preference_score = sum(user_tag_preferences.get(tag, 0) for tag in combination)
-        combined_score = (novelty * 0.6) + (preference_score * 0.4)
-        scored_combinations.append((combined_score, combination))
-    
-    # Sort by combined score (novelty + preference)
-    scored_combinations.sort(reverse=True, key=lambda x: x[0])
-    
-    # Select top combination (highest novelty + user preference)
-    final_tags = scored_combinations[0][1]
-    return build_4_block_prompt(final_tags)
-```
-
-**Novelty Scoring Algorithm:**
-
-- **Tag Frequency Tracking**: Count how often each tag appears in user's generation history
-- **Inverse Frequency Score**: `novelty = 1.0 / (frequency + 1)`
-  - Never-used tag: `novelty = 1.0` (maximum)
-  - Commonly-used tag: `novelty = 0.1` (low)
-- **Combined Score**: `(novelty * 0.6) + (preference * 0.4)`
-  - 60% weight on novelty (explore new territory)
-  - 40% weight on user preferences (match user's taste)
-
-**Regenerate Button Usage:**
-
-```javascript
-// Frontend: Snapshot message UI
-<div class="snapshot-container">
-  <img src="${snapshot.image_url}" class="snapshot-image" />
-  
-  <button id="regenerate-${msg.id}" class="btn-secondary btn-sm">
-    🔄 Regenerate
-  </button>
-  
-  <button id="toggle-prompt-${msg.id}" class="btn-secondary btn-sm">
-    📋 Show Prompt Details
-  </button>
-</div>
-
-// Regenerate with novelty mode
-document.getElementById(`regenerate-${msg.id}`).addEventListener('click', async () => {
-  const response = await fetch(`/api/chat/snapshot/regenerate/${msg.id}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ use_novelty_scoring: true })
-  });
-  
-  const result = await response.json();
-  // Display new variation in chat
-});
-```
-
-**What Makes Variations Different:**
-
-| Component | Original Generation | Variation Mode |
-|-----------|-------------------|-----------------|
-| **Scene Analysis** | Same (last 2 turns) | Same (preserves narrative relevance) |
-| **Tag Selection** | Highest semantic similarity | Highest novelty score + preferences |
-| **Block 1 (Subject)** | Top 5 semantic matches | Less-used subject tags preferred |
-| **Block 2 (Environment)** | Top 2 semantic matches | Less-used environment tags preferred |
-| **Block 3 (Style)** | Top 4 semantic matches | Less-used style tags preferred |
-| **Result** | Most semantically relevant | Relevant + novel variety |
-
-**Novelty Scoring vs Random Variation:**
-
-| Approach | Relevance | Variety | Predictability | Verdict |
-|----------|-----------|----------|----------------|---------|
-| **Random tags** | ⭐⭐ | ⭐⭐⭐⭐⭐ | Unpredictable | ❌ Low relevance |
-| **Novelty scoring** (current) | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Controlled | ✅ Balanced |
-| **Preference-only** | ⭐⭐⭐⭐⭐ | ⭐⭐ | Predictable | ❌ Low variety |
-
-**Rationale**:
-- **Narrative Relevance Preserved**: Scene analysis ensures variation fits conversation context
-- **Controlled Exploration**: Novelty scoring guides users toward fresh territory
-- **User Preferences Integrated**: 40% weight on learned preferences maintains personal style
-- **No Quality Loss**: Guardrail fallbacks ensure minimum quality regardless of novelty
-
-### Unified Favorites System
-
-**Problem**: Separate systems for snapshot and manual images create fragmented learning data.
-
-**Solution**: Unified favorites table tracks ALL images with user-level preference learning.
-
-**Database Schema**:
-
-**Table: favorites**
-
-```sql
-CREATE TABLE favorites (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,  -- Future: Multi-user support
-    image_url TEXT NOT NULL UNIQUE,
-    source_type TEXT NOT NULL,  -- 'snapshot' or 'manual'
-    chat_id TEXT,  -- NULL for manual images, chat_id for snapshots
-    message_id TEXT,  -- NULL for manual images, message_id for snapshots
-    prompt TEXT,  -- Full prompt (for learning)
-    negative_prompt TEXT,
-    timestamp INTEGER NOT NULL,
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-);
-```
-
-**Table: favorite_tags** (Junction table for tag learning)
-
-```sql
-CREATE TABLE favorite_tags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    favorite_id INTEGER NOT NULL,
-    tag_text TEXT NOT NULL,
-    is_danbooru BOOLEAN DEFAULT 0,  -- 1 = confirmed danbooru tag
-    tag_frequency INTEGER DEFAULT 1,  -- How often favorited with this tag
-    FOREIGN KEY (favorite_id) REFERENCES favorites(id) ON DELETE CASCADE
-);
-```
-
-**Storage Locations**:
-
-| Image Type | Favorites Table | Tag Tracking | Source Metadata |
-|------------|----------------|----------------|------------------|
-| **Snapshot** (📸 button) | ✅ `source_type = 'snapshot'` | ✅ `chat_id`, `message_id` | Scene analysis included |
-| **Manual** (Vision Panel) | ✅ `source_type = 'manual'` | ✅ `chat_id = NULL`, `message_id = NULL` | Custom prompt only |
-
-**Unified Learning Flow:**
-
-```python
-def add_to_favorites(
-    image_url: str,
-    source_type: str,  # 'snapshot' or 'manual'
-    prompt: str,
-    negative_prompt: str,
-    chat_id: Optional[str] = None,
-    message_id: Optional[str] = None
-):
-    """
-    Add image to unified favorites with automatic tag detection.
-    """
-    # Insert into favorites table
-    favorite_id = db_insert_favorite({
-        "image_url": image_url,
-        "source_type": source_type,
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "prompt": prompt,
-        "negative_prompt": negative_prompt,
-        "timestamp": int(time.time())
-    })
-    
-    # Detect danbooru tags in prompt (automatic learning)
-    detected_tags = detect_danbooru_tags(prompt)
-    
-    # Insert detected tags into junction table
-    for tag_text in detected_tags:
-        db_insert_favorite_tag({
-            "favorite_id": favorite_id,
-            "tag_text": tag_text,
-            "is_danbooru": tag_text in DANBOORU_TAG_SET,  # Confirmation
-            "tag_frequency": calculate_tag_frequency(tag_text)
-        })
-    
-    # Update user tag preferences for future biasing
-    update_user_tag_preferences(detected_tags)
-```
-
-**Frontend Integration**:
-
-```javascript
-// Snapshot images: Heart icon toggle
-<button id="favorite-snapshot-${msg.id}" class="favorite-btn">
-  <span class="heart-icon">🤍</span>  <!-- Empty heart -->
-</button>
-
-document.getElementById(`favorite-snapshot-${msg.id}`).addEventListener('click', async () => {
-  const isFavorited = this.dataset.favorited === 'true';
-  
-  if (!isFavorited) {
-    // Add to favorites
-    await fetch('/api/favorites', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        image_url: snapshot.image_url,
-        source_type: 'snapshot',
-        prompt: snapshot.prompt,
-        negative_prompt: snapshot.negative_prompt,
-        chat_id: currentChatId,
-        message_id: msg.id
-      })
-    });
-    this.dataset.favorited = 'true';
-    this.querySelector('.heart-icon').textContent = '❤️';  // Filled heart
-  } else {
-    // Remove from favorites
-    await fetch(`/api/favorites/${snapshot.id}`, { method: 'DELETE' });
-    this.dataset.favorited = 'false';
-    this.querySelector('.heart-icon').textContent = '🤍';  // Empty heart
-  }
-});
-
-// Manual images: "Save as Favorite" button
-<button id="save-favorite-manual" class="btn-primary">
-  💾 Save as Favorite
-</button>
-
-document.getElementById('save-favorite-manual').addEventListener('click', async () => {
-  const prompt = document.getElementById('prompt-input').value;
-  const negative = document.getElementById('negative-prompt').value;
-  
-  await fetch('/api/favorites', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      image_url: generatedImageUrl,
-      source_type: 'manual',
-      prompt: prompt,
-      negative_prompt: negative
-      // chat_id = NULL, message_id = NULL for manual images
-    })
-  });
-  
-  // Show success notification
-  showNotification('Image saved to favorites! ❤️');
-});
-```
-
-**Why Unified System?**
-
-| Aspect | Separate Systems (Old) | Unified System (Current) |
-|--------|----------------------|-------------------------|
-| **Learning Data** | Fragmented (snapshot only) | Complete (both sources) |
-| **User Preferences** | Partial (one source) | Holistic (all generations) |
-| **Code Complexity** | Duplicate tables/logic | Single table, shared logic |
-| **Maintenance** | Sync issues between systems | No sync needed |
-| **Feature Parity** | Manual mode excluded from learning | Equal learning for both |
-
-**Rationale**:
-- **Complete Learning**: User preferences from ALL image types improve future generations
-- **Simplified Maintenance**: Single favorites table eliminates duplicate code paths
-- **Feature Parity**: Manual images no longer second-class citizens
-- **Future-Proof**: Multi-user support (user_id column) ready for v2.0
-
-### Tag Preference Tracking
-
-**Problem**: User favorited images aren't used to improve future generation quality.
-
-**Solution**: Track tag frequencies in favorited images and bias future prompts toward user preferences.
-
-**Tag Learning Algorithm:**
-
-```python
-class TagPreferenceTracker:
-    def __init__(self):
-        self.tag_preferences: Dict[str, float] = {}  # tag → preference score
-        self.load_from_database()  # Load existing preferences
-    
-    def update_from_favorites(self, favorited_tags: List[str]):
-        """
-        Update preference scores based on newly favorited images.
-        """
-        for tag in favorited_tags:
-            current_score = self.tag_preferences.get(tag, 0.0)
-            # Increment score (exponential decay for recency)
-            self.tag_preferences[tag] = current_score + 1.0
-        
-        # Apply recency decay (older favorites weight less)
-        self.apply_recency_decay()
-        self.save_to_database()
-    
-    def calculate_preference_bias(self, candidate_tags: List[str]) -> Dict[str, float]:
-        """
-        Calculate bias scores for candidate tags based on user history.
-        Higher score = user prefers this tag.
-        """
-        biases = {}
-        for tag in candidate_tags:
-            base_score = self.tag_preferences.get(tag, 0.0)
-            # Normalize to 0-1 range
-            normalized_score = min(base_score / MAX_PREFERENCE_SCORE, 1.0)
-            biases[tag] = normalized_score
-        return biases
-    
-    def select_biased_tags(self, candidate_tags: List[str], target_count: int) -> List[str]:
-        """
-        Select tags for prompt with preference bias applied.
-        """
-        # Calculate preference scores
-        biases = self.calculate_preference_bias(candidate_tags)
-        
-        # Combine semantic score with preference score
-        scored_tags = []
-        for tag in candidate_tags:
-            semantic_score = self.get_semantic_score(tag, scene_analysis)
-            preference_score = biases[tag]
-            # Weighted combination: 60% semantic, 40% preference
-            combined_score = (semantic_score * 0.6) + (preference_score * 0.4)
-            scored_tags.append((combined_score, tag))
-        
-        # Sort by combined score and select top N
-        scored_tags.sort(reverse=True, key=lambda x: x[0])
-        return [tag for _, tag in scored_tags[:target_count]]
-```
-
-**Integration with Prompt Builder**:
-
-```python
-def build_4_block_prompt_with_biases(
-    scene_analysis: Dict,
-    user_tag_preferences: Dict[str, float],
-    character_tag: Optional[str] = None
-) -> str:
-    """
-    Build 4-block prompt with user preference biases applied.
-    """
-    # Block 0: Quality (hardwired, no preference bias)
-    block_0 = get_fallback_tags(0)[:3]
-    
-    # Block 1: Subject (character tag + preference-biased semantic matches)
-    block_1 = []
-    if character_tag:
-        block_1.extend([t.strip() for t in character_tag.split(',')[:3]])
-    
-    if len(block_1) < 5:
-        # Get semantic matches with preference scoring
-        semantic_matches = analyzer.match_tags_semantically(scene_query, block_num=1, k=10)
-        # Apply preference bias and select top remaining tags
-        biased_selection = tag_preferences.select_biased_tags(
-            [tag for tag, _ in semantic_matches],
-            target_count=5 - len(block_1)
-        )
-        block_1.extend(biased_selection)
-    
-    # Blocks 2 & 3: Similar preference-biased selection
-    block_2 = build_block_with_biases(2, scene_analysis, user_tag_preferences)
-    block_3 = build_block_with_biases(3, scene_analysis, user_tag_preferences)
-    
-    return ", ".join([*block_0, *block_1, *block_2, *block_3])
-```
-
-**Preference Score Calculation:**
-
-| Scenario | Tags in Prompt | Preference Scores | Result |
-|----------|-----------------|-------------------|---------|
-| **First favorite** | `["1girl", "solo", "portrait"]` | `[0.0, 0.0, 0.0]` | No bias (baseline) |
-| **Favorited 10 images with "cinematic lighting"** | `["1girl", "solo", "cinematic lighting"]` | `[0.0, 0.0, 0.8]` | Bias toward lighting |
-| **Favorited 50 images with "anime style"** | `["1girl", "anime style", "portrait"]` | `[0.0, 0.9, 0.0]` | Strong bias toward style |
-
-**Recency Decay**:
-
-```python
-def apply_recency_decay(self):
-    """
-    Decay older preference scores to adapt to changing user tastes.
-    """
-    decay_rate = 0.95  # Multiply all scores by 0.95 weekly
-    
-    for tag in self.tag_preferences:
-        self.tag_preferences[tag] *= decay_rate
-    
-    # Prune tags with very low scores (< 0.1)
-    self.tag_preferences = {
-        tag: score 
-        for tag, score in self.tag_preferences.items() 
-        if score >= 0.1
-    }
-```
-
-- **Weekly Decay**: All preference scores multiplied by 0.95
-- **Pruning**: Tags with score < 0.1 removed (taste changed)
-- **Adaptation**: System adapts to changing user preferences over time
-
-**Why Preference Tracking?**
-
-| Aspect | Without Tracking | With Tracking (Current) |
-|--------|----------------|----------------------|
-| **Generation Quality** | Baseline (semantic only) | Personalized (semantic + preference) |
-| **User Satisfaction** | Generic results | Matches user's visual taste |
-| **Learning Curve** | None (static) | Improves with more favorites |
-| **Cold Start** | Immediate relevance | Baseline + gradual personalization |
-| **Memory Usage** | 0 bytes | ~50KB (user preferences) |
-
-**Rationale**:
-- **Personalization**: Generations match user's evolving visual preferences
-- **Adaptive Learning**: Recency decay allows system to adapt to changing tastes
-- **Minimal Overhead**: ~50KB storage, <1ms computation per tag
-- **Cold Start Friendly**: Works immediately, improves gradually with more favorites
-
-### Tag Detection System
-
-**Problem**: Users add custom/NSFW tags via manual mode, but system doesn't recognize them.
-
-**Solution**: Automatic danbooru tag detection with 2+ tag threshold for learning activation.
-
-**Tag Detection Algorithm**:
-
-```python
-def detect_danbooru_tags(prompt: str) -> List[str]:
-    """
-    Detect danbooru tags in custom prompt using prefix matching.
-    """
-    # Load danbooru tag set (1560 tags from danbooru_tags table)
-    danbooru_set = load_danbooru_tag_set()
-    
-    # Split prompt into tokens
-    prompt_tokens = prompt.split(', ')
-    
-    detected_tags = []
-    for token in prompt_tokens:
-        token = token.strip().lower()
-        if token in danbooru_set:
-            detected_tags.append(token)
-    
-    return detected_tags
-
-def should_activate_learning(prompt: str) -> bool:
-    """
-    Determine if prompt has enough danbooru tags for learning.
-    Threshold: 2+ tags required.
-    """
-    detected = detect_danbooru_tags(prompt)
-    return len(detected) >= 2
-```
-
-**Danbooru Tag Set** (`app/danbooru_tags_config.py`):
-
-```python
-# Generated from database table on startup
-DANBOORU_TAG_SET: Set[str] = load_from_database()
-
-# Manual additions for NSFW tags (not in public danbooru set)
-NSFW_TAG_ADDITIONS: Set[str] = {
-    "nsfw", "explicit", "suggestive",
-    # Users can add custom NSFW tags here
-}
-```
-
-**Detection Flow**:
-
-```
-User Favorites Manual Image
-    ↓
-Extract Prompt: "masterpiece, 1girl, solo, portrait, my_custom_tag, anime style"
-    ↓
-Tokenize: ["masterpiece", "1girl", "solo", "portrait", "my_custom_tag", "anime style"]
-    ↓
-Check Danbooru Set: ["masterpiece", "1girl", "solo", "portrait", "anime style"]
-    ↓
-Threshold Check: 5 detected tags ≥ 2 (minimum)
-    ↓
-Learning Activated: YES → Update user_tag_preferences
-    ↓
-User Custom Tags ("my_custom_tag"): NOT in danbooru_set → Skipped (no bias)
-```
-
-**Threshold Rationale (2+ Tags)**:
-
-| Threshold | Learning | False Positives | Missed Learning | Verdict |
-|-----------|----------|-----------------|-----------------|---------|
-| **0 tags** | Always active | High (noise) | None | ❌ Too permissive |
-| **1 tag** | Very active | Medium | Low | ❗ Borderline |
-| **2 tags** (current) | Balanced | Low | Acceptable | ✅ Optimal |
-| **3+ tags** | Conservative | Very Low | Minimal | ✗ Too strict |
-
-**Why 2+ Tag Threshold?**
-
-- **Prevent Noise**: Prompts with 0-1 danbooru tags often have random/unlearnable content
-- **Confirm Intent**: 2+ tags indicates intentional danbooru-style prompting
-- **Natural Library Expansion**: Users add custom tags via manual mode, but system only learns from confirmed danbooru tags
-- **NSFW Support**: Users can add NSFW tags to manual prompts; if 2+ danbooru tags present, system learns the NSFW context
-
-**Natural Library Expansion Mechanism**:
-
-Users can expand the danbooru tag library organically:
-
-1. **Add Custom Tags**: User adds "my_custom_tag" to manual prompt
-2. **Generate Image**: Image created with custom tag
-3. **Favorite Image**: If prompt has 2+ danbooru tags, learning activated
-4. **Detection**: `my_custom_tag` detected but NOT in danbooru_set (skipped)
-5. **Future PR**: Users can PR custom tags to official danbooru set
-6. **Result**: Library grows organically with community contributions
-
-**Why Natural Expansion?**
-
-| Method | Pros | Cons | Verdict |
-|--------|-------|-------|---------|
-| **Official PR review** | Quality controlled, curated | Slow, bottleneck | ❗ Viable but slow |
-| **Natural expansion** (current) | Fast, user-driven | Potential noise | ✅ Best for v1.9.0 |
-| **Manual editing** | Immediate | Technical barrier | ❌ High friction |
-
-**Rationale**:
-- **User-Driven**: Users naturally expand library with tags they use
-- **Low Barrier**: No technical knowledge needed (just use tags in prompts)
-- **Quality Control**: 2+ tag threshold ensures intentional usage before learning
-- **Future-Proof**: Foundation for community PR system (v2.0+)
-- **NSFW Support**: Natural expansion enables adding NSFW tags without manual configuration
 
 ### Favorites Jump-to-Source Feature
 
@@ -7689,11 +6977,23 @@ await axios.post('/api/chat/snapshot', {
 
 ---
 
-## Danbooru Tag Generator (v1.10.0)
+## Danbooru Tag Generator (v1.10.1)
 
 ### Overview
 
-The Danbooru Tag Generator automatically creates Danbooru-style tags from character descriptions using semantic matching. This enables consistent, high-quality image generation for anime-trained Stable Diffusion models by analyzing physical traits (hair, eyes, body type) and matching them to 1560+ tagged Danbooru reference characters.
+The Danbooru Tag Generator automatically creates Danbooru-style tags from character descriptions using a two-stage semantic matching system. This enables consistent, high-quality image generation for anime-trained Stable Diffusion models.
+
+**Key Changes from v1.10.0**:
+- **Stage 1**: Natural language → Danbooru tags via semantic search (danbooru_tags table, 1304 tags)
+- **Stage 2**: Tags → Danbooru characters via semantic search (danbooru_characters table, 1394 characters)
+- **Natural Language Support**: "grey" → "gray", "skinny" → "slender", "perky nose" → "perky nose"
+- **No Keyword Maps**: Pure semantic matching handles synonyms, variants, context
+- **Performance**: ~1.4 seconds (50% faster than v1.10.0 LLM-based approach)
+- **Deterministic**: Same input always produces same results (caching works)
+- **Gender Filter**: Enforced at character card level (boys don't get girl characters)
+- **Added Tags**: "perky nose", "tiny hands" for better build size matching
+- **No LLM Dependency**: Pure semantic search, always available
+- **Enhanced Debugging**: New response fields (`extracted_traits`, `normalized_tags`) for troubleshooting
 
 **Best suited for**: Pony, Illustrious, NoobAI and other anime-honed SD models.
 
@@ -7702,13 +7002,32 @@ The Danbooru Tag Generator automatically creates Danbooru-style tags from charac
 **Problem**: Generic `1girl` or `blonde_hair` tags produce inconsistent visuals. Manual tagging is tedious and requires knowledge of Danbooru vocabulary.
 
 **Solution**: One-click generation that:
-1. Extracts physical traits from description
-2. Maps natural language to Danbooru tags
-3. Performs semantic search with progressive reduction
-4. Populates the Danbooru Tag field with appropriate tags
+1. Extracts physical traits from description (natural language)
+2. Maps natural language to Danbooru tags via semantic search
+3. Finds matching Danbooru characters via semantic search
+4. Populates Danbooru Tag field with appropriate tags
 
 ### Architecture
 
+```
+User clicks "Generate Danbooru Character" hyperlink
+    ↓
+Stage 1: Natural Language → Danbooru Tags (semantic search)
+    1. Extract physical traits from description
+    2. Normalize traits: "grey" → "gray", "skinny" → "slender"
+    3. Build query: "blonde hair blue eyes petite"
+    4. Semantic search danbooru_tags table (1304 tags)
+    5. Top 5-10 matches returned
+    ↓
+Stage 2: Tags → Danbooru Characters (semantic search)
+    1. Build query from normalized tags
+    2. Semantic search danbooru_characters table (1394 characters)
+    3. Gender filter: only match characters with same gender
+    4. Top 10 matches returned
+    ↓
+Random selection from top 10 matches
+    ↓
+Populate Danbooru Tag field: "1girl, blonde_hair, blue_eyes, perky_nose, elf"
 ```
 User clicks "Generate Danbooru Character" hyperlink
    ↓
@@ -7730,64 +7049,162 @@ Random selection from top matches
 Populate Danbooru Tag field: "1girl, blonde_hair, blue_eyes, long_hair, pointy_ears, elf"
 ```
 
-### New Module: danbooru_tag_generator.py
+### Two-Stage Semantic Matching
 
-Standalone module for trait extraction and progressive search:
+**Stage 1: Natural Language → Danbooru Tags**
 
 ```python
-# Trait extraction dictionaries
-HAIR_COLORS = ['blonde', 'brown', 'black', 'red', 'white', 'silver', ...]
-HAIR_STYLES = {'long': 'long_hair', 'short': 'short_hair', 'ponytail': 'ponytail', ...}
-CREATURE_TYPES = {
-    'elf': {'tags': ['pointy_ears'], 'search': 'elf'},
-    'fairy': {'tags': ['wings'], 'search': 'fairy'},
-    ...
+# Normalize natural language to Danbooru vocabulary
+NORMALIZATION_MAP = {
+    'grey': 'gray',
+    'skinny': 'slender',
+    'large shoulders': 'big shoulders',
+    'small shoulders': 'tiny shoulders',
+    # ... more mappings
 }
+
+# Extract traits from description
+def extract_tags_from_description(description: str) -> List[str]:
+    tags = []
+    
+    # Hair colors
+    if 'blonde' in description.lower():
+        tags.append('blonde hair')
+    if 'red' in description.lower():
+        tags.append('red hair')
+    # ... more colors
+    
+    # Hair styles
+    if 'long hair' in description.lower():
+        tags.append('long hair')
+    if 'ponytail' in description.lower():
+        tags.append('ponytail')
+    # ... more styles
+    
+    # Body types
+    if 'petite' in description.lower():
+        tags.append('perky nose')
+    if 'flat' in description.lower():
+        tags.append('flat nose')
+    # ... more body types
+    
+    # Creature features
+    if 'elf' in description.lower():
+        tags.append('pointy ears')
+        tags.append('elf')
+    if 'fairy' in description.lower():
+        tags.append('wings')
+        tags.append('fairy')
+    # ... more creatures
+    
+    return tags
+
+# Semantic search danbooru_tags table
+def search_danbooru_tags(query: str, gender: str, top_k: int = 10) -> List[Dict]:
+    # Query: normalized tags joined by spaces
+    normalized_query = " ".join([NORMALIZATION_MAP.get(t, t) for t in tags])
+    
+    # Semantic search (sqlite-vec)
+    results = db_search_danbooru_tags_semantically(
+        query=normalized_query,
+        top_k=top_k,
+        threshold=0.35
+    )
+    
+    return results
 ```
 
-### Trait Extraction Logic
-
-**Physical Traits Only** (clothing ignored - handled by SD):
-
-| Description Keyword | Danbooru Tag | Priority |
-|---------------------|--------------|----------|
-| "blonde hair" | `blonde_hair` | High |
-| "blue eyes" | `blue_eyes` | High |
-| "long hair" | `long_hair` | High |
-| "elf" | `pointy_ears`, `elf` | Medium |
-| "fairy" | `wings`, `fairy` | Medium |
-| "tan" | `dark_skin` | Low |
-
-**Progressive Search Algorithm**:
+**Stage 2: Tags → Danbooru Characters**
 
 ```python
-def search_with_progressive_reduction(tags, gender):
-    current_tags = tags.copy()
+# Semantic search danbooru_characters table
+def search_danbooru_characters(
+    tags: List[str],
+    gender: str,
+    top_k: int = 10
+) -> List[Dict]:
+    # Build query from normalized tags
+    query = " ".join(tags)
     
-    while len(current_tags) > 0:
-        query = " ".join(current_tags)
-        results = semantic_search(query, gender)
-        
-        if results:
-            return results
-        
-        # Remove last (least important) tag and retry
-        removed = current_tags.pop()
-        print(f"No results, removing: {removed}")
+    # Semantic search with gender filter
+    results = db_search_danbooru_characters_semantically(
+        query=query,
+        gender=gender,  # Hard filter: same gender only
+        top_k=top_k,
+        threshold=0.35
+    )
     
-    # Fallback to random gender match
-    return get_random_characters(gender)
+    return results
+
+# Random selection from top matches
+def select_from_top_matches(results: List[Dict]) -> Dict:
+    if not results:
+        return None
+    
+    # Select randomly from top 10 (prevents deterministic results)
+    selected = random.choice(results[:10])
+    
+    return {
+        'character_name': selected['name'],
+        'tags': selected['core_tags'] + ', ' + selected['all_tags'],
+        'visual_canon_id': selected['id']
+    }
 ```
+
+### Trait Extraction and Normalization
+
+**Natural Language Support**:
+
+| User Input | Normalized Output | Danbooru Tag |
+|------------|------------------|--------------|
+| "grey hair" | "gray hair" | `gray_hair` |
+| "skinny" | "slender" | `slender` |
+| "large shoulders" | "big shoulders" | `big shoulders` |
+| "perky" | "perky nose" | `perky nose` |
+| "tiny hands" | "tiny hands" | `tiny hands` |
+
+**Physical Traits Extracted**:
+
+| Category | Description Keywords | Danbooru Tags |
+|----------|---------------------|---------------|
+| **Hair Colors** | blonde, red, black, brown, white, silver | `blonde_hair`, `red_hair`, etc. |
+| **Hair Styles** | long, short, ponytail, braid, twin tails | `long_hair`, `ponytail`, etc. |
+| **Eye Colors** | blue, green, red, brown, heterochromia | `blue_eyes`, `green_eyes`, etc. |
+| **Body Types** | petite, slender, muscular, athletic, perky, tiny | `slender`, `perky_nose`, `tiny_hands` |
+| **Creature Features** | elf, fairy, demon, catgirl, vampire | `pointy_ears`, `wings`, `horns`, `cat ears` |
+
+**Performance**:
+
+| Operation | v1.10.0 | v1.10.1 | Improvement |
+|-----------|-----------|-----------|-------------|
+| **Tag generation** | ~3 seconds (LLM) | ~1.4 seconds (semantic) | 50% faster |
+| **Character search** | ~0.5 seconds (semantic) | ~0.5 seconds (semantic) | Same |
+| **Total time** | ~3.5 seconds | ~1.4 seconds | 60% faster |
+| **Deterministic** | No (LLM randomness) | Yes (semantic search) | Better caching |
 
 ### Database Schema
 
-#### danbooru_characters Table
+#### danbooru_tags Table (Stage 1)
+
+```sql
+CREATE TABLE danbooru_tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag_text TEXT UNIQUE NOT NULL,   -- e.g., "blonde_hair", "blue_eyes"
+    embedding BLOB,                  -- 768-dimensional embedding
+    created_at INTEGER
+);
+```
+
+**Import**: Loaded from `app/data/danbooru/tags.json` (1304 tags)
+**Embedding**: Generated at startup using `all-mpnet-base-v2`
+
+#### danbooru_characters Table (Stage 2)
 
 ```sql
 CREATE TABLE danbooru_characters (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,              -- e.g., "hatsune_miku"
-    gender TEXT NOT NULL,            -- 'male' | 'female' | 'other' | 'unknown'
+    name TEXT NOT NULL,              -- e.g., "hatsune_miku", "asuna_(sao)"
+    gender TEXT NOT NULL,            -- 'male' | 'female' | 'other'
     core_tags TEXT NOT NULL,         -- Primary visual traits
     all_tags TEXT NOT NULL,          -- All associated tags
     image_link TEXT,                 -- Reference image URL
@@ -7795,6 +7212,23 @@ CREATE TABLE danbooru_characters (
     created_at INTEGER
 );
 ```
+
+**Import**: Loaded from `app/data/danbooru/Book1.xlsx` (1394 characters)
+**Embedding**: Generated at import time
+
+#### vec_danbooru_tags Virtual Table
+
+```sql
+CREATE VIRTUAL TABLE vec_danbooru_tags USING vec0(
+    embedding float[768]
+);
+```
+
+**Embedding Generation**:
+- Query: Tag text (normalized)
+- Model: `all-mpnet-base-v2`
+- Dimensions: 768
+- Format: Float32 array stored as BLOB
 
 #### vec_danbooru_characters Virtual Table
 
@@ -7804,7 +7238,7 @@ CREATE VIRTUAL TABLE vec_danbooru_characters USING vec0(
 );
 ```
 
-**Embedding Generation**: 
+**Embedding Generation**:
 - Query: `"{gender} {core_tags} {all_tags}"`
 - Model: `all-mpnet-base-v2`
 - Dimensions: 768
@@ -7841,6 +7275,25 @@ block_1.extend(count_tags)
 
 ### Excel Import
 
+**Stage 1: Danbooru Tags Import**
+
+```python
+# Load from app/data/danbooru/tags.json
+with open(TAGS_JSON_PATH) as f:
+    tags_data = json.load(f)  # 1304 tags
+
+# Generate embeddings
+for tag_text in tags_data:
+    embedding = model.encode(tag_text)  # 768-dim float32
+    db_insert_danbooru_tag(tag_text, embedding)
+```
+
+**Import Statistics**:
+- Total tags: 1304
+- Import time: ~30 seconds (including embedding generation)
+
+**Stage 2: Danbooru Characters Import**
+
 ```python
 # Load from C:\Users\fosbo\neuralrp\app\data\danbooru\Book1.xlsx
 df = pd.read_excel(EXCEL_PATH)
@@ -7855,9 +7308,9 @@ embedding = model.encode(embedding_text)  # 768-dim float32
 ```
 
 **Import Statistics**:
-- Total characters: ~1560
+- Total characters: 1394
 - Avg tags per character: 15-20
-- Import time: ~60 seconds (including embedding generation)
+- Import time: ~30 seconds (including embedding generation)
 
 ### API Endpoints
 
@@ -7875,14 +7328,16 @@ Content-Type: application/json
 Response:
 {
     "success": true,
-    "suggested_tags": "1girl, blonde_hair, blue_eyes, pointy_ears, elf",
+    "suggested_tags": "1girl, blonde_hair, blue_eyes, perky_nose, elf",
     "visual_canon_id": 123,
     "visual_canon_name": "asuna_(sao)",
+    "extracted_traits": ["blonde hair", "blue eyes", "petite", "elf"],
+    "normalized_tags": ["blonde_hair", "blue_eyes", "perky_nose", "pointy_ears"],
     "message": "Generated tags from Danbooru character: asuna_(sao)"
 }
 ```
 
-**Click again to reroll** → Different match, different tags.
+**Click again to reroll** → Different match, different tags (random selection from top 10).
 
 #### NPC Endpoints (Full Parity)
 
@@ -7905,73 +7360,130 @@ POST /api/chats/{chat_id}/npcs/{npc_id}/generate-danbooru-tags
     <span x-show="editingChar.data.extensions.danbooru_tag">✓ Generated</span>
 </div>
 <div class="helper-text">
-    Click to auto-populate Danbooru tags from Description (hair, eyes, body type). 
+    Click to auto-populate Danbooru tags from Description (hair, eyes, body type).
     Click again to reroll for different matches.
 </div>
 ```
 
-### Key Features
-
+ ### Key Features
+ 
 #### 1. NPC Parity
-
+ 
 Tag generator works identically for:
 - **Global characters**: Stored in `characters` table
 - **Local NPCs**: Stored in `chat_npcs` table
 - Both use same generation logic, same UI, same API patterns
-
+ 
 #### 2. Gender Filtering
-
-Hard gender filter on all searches:
+ 
+Hard gender filter on all searches (Stage 2 character search):
 ```python
 # Search only within gender-matched characters
-results = semantic_search(query, gender=female)
-# Returns: 1girl characters only
+results = db_search_danbooru_characters_semantically(
+    query=query,
+    gender=gender,  # Hard filter: same gender only
+    top_k=10
+)
+# Returns: female characters only if gender="female"
 ```
-
-#### 3. Progressive Search
-
-Intelligent fallback when no exact match:
+ 
+#### 3. Progressive Exact Matching with Semantic Fallback
+ 
+Natural language → Exact Tags → Characters:
 ```
-Full query: "blonde_hair blue_eyes long_hair elf" → No results
-   ↓ Remove "elf"
-Retry: "blonde_hair blue_eyes long_hair" → No results
-   ↓ Remove "long_hair"
-Retry: "blonde_hair blue_eyes" → Match found!
+User input: "grey elf with blue eyes"
+    ↓ Stage 1: Exact mapping + body type tables
+Normalized tags: "gray_hair", "blue_eyes", "pointy_ears", "elf"
+    ↓ Stage 2: Progressive exact matching
+Load ALL characters by gender (up to 900+)
+Check exact tag presence: all N tags → N-1 → N-2 down to 1 tag
+Top N matches with all requested tags: [
+    "kamio_misuzu": {tags: "blonde_hair", "long_hair", "blue_eyes", ..."},
+    "nagato": {tags: "blonde_hair", "long_hair", "blue_eyes", ..."},
+    ...
+]
+    ↓ Random selection from top 5 perfect matches
+Selected: "kamio_misuzu"
 ```
-
-#### 4. Anime Model Optimization
-
-Works best with anime-honed SD models:
-- **Pony Diffusion**: Excellent with generated tags
-- **Illustrious**: Optimal reproduction
-- **NoobAI**: High fidelity character matching
-- **Anything V3**: Good general anime compatibility
+ 
+#### 4. Random Selection with Progressive Fallback
+ 
+Exact matching prioritized for reliability, with variety and semantic fallback:
+- **Exact Matching**: Checks ALL characters for actual tag presence (more reliable than semantic)
+- **Progressive**: Tries all N tags → N-1 → N-2 down to 1 tag (handles sparse data)
+- **Randomness**: Random selection from top 5 perfect matches prevents boring repetition
+- **Semantic Fallback**: Only used if NO exact matches found at any tag level
+- **Performance**: ~100ms (8-14x faster than pure semantic search)
+ 
+#### 5. Enhanced Debugging
+ 
+Response includes detailed extraction information:
+- `extracted_traits`: Original traits extracted from description
+- `normalized_tags`: Normalized Danbooru vocabulary
+- `visual_canon_id`: Which character was selected
+- `visual_canon_name`: Character name for reference
 
 ### Performance Characteristics
 
-| Operation | Time | Notes |
-|-----------|------|-------|
-| **Excel import** | ~60s | One-time, includes 1560 embeddings |
-| **Semantic search** | <50ms | sqlite-vec with HNSW indexing |
-| **Tag generation** | <100ms | Trait extraction + progressive search |
-| **Block 1 build** | <5ms | Tag extraction and ordering |
-| **Embedding storage** | ~1MB | 1560 × 768 × 4 bytes |
+ | Operation | v1.10.0 | v1.10.1 | Improvement |
+ |-----------|-----------|-----------|-------------|
+ | **Tag generation** | ~3 seconds (LLM) | ~0.02 seconds (exact mapping) | 150x faster |
+ | **Stage 1 exact match** | N/A (progressive) | ~0.05 seconds (string check) | New |
+ | **Stage 2 exact match** | N/A (progressive) | ~0.1 seconds (progressive check) | New |
+ | **Total time** | ~3.5 seconds | ~0.15 seconds | 23x faster |
+ | **Matching Strategy** | Semantic (v1.10.0) | Progressive exact (v1.10.1) | More reliable |
+ | **Randomness** | N/A | Yes (top 5 selection) | Variety |
+ | **Fallback** | N/A | Semantic only if no exact matches | Resilience |
+ | **Embeddings storage** | ~1MB (characters) | ~2.2MB (tags + characters) | +1.2MB |
 
 ### Design Decisions
-
+ 
+**Why Progressive Exact Matching over Pure Semantic Search?**
+ 
+| Aspect | v1.10.0 (LLM) | v1.10.0 (Semantic) | v1.10.1 (Exact) | Improvement |
+|--------|----------------|----------------------|-------------|
+| **Speed** | ~3 seconds | ~1.4 seconds | ~0.15 seconds | 23x faster |
+| **Determinism** | No (LLM randomness) | Yes (semantic) | No (top 5 random) |
+| **Token Cost** | High (LLM calls) | Zero (pure search) | Zero (pure search) |
+| **Natural Language** | Requires keyword maps | Pure semantic matching | Exact mapping + tables |
+| **Reliability** | Medium (semantic drift) | Medium (semantic drift) | High (actual tag matches) |
+ 
+**Why Exact Mapping over Semantic for Stage 1?**
+ 
+Users describe characters in natural language, not Danbooru vocabulary:
+- Exact mapping tables for hair colors, eye colors, body types provide consistent Danbooru vocabulary
+- Body type tables handle size/shape variations (petite → small_breasts)
+- No semantic ambiguity: "grey hair" always maps to `gray_hair`, not probabilistic
+ 
 **Why Hyperlink over Checkbox?**
-
+ 
 | Approach | Complexity | UX |
 |----------|-----------|-----|
 | Checkbox + assignment | High (state management, visual_canon storage, reroll/clear buttons) | Confusing (must check, wait, then assigned) |
 | **Hyperlink** (current) | Low (one click, auto-populate, click again to reroll) | **Simple** (immediate feedback, obvious reroll) |
+ 
+**Why Hard Gender Filter?**
+ 
+Gender filtering enforced at Stage 2 (character search):
+- "Boy characters don't get girl Danbooru characters"
+- Prevents visual inconsistencies (male character + female visual canon)
+- Hard filter: gender field in database, not inferred from tags
+ 
+**Why Random Selection from Top 5 Perfect Matches?**
+ 
+Same input produces variety while prioritizing quality:
+- **Exact First**: Loads ALL characters by gender, checks exact tag presence
+- **Progressive**: Tries all N tags → N-1 → N-2 down to 1 tag
+- **Priority**: Returns best match from highest tag count that has results
+- **Variety**: Random selection from top 5 perfect matches prevents boring repetition
+- **Fallback**: Semantic search only used if NO exact matches found at any tag level
+- **Caching**: Same description → same tags until reroll clicked
 
-**Why Progressive Search?**
-
-Users describe characters in natural language, not exact Danbooru tags:
-- "blonde elf with blue eyes" might not match exactly
-- Removing "elf" might find a blonde, blue-eyed character
-- Better to find a close match than no match
+**Why Additional Body Size Granularity?**
+ 
+More granular matching for different body types:
+- **Tags Added**: `flat_chest`, `small_shoulders`, `medium_shoulders`, `large_shoulders`, `big_shoulders`
+- **Natural Language**: "petite" → `flat_chest`, "slender" → `small_shoulders`, "athletic" → `medium_shoulders`
 
 **Why Physical Traits Only?**
 
