@@ -49,7 +49,7 @@ The fact is, there are certain limitations with 7B-12B LLMs that you simply can'
 70-80% of your context budget should be dialogue, not metadata. Characters, world info, and relationships exist to support conversation, not dominate the prompt.
 
 - **Inject on first 3 turns** — Full character cards (single) or capsules (multi-char) for early-turn consistency
-- **Just-in-time grounding** — World lore appears when semantically relevant
+- **Just-in-time grounding** — World lore appears when semantically relevant. "World Canon" option allows you to manually enforce rules and lore on a periodic basis.
 - **Directional relationships** — Alice→Bob ≠ Bob→Alice, tracked automatically
 - **Scalability by design** — 1 character = ~4-6% of context. 3 characters = ~20-30%. After sticky window, ~80% for dialogue.
 - **Narrator Mode** - "Just chat", no world or character cards needed. Let it all develop naturally, elevating NPC's and worlds with AI-powered tools within the app. Or, easily use your pre-built deep worlds and characters from v2 cards.
