@@ -7,13 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
  ## [1.10.2] - 2026-02-03
 
+ ### Added
+ - **Summaries Panel**: New UI sidebar panel for managing chat summaries
+   - Displays current summary text (fully editable)
+   - User can enter their own summary to start in the middle of a story
+   - Autosave-enabled - changes persist automatically
+   - Shows all generated summaries in one convenient location
+
  ### Addition
-- **Summaries Panel**: Auto-summaries now correctly append to existing manual summary text
-  - **Behavior**: Auto-summaries add new paragraphs underneath existing content (non-destructive)
-  - **Format**: Existing summary + newline + new auto-generated summary
-  - **Persistence**: Manual edits preserved, auto-summaries accumulate over time
-  - **UI**: Textarea updates automatically after each auto-summarization via x-model binding
-  - **Example**: Manual summary "Alice is brave" → After auto: "Alice is brave\n\nAlice discovered artifact."
+ - **Auto-Summaries Append to Manual Summaries**: Auto-summaries now correctly append to existing manual summary text
+   - **Behavior**: Auto-summaries add new paragraphs underneath existing content (non-destructive)
+   - **Format**: Existing summary + newline + new auto-generated summary
+   - **Persistence**: Manual edits preserved, auto-summaries accumulate over time
+   - **UI**: Textarea updates automatically after each auto-summarization via x-model binding
+   - **Example**: Manual summary "Alice is brave" → After auto: "Alice is brave\n\nAlice discovered artifact."
 
 ***
 
