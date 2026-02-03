@@ -2,7 +2,7 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**tl;dr: NeuralRP is a local, no-cloud roleplay engine that optimizes equally for text and image generation on midrange GPUs.**
+**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine, balancing text and image generation on midrange GPUs.**
 
 **Simple out of the box. Just drop your cards in the folders, there isn't a million different things to configure. Just go.**
 
