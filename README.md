@@ -2,16 +2,17 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**tl;dr: NeuralRP is a local, no-cloud roleplay engine that keeps characters, NPCs, worlds, and images coherent across 30k+ tokens on midrange GPUs. Think less about tuning and more about immersing in roleplay.**
+**tl;dr: NeuralRP is a local, no-cloud roleplay engine that optimizes equally for text and image generation on midrange GPUs.**
 
 **Simple out of the box. Just drop your cards in the folders, there isn't a million different things to configure. Just go.**
 
-**8 GB vRAM? Can't pay $4,000 for a sick GPU? Neither can I.**
+**Runs well on 8-16GB  GPU's, no $4,000 hardware required**
 
 **No cloud subscriptions, no inference costs**
 
-**[Quickstart Guide](docs/QUICKSTART.md)**
+**Next step: Open [Quickstart Guide](docs/QUICKSTART.md) for setup, recommended LLM models, and example characters and worlds**
 
+**Status**: Actively developed, v1.10.x is still under testing. Expect bugs. 
 ---
 
 ## Why It’s Different
@@ -40,7 +41,7 @@ It's engineered from the ground up with context window in mind. No full characte
 
 I've built up the SD integration to match - rather than being a bolt-on extension, its been carefully developed to natively fit into the flow of NeuralRP with a deep feature set, and as automated or manual as you want it to be (or ignore it).
 
-The fact is, there are certain limitations with 7B-12B LLMs that you simply can't get past. But this app maximizes what 7B-14B LLMs offer for roleplay.
+The fact is, there are certain limitations with 7B-12B LLMs that you simply can't get past. But this app maximizes what those LLMs offer for roleplay.
 
 ---
 
@@ -61,7 +62,7 @@ The fact is, there are certain limitations with 7B-12B LLMs that you simply can'
 NeuralRP was designed to work *with* SillyTavern cards, not replace them.
 
 - **Bi-Directional Smart sync** — Timestamp-based conflict resolution between JSON cards and database
-- **Automatic tag preservation** — SillyTavern V2 card tags extracted and stored
+- **Automatic tag preservation** — SillyTavern v2 card tags extracted and stored
 - **Forward and backward compatible** — No conversion, no data loss
 
 ### Card Generation
@@ -69,7 +70,7 @@ NeuralRP was designed to work *with* SillyTavern cards, not replace them.
 Create optimized character cards in two ways:
 
 - **From context** — Generate PList-optimized definitions from conversation history
-- **From natural language** — Write plain-text descriptions, NeuralRP converts to PList format
+- **From natural language** — Write plain-text descriptions, NeuralRP converts to PList format (prompt-list, token-optimized structure used for SillyTavern v2 cards)
 
 Both output SillyTavern V2-compatible JSON. Prototype NPCs in conversation, then formalize them into reusable cards.
 
@@ -91,7 +92,7 @@ World lore injects automatically when semantically relevant to the conversation:
 
 - **Semantic Search Engine** — sqlite-vec with all-mpnet-base-2 for meaning-based matching
 - **Quoted keys** — Exact phrase match for specific terms (e.g., "Great Crash Landing")
-- **Unquoted keys** — Semantic matching for concepts (e.g., dragon → dragons, draconic)
+- **Unquoted keys** — Semantic matching for concepts (e.g., dragon → dragons, draconic). YOu can think of quoted keys as exact bookmarks, unquoted as fuzzy search.
 - **Canon law** — Core world rules always included to prevent physics/magic violations
 
 ### Relationship Tracking
@@ -172,14 +173,14 @@ Tag management for character and world cards:
 - **Change history** — 30-day retention with browse/restore functionality
 - **Soft delete** — Messages archived instead of deleted, searchable across history
 - **Export for training** — Export to Alpaca/ShareGPT/ChatML formats for Unsloth
-- **Built on SQLite + SQLite-vec** - Unified data system makes it easy to "bolt on" features, tune and mod this to you heart's content. Just add another table. 
+- **Built on SQLite + SQLite-vec** - Unified data system makes it easy to "bolt on" features, tune and mod this to you heart's content. Everything is in a single file (neuralrp.db), easy to back up or inspect.
 - **Migration system** — Seamless upgrades (v2 → v3 schemas) without data loss.
 
 ---
 
 ## Built for Local Deployment
 
-NeuralRP assumes you're running:
+NeuralRP doesn't run the models, it orchestrates them. Here are the backends you need:
 
 - Local LLM via KoboldCpp, TabbyAPI, or Ollama (OpenAI-compatible)
 - Local Stable Diffusion via AUTOMATIC1111 WebUI (optional)
@@ -189,16 +190,26 @@ All data in SQLite (neuralrp.db) with automatic JSON export for SillyTavern comp
 
 ---
 
+## Known Limitations
+
+- No cloud extensibility, all local
+- Requires AUTOMATIC1111 for image generation, not compatible with ComfyUI and others at this time (run with --API).
+- Requires OpenAI-compatible backend with text to text LLM running locally (KoboldCcp strongly recommended). 
+- Tested with KoboldCcp with a quantized 12B LLM model tuned for RP, and with A1111 running an Illustrious SD model.
+- All testing done with a NVidia 3060 12GB vRAM GPU
+- Running 2 LLMs with an 8GB vRAM GPU is untested, will likely lead to sub-optimal results
+- Danbooru tagging is optimized for SD models like Pony and Illustrious, which are trained for that input. Other SD models are untested
+
 ## Hardware Requirements
 
 **Recommended:**
-- 12-16GB VRAM GPU (for running both LLM's at the same time)
+- 12GB+ VRAM GPU (for running both LLM's at the same time)
 - Python 3.8+
 - KoboldCpp (LLM inference)
 - AUTOMATIC1111 WebUI (image generation)
 
 **Minimum:**
-- 8GB VRAM (with Performance Mode)
+- 8GB VRAM (with Performance Mode), recommended just use 1 model at a time
 - Supports: KoboldCpp, Ollama, Tabby (OpenAI-compatible)
 
 ---
