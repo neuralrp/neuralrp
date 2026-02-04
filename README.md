@@ -114,7 +114,7 @@ World lore injects automatically when semantically relevant to the conversation:
 - **Semantic Search Engine** — sqlite-vec with all-mpnet-base-2 for meaning-based matching
 - **Quoted keys** — Exact phrase match for specific terms (e.g., "Great Crash Landing")
 - **Unquoted keys** — Semantic matching for concepts (e.g., dragon → dragons, draconic). YOu can think of quoted keys as exact bookmarks, unquoted as fuzzy search.
-- **Canon law** — Core world rules always included to prevent physics/magic violations
+- **Canon law** — Enforce your core world rules on a customizable turn basis
 
 ### Relationship Tracking
 
@@ -133,6 +133,7 @@ Continue conversations beyond context limits. When context approaches 85%:
 - Oldest turns traded for summaries
 - Relationship states preserved
 - Story continuity maintained
+- Summarization window to view and customize summaries
 
 Relationship state is one of the most difficult things to maintain when summaries happen. The relationship system brings continuity without having to update character cards manually.
 
@@ -165,11 +166,11 @@ Automatic selectable step/resolution reduction when context is large (>12K token
 
 ### 4. Snapshots
 
-- **Generated from Context** – Generate images from chat context automatically; AI analyzes the last turn, providing location, action, activity, dress, and facial expression, which is then directly matched to a LLM-optimized prompt. Semantic matching is used as a fallback.
-- **How is it Different?** - It doesn't just ask the LLM for a complete prompt and shove it into A1111, it doesn't leak text into the context window. It takes a specific framework optimized for Anime-based LLM generation models, using Danbooru tags that those models are specifically trained on, to create consistent images. The LLM is just delivering keywords - action, location, activity, dress, and facial expression. This is a fundamentally different process from every other solution out there. 
+- **Generated from Context** – Generate images from chat context automatically; AI analyzes the last 20 messages, providing location, action, activity, dress, and facial expression, which is then directly matched to an SD Generation-optimized prompt. 
+- **How is it Different?** - It doesn't just ask the LLM for a complete prompt and shove it into A1111 like others do. It takes a specific framework optimized for Anime-based LLM generation models, using Danbooru tags that those models are specifically trained on, to create consistent images. The LLM is just delivering keywords - action, location, activity, dress, and facial expression. And no "leakage" into the context window, one of the things that would ruin my RP chats with other frontends you have probably used.
 
 ### 5. Browse and Save Your Images
-- **Images Folder** - separate images folder where every generation is saved, even if you delete it in the chat
+- **Images Folder** - separate images folder where every generation is saved, even if you delete it in the chat. 
 - **Favorites menu** – Favorite images to build a visual library; click on the image and go straight to the image's original location in the chat. Filter by tag.
 - **Jump‑to‑source** – Double‑click favorites to jump back to the exact chat moment they came from.
 - **Recreate images** - Image metadata saved, so you can see exactly what prompt generated what image. Easily recreate images with a click of a button.
@@ -189,8 +190,8 @@ Tag management for character and world cards:
 
 ## Additional Capabilities
 
-- **Multi-mode chat** — Narrator (third-person), Focus (first-person), Auto modes
-- **Live editing** — AI-generated content appears in editable textboxes before saving
+- **Multi-mode chat** — Narrator (third-person), Focus (first-person), Auto mode that automatically detects who should be talking.
+- **Live editing** — AI-generated content is editable, all user edits are saved into the database.
 - **Change history** — 30-day retention with browse/restore functionality
 - **Soft delete** — Messages archived instead of deleted, searchable across history
 - **Export for training** — Export to Alpaca/ShareGPT/ChatML formats for Unsloth
