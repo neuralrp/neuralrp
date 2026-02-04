@@ -2,7 +2,7 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine, designed specifically to keep LLMs from falling off a cliff once the context window gets too high, while keeping image generation a top priority.**
+**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine, designed specifically to keep LLMs from falling off a cliff once the context window gets too long, while keeping image generation a top priority.**
 
 **Simple out of the box. Just drop your cards in the folders, there isn't a million different things to configure. Just go.**
 
