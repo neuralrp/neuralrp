@@ -106,6 +106,8 @@ AGENTS.md
 REINFORCEMENT_SYSTEM.md
 CHARACTER_INJECTION_FIX.md
 Migrations.md
+SNAPSHOT_SEMANTIC_SEARCH.md
+demo_snapshot_semantic_search.py
 
 # ============================================
 # CACHE DATABASES
