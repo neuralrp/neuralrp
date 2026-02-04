@@ -38,7 +38,7 @@
 
 ## Why It’s Different
 
-1. **Context hygiene engine** — With 7B-12B LLM's, every token you put into the context window matters, and everything about this app cares about that. Character cards present in full on the first 3 turns, then token-controlled portions appear on customizable fixed intervals. World lore appears only when semantically relevant. 70–80% of your context stays as live dialogue, even with 3+ characters and deep worlds.
+1. **Context hygiene engine** — With 7B-12B LLM's, every token you put into the context window matters, and everything about this app cares about that. Character cards present in full on the first 3 turns, then token-controlled portions appear on customizable fixed intervals. World lore appears only when semantically relevant unless marked as "canon law", which injects periodically. 70–80% of your context stays as live dialogue, even with 3+ characters and deep worlds.
 
 2. **Emergent cast with visual canon** — Quickly create NPCs on the fly that are isolated to one chat, have full parity with characters, can be promoted, and stay branch‑safe. Gender selection keeps both text and visuals targeted, and one-click Danbooru tag assignment based on character description solves the problem of visual drift, so you can stay immersed in the actual roleplay.
 
