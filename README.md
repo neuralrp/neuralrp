@@ -2,7 +2,7 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine, balancing text and image generation on midrange GPUs.**
+**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine, designed specifically to keep LLMs from falling off a cliff once the context window gets too high, while keeping image generation a top priority.**
 
 **Simple out of the box. Just drop your cards in the folders, there isn't a million different things to configure. Just go.**
 
@@ -38,7 +38,7 @@
 
 ## Why It’s Different
 
-1. **Context hygiene engine** — With 7B-12B LLM's, every token you put into the context window matters, and everything about this app cares about that. Character cards present in full on the first 3 turns, then token-controlled portions appear on customizable fixed intervals. World lore appears only when semantically relevant unless marked as "canon law", which injects periodically. 70–80% of your context stays as live dialogue, even with 3+ characters and deep worlds.
+1. **Context hygiene engine** — With 7b-14b LLM's, every token you put into the context window matters, and everything about this app cares about that. Character cards present in full on the first 3 turns, then token-controlled portions appear on customizable fixed intervals. World lore appears only when semantically relevant unless marked as "canon law", which injects periodically. 70–80% of your context stays as live dialogue, even with 3+ characters and deep worlds.
 
 2. **Emergent cast with visual canon** — Quickly create NPCs on the fly that are isolated to one chat, have full parity with characters, can be promoted, and stay branch‑safe. Gender selection keeps both text and visuals targeted, and one-click Danbooru tag assignment based on character description solves the problem of visual drift, so you can stay immersed in the actual roleplay.
 
@@ -60,9 +60,9 @@ Hence, NeuralRP was born.
 
 It's engineered from the ground up with context window in mind. No full character card dump every turn. Uses SQLite backend which syncs intelligently with SillyTavern cards, semantically finds and injects what matters, when it matters, no matter how deep your world is.
 
-I've built up the SD integration to match - rather than being a bolt-on extension, its been carefully developed to natively fit into the flow of NeuralRP with a deep feature set, and as automated or manual as you want it to be (or ignore it).
+I've built up the SD integration to match. Rather than being a bolt-on extension, its been carefully developed to natively fit into the flow of NeuralRP with a deep feature set, and as automated or manual as you want it to be (or ignore it).
 
-The fact is, there are certain limitations with 7B-12B LLMs that you simply can't get past. But this app maximizes what those LLMs offer for roleplay.
+The fact is, there are certain limitations with 7b-14b LLMs that you simply can't get past. But this app maximizes what those LLMs offer for roleplay.
 
 ---
 

@@ -25,11 +25,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
      - **Keyword Polarity Detection**: `_compute_keyword_polarity()` for positive/negative signals
      - **Semantic Similarity Calculation**: `_compute_semantic_similarity()` using embeddings
      - **Conversation Scoring**: `analyze_conversation_scores()` with 70% semantic + 30% keyword weighting
-     - **Test Harness**: `test_relationship_scoring()` for validation
-       - Uses mock hash-based embeddings (no real ML model needed)
-       - Tests 4 scenarios: explicit conflict, subtle sarcasm, genuine affection, neutral conversation
-       - Validates scores remain within [0, 100] bounds
-       - Run with: `from app.relationship_tracker import test_relationship_scoring; test_relationship_scoring()`
 
  ### Fixed
  - **Chat Forking Foreign Key Constraint**: Fixed branch creation failure when chat contains NPCs
