@@ -1,27 +1,36 @@
 """
-Snapshot Scene Analyzer - Simplified Version
+Snapshot Scene Analyzer - Primary Character Focused
 
 Analyzes conversation context and extracts scene description via LLM as JSON.
-Uses progressive fallback chain when LLM fails.
+Focused on a single primary character with 20-message context window.
 
 EXAMPLE:
 Input: "Alice and Bob are sitting in a tavern. Alice is drinking a beer."
-Output: {
+Output (primary character=Alice):
+{
     "location": "cozy tavern interior",
-    "action": "sitting",
-    "dress": ""
+    "action": "drinking",
+    "activity": "at tavern",
+    "dress": "casual clothes",
+    "expression": "smiling"
 }
 
-FALLBACK CHAIN:
-1. LLM JSON extraction (up to 3 retry attempts)
-2. Simple pattern extraction (key:value or line-based)
-3. Basic keyword matching (small curated lists)
-4. Empty scene (fail-safe)
+EXTRACTION LOGIC:
+1. LLM JSON extraction (3 retry attempts) from last 20 messages
+2. Character card injection for context (description + personality only)
+3. Primary character focus (determined by mode: auto/focus:name/narrator)
+4. Extracts 5 fields: location, action, activity, dress, expression
+5. Empty scene on LLM failure (no semantic search fallback)
 """
 
 import json
 import re
 from typing import List, Dict, Tuple, Optional, Any
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 
 class SnapshotAnalyzer:
@@ -32,24 +41,31 @@ class SnapshotAnalyzer:
         Initialize the snapshot analyzer.
         
         Args:
-            semantic_search_engine: DEPRECATED - kept for API compatibility
+            semantic_search_engine: SemanticSearchEngine instance for history search
             http_client: httpx.AsyncClient for LLM requests (optional)
             config: Application config dict with kobold_url (optional)
         """
-        self.semantic_search_engine = semantic_search_engine  # Kept for compatibility, not used
+        self.semantic_search_engine = semantic_search_engine
         self.http_client = http_client
         self.config = config or {}
 
     def _strip_character_names(self, text: str, character_names: List[str]) -> str:
         """
-        Strip character names from text, replacing with generic 'Character'.
+        Strip character names from text, replacing with 'another' or 'another's'.
+        
+        Uses 'another' instead of 'character' because:
+        - LLM prompt examples already use "another" (e.g., "hugging another")
+        - "another" is a common danbooru tag understood by Pony/Illustrious
+        - Prevents confusion with generic word "character"
+        
+        Preserves possessive forms: "Rebecca's" → "another's", "Rebecca" → "another"
         
         Args:
             text: Original text content
             character_names: List of character names to strip
             
         Returns:
-            Text with character names replaced by 'Character'
+            Text with character names replaced by 'another' (preserving possessive)
         """
         if not character_names or not text:
             return text
@@ -58,10 +74,24 @@ class SnapshotAnalyzer:
         for name in character_names:
             if not name:
                 continue
-            # Replace whole word matches only (case-insensitive)
-            # Use word boundaries to avoid partial matches
-            pattern = r'\b' + re.escape(name) + r'\b'
-            result = re.sub(pattern, 'Character', result, flags=re.IGNORECASE)
+            
+            if name.endswith("'s"):
+                # Name already has possessive form (e.g., "Saint Peter's")
+                # Match name as-is, followed by word boundary
+                pattern = r'\b' + re.escape(name) + r'\b'
+            else:
+                # Name without possessive (e.g., "James")
+                # Match with optional possessive suffix (handles "James", "James's", "James'")
+                # Use negative lookahead to prevent matching mid-word, instead of \b which fails after apostrophe
+                pattern = r'\b' + re.escape(name) + r"(?:'s|')?(?!\w)"
+            
+            def replace_match(match):
+                matched_text = match.group(0)
+                if matched_text.endswith("'s") or matched_text.endswith("'"):
+                    return "another's"
+                return "another"
+            
+            result = re.sub(pattern, replace_match, result, flags=re.IGNORECASE)
         
         return result
     
@@ -77,7 +107,7 @@ class SnapshotAnalyzer:
             character_names: List of character names to strip from content (prevents name leakage)
         
         Returns:
-            Formatted conversation text with character names replaced by 'Character'
+            Formatted conversation text with character names replaced by 'another'
         """
         if not messages:
             return ""
@@ -87,23 +117,25 @@ class SnapshotAnalyzer:
 
         # Format messages
         context_lines = []
-        for msg in recent_messages:
+        for i, msg in enumerate(recent_messages):
             role = msg.get('role', 'unknown')
             content = msg.get('content', '')
             speaker = msg.get('speaker', role)
 
             # Truncate long messages to prevent prompt bloat
-            if len(content) > 500:
-                content = content[:500] + "..."
-            
+            # EXCEPT the most recent message (last one in recent_messages) - keep in full
+            is_most_recent = (i == len(recent_messages) - 1)
+            if len(content) > 350 and not is_most_recent:
+                content = content[:350] + "..."
+
             # Strip character names from content (prevents name leakage to LLM)
             if character_names:
                 content = self._strip_character_names(content, character_names)
                 # Also strip from speaker name to anonymize
                 speaker = self._strip_character_names(speaker, character_names)
                 if speaker != msg.get('speaker', role) and speaker != role:
-                    # Speaker was a character name, replace with 'Character'
-                    speaker = 'Character'
+                    # Speaker was a character name, replace with 'another'
+                    speaker = 'another'
 
             if role == 'user':
                 context_lines.append(f"User: {content}")
@@ -112,278 +144,186 @@ class SnapshotAnalyzer:
 
         return '\n'.join(context_lines)
 
-    async def extract_scene_json(self, conversation_context: str, max_retries: int = 3) -> Dict[str, str]:
+    async def extract_character_scene_json(
+        self,
+        messages: List[Dict],
+        primary_character: Optional[str],
+        primary_character_card: Optional[str],
+        message_window: int = 20
+    ) -> Dict[str, str]:
         """
-        Extract scene description as JSON with progressive retry strategy.
-        
-        Priority hierarchy for actions:
-        1. Physical interactions with others: hugging another, embracing another, holding hands, dancing together, fighting, attacking, carrying another
-        2. Physical actions (solo): sitting, standing, walking, running, jumping, drinking, eating, sleeping, casting spell, fighting stance
-        3. Speaking or gestures: talking, whispering, shouting, hand gestures (ONLY if no physical action)
-        4. Generic: "standing" or "sitting" (last resort)
-        
-        CONSTRAINTS:
-        - NO proper names: Use generic terms only (e.g., "hugging another", not "Alice hugging Bob")
-        - SINGLE action only: Describe ONE action (e.g., "sitting", not "sitting and drinking")
-        - Third-person: Use "he/she/they", NEVER use "you" or "your"
-        
+        Extract scene description focused on primary character using LLM.
+
         Args:
-            conversation_context: Last 2 turns of conversation
-            max_retries: Number of LLM attempts (default: 3)
-        
+            messages: All chat messages
+            primary_character: Name of primary character to focus on
+            primary_character_card: Character card data for context (description + personality only)
+            message_window: Number of recent messages to analyze (default: 20)
+
         Returns:
-            {'location': str, 'action': str, 'dress': str}
-            Returns empty dict on all retries failed.
+            {'location': str, 'action': str, 'activity': str, 'dress': str, 'expression': str}
+            Returns empty dict on LLM failure.
         """
-        prompts = [
-            # Attempt 1: Standard with full instructions
-            f"""Summarize the last two messages as JSON with these keys:
-- "location": where the scene is happening (short phrase, 3-5 words). Generic terms only - NO proper names.
-- "action": what the main character is doing (single action, 2-3 words). ONE action only - NOT multiple actions. Third-person only.
-- "dress": how the character is dressed (short phrase, 2-3 words). Leave empty if no clothing description available.
+        # Extract last N messages for analysis
+        recent_messages = messages[-message_window:] if len(messages) > message_window else messages
 
-ACTION PRIORITY (use this order):
-1. Physical interactions: hugging another, embracing another, holding hands, dancing together, fighting, attacking, carrying another
-2. Physical actions (solo): sitting, standing, walking, running, jumping, drinking, eating, sleeping, casting spell, fighting stance
-3. Speaking or gestures: talking, whispering, shouting (ONLY if no physical action)
-4. Generic: "standing" or "sitting" (last resort)
+        # Format conversation for LLM
+        conversation_text = self.extract_conversation_context(
+            recent_messages,
+            message_count=message_window,
+            character_names=[primary_character] if primary_character else None
+        )
 
-CONSTRAINTS - FOLLOW STRICTLY:
-- NO proper names: Use "another" or generic terms (e.g., "hugging another", NOT "Alice hugging Bob")
-- SINGLE action only: One verb (e.g., "sitting", NOT "sitting and drinking")
-- Third-person: Use "he/she/they" context, NEVER use "you" or "your"
-- Empty dress: Leave blank "" if clothing info is unknown
+        if not conversation_text:
+            return {}
+
+        # Build character context section
+        character_context = ""
+        if primary_character and primary_character_card:
+            # Use generic header to avoid leaking character name to LLM
+            character_context = f"\n\n[CHARACTER PROFILE - PRIMARY CHARACTER]\n{primary_character_card}\n"
+
+        # Construct prompt with character focus
+        prompt = f"""Analyze the conversation and extract scene information as JSON.
+
+{character_context}
+{"Focus on primary character" if primary_character else "No character focus"}
+
+CONTEXT: You will receive 20 recent messages:
+- Messages 1-19: Truncated to 350 characters each (may be incomplete)
+- Message 20: Full text (most recent turn)
+
+MISSION: Intelligently infer scene information from context clues across all messages. You are ALLOWED to make educated guesses when information is incomplete.
+
+Extract:
+1. "location": Where is the scene happening? (EXACTLY 3-5 words, NO proper names)
+   GUESS from context clues across all 20 messages (activities, descriptions, dialogue hints)
+   Examples: "tavern interior", "dark forest", "stone bridge", "cozy bedroom"
+   WRONG: "Golden Dragon Tavern" (proper name), "Alice's bedroom" (proper name)
+
+2. "action": What is the {"primary character" if primary_character else "main character"} doing RIGHT NOW in the MOST RECENT TURN? (EXACTLY 2-3 words, NO proper names)
+   CRITICAL: DETERMINE from FINAL MESSAGE ONLY (message 20, full text)
+   Action priority: Physical action with another → Physical action with self → Emotional reaction → Passive pose
+   Examples: "hugging another", "waving hand", "crying", "standing", "fistfight"
+   WRONG: "fighting with Bob" (proper name), "Alice is drinking" (proper name)
+
+3. "activity": What is the general event or engagement taking place during the conversation? (EXACTLY 2-3 words, NO proper names, or "" if no context)
+   GUESS from context clues across all 20 messages (dialogue, actions, setting details)
+   This is the broader genre or context that the current action falls under, may span multiple turns
+   Examples: "at basketball game", "reading book", "in forest", "having conversation"
+   WRONG: "at Golden Dragon" (proper name), "reading Alice's book" (proper name)
+
+4. "dress": What is the {"primary character" if primary_character else "the character"} wearing? (EXACTLY 2-3 words, NO proper names, or "naked" if NSFW)
+    GUESS from context clues (activity, location, genre) - make reasonable inferences if not explicitly stated
+    Examples: "leather armor", "casual clothes", "swimsuit", "formal wear"
+    WRONG: "Alice's dress" (proper name), "Bob's helmet" (proper name)
+    Use "naked" if nudity mentioned or strongly implied by activity/location
+    Use "" (empty string) only if absolutely no clues available
+
+5. "expression": What is the facial expression of the {"primary character" if primary_character else "the character"}? (EXACTLY 1-2 words, NO proper names)
+    DETERMINE from dialogue, context, and emotional cues in the conversation
+    Examples: "surprised", "worried", "smiling", "angry", "neutral expression", "frowning"
+    WRONG: "Alice looks surprised" (proper name), "happy Bob" (proper name)
+    Use "neutral expression" if no emotional cues are available or if unclear
+    Use "" (empty string) only if character is not present in scene
+
+IMPORTANT:
+- ACTION: Determine from FINAL MESSAGE ONLY (message 20, full text)
+- ACTIVITY/LOCATION/DRESS/EXPRESSION: Infer from context across all 20 messages, you are encouraged to make educated guesses
+- NO proper names in any field: Use generic terms only (e.g., "fighting with another", NOT "fighting with Bob")
+- EXACTLY 2-3 words per field (or 3-5 for location, 1-2 for expression), no exceptions
+- Use context clues to infer location, activity, dress, and expression when not explicitly stated
+- Third-person only, NO "you" or "your"
+- Location is shared by all characters
 
 Reply with ONLY valid JSON, no extra text.
 
-Recent conversation:
-{conversation_context[:1000]}
+Conversation:
+{conversation_text}
 
-Assistant:""",
-            
-            # Attempt 2: More strict
-            f"""MUST reply with ONLY valid JSON. No explanations, no extra text.
+Assistant:"""
 
-Keys:
-- "location": where the scene is happening (3-5 words, NO proper names)
-- "action": ONE single action only (2-3 words, third-person, NEVER "you")
-- "dress": clothing description or leave empty "" if unknown
-
-Action priority: interactions → solo actions → speaking → standing.
-
-Recent conversation:
-{conversation_context[:1000]}
-
-Assistant:""",
-            
-            # Attempt 3: Ultra-strict
-            f"""Your ENTIRE response must be ONLY this format:
-{{{{"location": "...", "action": "...", "dress": ""}}}}
-
-RULES:
-- location: 3-5 words, generic only, NO proper names like "Alice's" or "The Golden Dragon"
-- action: ONE single action word (e.g., "sitting", "hugging another"), NOT "sitting and drinking"
-- dress: clothing description OR empty string "" if unknown
-- NEVER use "you" or "your"
-
-Do not write ANYTHING else.
-
-Recent conversation:
-{conversation_context[:1000]}"""
-        ]
-        
-        for attempt in range(max_retries):
+        # Generate response with retry logic
+        for attempt in range(3):
             # Check if we have LLM available
             if self.http_client is None or not self.config.get('kobold_url'):
                 print("[SNAPSHOT] LLM unavailable, skipping JSON extraction")
                 return {}
-                
+
             try:
-                prompt = prompts[min(attempt, len(prompts) - 1)]
-                
                 response = await self.http_client.post(
                     f"{self.config['kobold_url']}/api/v1/generate",
                     json={
                         "prompt": prompt,
-                        "max_length": 150,
+                        "max_length": 75,
                         "temperature": 0.3,
                         "top_p": 0.9,
                         "stop_sequence": ["###", "\n\n", "Assistant:"]
                     },
                     timeout=30.0
                 )
-                
+
                 result = response.json().get('results', [{}])[0].get('text', '').strip()
                 print(f"[SNAPSHOT DEBUG] Attempt {attempt + 1}: '{result[:100]}...'")
-                
+
                 # Parse JSON
                 parsed = json.loads(result)
-                
+
                 # Validate required fields
-                if all(k in parsed for k in ['location', 'action', 'dress']):
-                    print(f"[SNAPSHOT] JSON extraction succeeded on attempt {attempt + 1}")
+                if all(k in parsed for k in ['location', 'action', 'activity', 'dress', 'expression']):
+                    print(f"[SNAPSHOT] Character-scoped JSON extraction succeeded on attempt {attempt + 1}")
                     return parsed
                 else:
                     print(f"[SNAPSHOT] Attempt {attempt + 1}: Missing required fields: {list(parsed.keys())}")
-                    
+
             except json.JSONDecodeError as e:
                 print(f"[SNAPSHOT] Attempt {attempt + 1}: JSON parsing failed - {e}")
             except Exception as e:
                 print(f"[SNAPSHOT] Attempt {attempt + 1}: Error - {e}")
-        
-        print(f"[SNAPSHOT] JSON extraction failed after {max_retries} attempts, trying fallback")
-        return {}
 
-    def _extract_from_patterns(self, text: str) -> Dict[str, str]:
-        """
-        Fallback: Extract from key:value or line-based patterns.
-        
-        Handles:
-        - Location: tavern
-        - Action: drinking
-        - Dress: leather armor
-        
-        Or:
-        location: tavern
-        action: drinking
-        dress: leather armor
-        """
-        text_lower = text.lower()
-        result = {'location': '', 'action': '', 'dress': ''}
-        
-        # Pattern 1: Key: Value format
-        patterns = {
-            'location': r'(?:location|where)[\s:]+([^\n]+)',
-            'action': r'(?:action|doing)[\s:]+([^\n]+)',
-            'dress': r'(?:dress|wearing|outfit)[\s:]+([^\n]+)'
-        }
-        
-        for key, pattern in patterns.items():
-            match = re.search(pattern, text_lower)
-            if match:
-                result[key] = match.group(1).strip()[:50]  # Limit length
-        
-        # Pattern 2: Line-based (each line is a value)
-        lines = text.strip().split('\n')
-        if len(lines) >= 3:
-            # Assume order: location, action, dress
-            if not result['location']:
-                result['location'] = lines[0].strip()[:50]
-            if not result['action']:
-                result['action'] = lines[1].strip()[:50]
-            if not result['dress']:
-                result['dress'] = lines[2].strip()[:50]
-        
-        # Check if we got at least one value
-        if any(result.values()):
-            print(f"[SNAPSHOT] Pattern extraction: {result}")
-            return result
-        
-        return {}
-
-    def _extract_from_keywords(self, text: str) -> Dict[str, str]:
-        """
-        Fallback: Simple keyword matching.
-        
-        Uses small curated lists, not semantic search.
-        """
-        text_lower = text.lower()
-        result = {'location': '', 'action': '', 'dress': ''}
-        
-        # Small curated lists
-        LOCATION_KEYWORDS = [
-            'tavern', 'inn', 'bar', 'castle', 'palace', 'forest', 'woods', 'cave',
-            'room', 'bedroom', 'kitchen', 'hall', 'street', 'road', 'river',
-            'beach', 'mountain', 'garden', 'temple', 'church', 'library',
-            'throne room', 'dungeon', 'market', 'shop'
-        ]
-        
-        ACTION_KEYWORDS = [
-            'sitting', 'standing', 'walking', 'running', 'jumping', 'drinking', 'eating',
-            'fighting', 'attacking', 'defending', 'hugging', 'kissing', 'embracing',
-            'holding hands', 'dancing', 'sleeping', 'casting spell', 'talking',
-            'hugging another', 'embracing another', 'dancing together'
-        ]
-        
-        DRESS_KEYWORDS = [
-            'armor', 'dress', 'casual', 'formal', 'robe', 'cloak', 'shirt',
-            'uniform', 'leather', 'naked', 'clothing', 'outfit'
-        ]
-        
-        # Check each category
-        for loc in LOCATION_KEYWORDS:
-            if loc in text_lower:
-                result['location'] = loc
-                break
-        
-        for act in ACTION_KEYWORDS:
-            if act in text_lower:
-                result['action'] = act
-                break
-        
-        for dress in DRESS_KEYWORDS:
-            if dress in text_lower:
-                result['dress'] = dress
-                break
-        
-        # Fallback action: standing if none found
-        if not result['action']:
-            result['action'] = 'standing'
-        
-        if any(result.values()):
-            print(f"[SNAPSHOT] Keyword fallback: {result}")
-            return result
-        
+        print(f"[SNAPSHOT] Character-scoped JSON extraction failed after 3 attempts")
         return {}
 
     async def analyze_scene(self, messages: List[Dict], chat_id: str,
-                           character_names: Optional[List[str]] = None) -> Dict[str, Any]:
+                           character_names: Optional[List[str]] = None,
+                           primary_character: Optional[str] = None,
+                           primary_character_card: Optional[str] = None) -> Dict[str, Any]:
         """
-        Simplified scene analysis: extract JSON from LLM with fallback chain.
-        
+        Simplified scene analysis using character-scoped LLM extraction.
+
         Args:
             messages: Chat messages
             chat_id: Chat ID for context
-            character_names: List of character names to strip from context (prevents name leakage)
-        
+            character_names: List of character names to strip from context
+            primary_character: Name of primary character to focus on
+            primary_character_card: Character card data (description + personality)
+
         Returns:
             {
-                'scene_json': {'location': str, 'action': str, 'dress': str},
+                'scene_json': {'location': str, 'action': str, 'activity': str, 'dress': str, 'expression': str},
                 'recent_context': str,
                 'error': str  # Empty on success, error message otherwise
             }
         """
+        # Use character-scoped extraction with 20-message window
+        scene_json = await self.extract_character_scene_json(
+            messages,
+            primary_character,
+            primary_character_card,
+            message_window=20
+        )
+
+        # Extract recent context for display (last 2 messages)
         recent_context = self.extract_conversation_context(
-            messages, 
+            messages[-2:] if len(messages) >= 2 else messages,
             message_count=2,
             character_names=character_names
         )
-        
-        if not recent_context:
-            return {
-                'scene_json': {},
-                'recent_context': '',
-                'error': 'No conversation context'
-            }
-        
-        # Chain 1: JSON extraction (up to 3 retries)
-        scene_json = await self.extract_scene_json(recent_context)
-        
+
         if not scene_json:
-            # Chain 2: Simple pattern extraction
-            print("[SNAPSHOT] JSON failed, trying pattern extraction")
-            scene_json = self._extract_from_patterns(recent_context)
-        
-        if not scene_json:
-            # Chain 3: Keyword fallback
-            print("[SNAPSHOT] Pattern failed, trying keyword fallback")
-            scene_json = self._extract_from_keywords(recent_context)
-        
-        if not scene_json or not any(scene_json.values()):
-            # Chain 4: Empty scene (fail-safe)
-            print("[SNAPSHOT] All fallbacks failed, using empty scene")
-            scene_json = {'location': '', 'action': '', 'dress': ''}
-        
+            print("[SNAPSHOT] Character-scoped extraction failed, returning empty scene")
+            scene_json = {'location': '', 'action': '', 'activity': '', 'dress': '', 'expression': ''}
+
         return {
             'scene_json': scene_json,
             'recent_context': recent_context,

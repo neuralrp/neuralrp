@@ -5,7 +5,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
- ## [1.10.2] - 2026-02-03
+## [1.10.3] - 2026-02-04
+
+### Changed
+- **Snapshot System Overhaul**: Primary character focus with enhanced scene extraction
+   - **Primary Character Mode**: Introduced mode-based character selection (auto/focus:name/narrator) for targeted scene analysis
+   - **5-Field JSON Extraction**: Expanded from 3 fields (location, action, dress) to 5 fields (location, action, activity, dress, expression)
+   - **20-Message Context Window**: Increased from 2-message analysis to 20-message window for comprehensive scene understanding
+   - **Character Card Injection**: Primary character's description + personality injected into LLM prompt for context-aware extraction
+   - **Simplified Fallback Chain**: Removed all fallbacks (pattern extraction, keyword matching, semantic search) → pure LLM JSON extraction
+   - **Danbooru Tag Compatibility**: Character name stripping changed from 'Character' to 'another' (danbooru tag format)
+   - **Enhanced Possessive Handling**: Properly handles possessive forms ("Rebecca's" → "another's")
+   - **Most Recent Message Preservation**: Keeps full text for final message, truncates older messages to 350 characters
+   - **Expanded Character Tag Support**: Increased from 5 to 20 danbooru tags per character
+   - **LLM Token Reduction**: Reduced max_length from 150 to 75 tokens for faster, more focused extraction
+   - **Dual Character Filtering**: Separate filtering for danbooru tags vs character counting based on mode
+
+ - **Relationship Tracker Enhancement**: Hybrid semantic + keyword scoring for more accurate emotional tracking
+     - **Keyword Polarity Detection**: `_compute_keyword_polarity()` for positive/negative signals
+     - **Semantic Similarity Calculation**: `_compute_semantic_similarity()` using embeddings
+     - **Conversation Scoring**: `analyze_conversation_scores()` with 70% semantic + 30% keyword weighting
+     - **Test Harness**: `test_relationship_scoring()` for validation
+       - Uses mock hash-based embeddings (no real ML model needed)
+       - Tests 4 scenarios: explicit conflict, subtle sarcasm, genuine affection, neutral conversation
+       - Validates scores remain within [0, 100] bounds
+       - Run with: `from app.relationship_tracker import test_relationship_scoring; test_relationship_scoring()`
+
+ ### Fixed
+ - **Chat Forking Foreign Key Constraint**: Fixed branch creation failure when chat contains NPCs
+   - **Root Cause**: `entities` table foreign key constraint required chat record to exist before entity insertion
+   - **Fix**: Added `db_create_empty_chat()` function called in `fork_chat()` before `db_remap_entities_for_branch()`
+   - **Impact**: Branching now works correctly for chats with local NPCs
+   - **Files Changed**: `app/database.py` (+35 lines), `main.py` (+3 lines)
+
+ ### Technical
+- **Database**: No schema changes
+- **Snapshot Analyzer**: Complete rewrite for primary character focus (~400 lines modified)
+- **Snapshot Prompt Builder**: Updated for 5-field extraction with expanded tag capacity (~50 lines modified)
+- **Relationship Tracker**: Added hybrid scoring methods (~200 lines added)
+- **Frontend**: Added mode parameter to snapshot request
+
+***
+
+## [1.10.2] - 2026-02-03
 
  ### Added
  - **Summaries Panel**: New UI sidebar panel for managing chat summaries
@@ -49,10 +91,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     - Performance: ~100ms (8-14x faster than pure semantic search)
     - Enhanced Debugging: New response fields (`extracted_traits`, `normalized_tags`)
 
- - **Snapshot System Simplification**: Simplified with direct LLM JSON extraction
-   - Replaced complex 4-block semantic search architecture
-   - **New Architecture**: LLM extracts 3 fields (location, action, dress) as JSON from conversation
-   - **Prompt Structure**: [Quality] + [Character Tags (Count + Appearance)] + [Action] + [Dress] + [Location] + [User Tags]
+  - **Snapshot System Simplification**: Simplified with direct LLM JSON extraction
+    - Replaced complex 4-block semantic search architecture
+    - **New Architecture**: LLM extracts 5 fields (location, action, activity, dress, expression) as JSON from conversation
+    - **Prompt Structure**: [Quality] + [Character Tags (Count + Appearance)] + [Action, Activity, Expression] + [Dress] + [Location] + [User Tags]
    - **Fallback Chain**: JSON extraction → Pattern extraction → Keyword matching → Empty scene
    - **Action Priority**: Smart selection: Physical interactions → Physical actions → Speaking → Standing
    - **Performance**: ~40% faster prompt generation, ~800 lines of code removed

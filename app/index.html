@@ -4942,6 +4942,12 @@
                 this.scrollToBottom();
 
                 try {
+                    // Generate UUID for new chats if currentChatId is null/undefined (same as sendMessage)
+                    if (!this.currentChatId) {
+                        this.currentChatId = 'new_chat_' + crypto.randomUUID();
+                        console.log('[CHAT ID] Generated new client-side chat ID for regenerate:', this.currentChatId);
+                    }
+
                     const lastUserMsg = this.messages[index];
                     const mode = await this.resolveMode(lastUserMsg?.content || '');
                     const res = await axios.post('/api/chat', {
@@ -4950,7 +4956,8 @@
                         characters: this.activeCharactersWithData(),
                         world_info: this.settings.world_info_enabled ? this.activeWI : null,
                         settings: this.settings,
-                        mode: mode
+                        mode: mode,
+                        chat_id: this.currentChatId
                     });
 
                     if (res.data._updated_state) {
@@ -4958,6 +4965,14 @@
                             this.messages = res.data._updated_state.messages;
                         }
                         this.summary = res.data._updated_state.summary;
+                    }
+
+                    // Always use chat_id returned from backend (whether new or existing)
+                    if (res.data._chat_id) {
+                        this.currentChatId = res.data._chat_id;
+                        console.log('[CHAT ID] Updated currentChatId from /api/chat response:', this.currentChatId);
+                    } else {
+                        console.warn('[CHAT ID] No _chat_id returned from /api/chat');
                     }
 
                     let aiContent = '';
@@ -4976,6 +4991,7 @@
                         id: Date.now() + 1
                     };
                     this.messages.push(aiMsg);
+                    await this.autosaveChat();
 
                 } catch (e) {
                     console.error('Regenerate failed:', e);
@@ -6531,7 +6547,8 @@
                     const response = await axios.post('/api/chat/snapshot', {
                         chat_id: this.currentChatId,
                         width: this.sdParams.width,
-                        height: this.sdParams.height
+                        height: this.sdParams.height,
+                        mode: this.selectedMode
                     });
 
                     if (response.data.error) {

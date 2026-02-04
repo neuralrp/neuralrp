@@ -40,7 +40,7 @@ from app.database import (
     db_get_worlds_by_tags, db_add_world_tags, db_remove_world_tags,
     # Chat and message operations
     db_get_chat, db_get_all_chats, db_save_chat, db_delete_chat,
-    db_get_message_context, db_cleanup_old_autosaved_chats, db_cleanup_empty_chats,
+    db_get_message_context, db_cleanup_old_autosaved_chats, db_cleanup_empty_chats, db_create_empty_chat,
     db_get_chat_npcs, db_create_npc_and_update_chat,
     db_get_npc_by_id, db_update_npc, db_create_npc_with_entity_id,
     db_delete_npc, db_set_npc_active,
@@ -69,6 +69,8 @@ from app.database import (
     # Relationship tracker functions
     db_get_relationship_state, db_get_all_relationship_states, db_update_relationship_state,
     db_copy_relationship_states_with_mapping,
+    # Branch fork functions
+    db_remap_entities_for_branch,
     # Change log cleanup
     db_cleanup_old_changes,
 )
@@ -1608,40 +1610,41 @@ cleanup_task = None
 async def analyze_and_update_relationships(chat_id: str, messages: list, 
                                       characters: list, user_name: str = None):
     """
-    Analyze relationships using direct semantic comparison.
+    Analyze relationships using semantic embeddings.
     Triggered at summarization boundary (every 10 messages).
     
     CRITICAL: characters list should already be extracted with get_character_name().
     """
-    global relationship_analyzer
+    USE_SEMANTIC_SCORING = True
     
-    if relationship_analyzer is None:
-        relationship_analyzer = RelationshipAnalyzer(semantic_search_engine)
+    if not USE_SEMANTIC_SCORING:
+        print("[RELATIONSHIP] Semantic scoring disabled, skipping")
+        return
     
     if len(characters) < 1:
         return
     
-    # Build entity list - characters are already extracted with get_character_name()
+    if adaptive_tracker is None:
+        print("[RELATIONSHIP] Adaptive tracker not initialized, skipping")
+        return
+    
     all_entities = characters.copy()
     if user_name:
         all_entities.append(user_name)
     
-    # Get recent speakers for relevance filtering
     recent_speakers = set(m.get('speaker') for m in messages[-10:])
     
-    # Analyze each directional relationship
     for char_from in characters:
         if char_from not in recent_speakers:
-            continue  # Character wasn't active
+            continue
         
         for entity_to in all_entities:
             if char_from == entity_to:
                 continue
             
             if entity_to not in recent_speakers:
-                continue  # Target wasn't active
+                continue
             
-            # Get current state
             current_state = db_get_relationship_state(chat_id, char_from, entity_to)
             
             if not current_state:
@@ -1650,32 +1653,47 @@ async def analyze_and_update_relationships(chat_id: str, messages: list,
                     'power_dynamic': 50, 'fear_anxiety': 50
                 }
             
-            # Analyze conversation directly (no LLM generation)
-            new_scores = relationship_analyzer.analyze_conversation(
-                messages=messages,
-                char_from=char_from,
-                entity_to=entity_to,
-                current_state=current_state
-            )
-            
-            if new_scores is None:
-                continue  # No interaction detected
-            
-            # Check for meaningful change (threshold: 5 points)
-            if any(abs(new_scores[dim] - current_state[dim]) > 5 
-                   for dim in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']):
+            relationship_messages = []
+            for msg in messages[-10:]:
+                speaker = msg.get('speaker', '')
+                content = msg.get('content', '')
                 
-                db_update_relationship_state(
-                    chat_id=chat_id,
-                    character_from=char_from,
-                    character_to=entity_to,
-                    scores=new_scores,
-                    last_message_id=messages[-1].get('id', 0)
+                if char_from in speaker and entity_to in content.lower():
+                    relationship_messages.append(content)
+                
+                if char_from in speaker and any(word in content.lower() for word in [entity_to.lower(), 'he', 'she', 'they', 'you']):
+                    relationship_messages.append(content)
+            
+            if not relationship_messages:
+                continue
+            
+            try:
+                new_scores = adaptive_tracker.analyze_conversation_scores(
+                    messages=relationship_messages,
+                    current_state=current_state
                 )
                 
-                print(f"[RELATIONSHIP] {char_from}→{entity_to}: "
-                      f"trust={new_scores['trust']}, bond={new_scores['emotional_bond']}, "
-                      f"conflict={new_scores['conflict']}")
+                if new_scores is None:
+                    continue
+                
+                if any(abs(new_scores[dim] - current_state[dim]) > 5 
+                       for dim in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']):
+                    
+                    db_update_relationship_state(
+                        chat_id=chat_id,
+                        character_from=char_from,
+                        character_to=entity_to,
+                        scores=new_scores,
+                        last_message_id=messages[-1].get('id', 0)
+                    )
+                    
+                    print(f"[RELATIONSHIP] {char_from}→{entity_to}: "
+                          f"trust={new_scores['trust']}, bond={new_scores['emotional_bond']}, "
+                          f"conflict={new_scores['conflict']}")
+            
+            except Exception as e:
+                print(f"[RELATIONSHIP] Scoring failed for {char_from}→{entity_to}: {e}")
+                continue
 
 
 # Global variable to store cleanup task
@@ -4143,6 +4161,7 @@ async def chat(request: PromptRequest):
         # === RELATIONSHIP ANALYSIS (Step 5 of relationship tracker) ===
         # Trigger relationship analysis at summarization boundary
         # Extract character names using get_character_name() for consistency
+        user_name = request.settings.get("user_name", "")
         active_character_names = []
         for char_obj in request.characters:
             active_character_names.append(get_character_name(char_obj))
@@ -4427,6 +4446,168 @@ class SnapshotRequest(BaseModel):
     chat_id: str
     width: Optional[int] = None  # Image width
     height: Optional[int] = None  # Image height
+    mode: Optional[str] = None  # Mode for primary character selection
+
+def get_primary_character_name(selected_mode: Optional[str], active_characters: List[str], character_names: List[str]) -> Optional[str]:
+    """
+    Determine primary character name based on selected mode.
+
+    Args:
+        selected_mode: Mode from frontend ("auto", "narrator", "focus:Alice", etc.)
+        active_characters: List of character references (filenames or npc_ids)
+        character_names: List of character names extracted from data
+
+    Returns:
+        Character name for primary character, or None for narrator mode
+    """
+    if not selected_mode or not active_characters:
+        return None
+
+    # Narrator mode - no primary character
+    if selected_mode == "narrator":
+        return None
+
+    # Specific character mode (e.g., "focus:Alice")
+    if selected_mode.startswith("focus:"):
+        focus_char_name = selected_mode.split(":", 1)[1].strip()
+        # Validate that this character is in active list
+        if focus_char_name in character_names:
+            return focus_char_name
+        return None
+
+    # Auto mode - use first active character
+    if selected_mode == "auto" and character_names:
+        return character_names[0]
+
+    return None
+
+def filter_characters_by_mode(chars_data: List[Dict], mode: Optional[str], 
+                             primary_char_name: Optional[str], 
+                             for_counting: bool = False) -> List[Dict]:
+    """
+    Filter characters for danbooru tags or counting based on mode.
+    
+    Args:
+        chars_data: Full list of character dicts from get_active_characters_data()
+        mode: Snapshot mode ('auto', 'narrator', 'focus:Name', None)
+        primary_char_name: Name of primary character (from get_primary_character_name())
+        for_counting: If True, use counting logic (Narrator includes all chars)
+    
+    Returns:
+        Filtered list of character dicts based on mode
+    """
+    if not chars_data:
+        return []
+    
+    if not mode or mode == "auto":
+        return chars_data
+    
+    if mode == "narrator":
+        return chars_data if for_counting else []
+    
+    if mode.startswith("focus:") and primary_char_name:
+        return [c for c in chars_data if c.get('name') == primary_char_name]
+    
+    return chars_data
+
+async def infer_character_counts_from_conversation(
+    messages: List[Dict],
+    http_client,
+    config,
+    chat_settings: Dict
+) -> str:
+    """
+    Infer character counts from conversation when no active characters.
+    
+    Args:
+        messages: Chat messages
+        http_client: httpx.AsyncClient for LLM requests
+        config: Application config dict with kobold_url
+        chat_settings: Chat settings dict with user gender/enablement
+    
+    Returns:
+        Count tags string (e.g., "2girls, 1boy") or "" if inference fails
+    """
+    if not http_client or not config.get('kobold_url'):
+        print("[SNAPSHOT] LLM unavailable, cannot infer character counts")
+        return ""
+    
+    recent_messages = messages[-5:] if len(messages) > 5 else messages
+    conversation_text = '\n'.join([
+        f"{msg.get('role', 'unknown')}: {msg.get('content', '')}"
+        for msg in recent_messages
+    ])
+    
+    prompt = f"""Analyze this conversation and determine how many characters are present in the scene.
+
+Count characters by gender:
+- Girls/Women/Females (use "Xgirls" tag, e.g., "1girl", "2girls", "3girls")
+- Boys/Men/Males (use "Xboys" tag, e.g., "1boy", "2boys", "3boys")
+- Others/Non-binary (use "Xothers" or appropriate tag)
+
+IMPORTANT: Do NOT include the user in your count. The user will be counted separately.
+
+Reply with ONLY count tags in format: "Xgirls, Xboys" or similar.
+If no characters mentioned, reply with "solo" or "none".
+
+Conversation:
+{conversation_text}
+
+Answer:"""
+
+    try:
+        response = await http_client.post(
+            f"{config['kobold_url']}/api/v1/generate",
+            json={
+                "prompt": prompt,
+                "max_length": 30,
+                "temperature": 0.2,
+                "top_p": 0.9
+            },
+            timeout=15.0
+        )
+        
+        result = response.json().get('results', [{}])[0].get('text', '').strip()
+        print(f"[SNAPSHOT] LLM inferred counts: {result}")
+        
+        include_user = chat_settings.get('include_user_in_snapshots', False)
+        if include_user:
+            user_gender = chat_settings.get('user_gender', '').lower()
+            if user_gender in ['female', 'male', 'other']:
+                counts = {'female': 0, 'male': 0, 'other': 0}
+                for tag in result.split(','):
+                    tag = tag.strip().lower()
+                    if 'girl' in tag:
+                        counts['female'] += int(''.join(filter(str.isdigit, tag)) or 1)
+                    elif 'boy' in tag:
+                        counts['male'] += int(''.join(filter(str.isdigit, tag)) or 1)
+                    elif 'other' in tag or 'multiple' in tag:
+                        counts['other'] += 1
+                
+                counts[user_gender] += 1
+                
+                count_tags = []
+                if counts['female'] == 1:
+                    count_tags.append('1girl')
+                elif counts['female'] > 1:
+                    count_tags.append(f'{counts["female"]}girls')
+                if counts['male'] == 1:
+                    count_tags.append('1boy')
+                elif counts['male'] > 1:
+                    count_tags.append(f'{counts["male"]}boys')
+                if counts['other'] == 1 and not count_tags:
+                    count_tags.append('solo')
+                elif counts['other'] > 0:
+                    count_tags.append('multiple')
+                
+                result = ', '.join(count_tags)
+                print(f"[SNAPSHOT] Counts with user added: {result}")
+        
+        return result
+        
+    except Exception as e:
+        print(f"[SNAPSHOT] Failed to infer character counts: {e}")
+        return ""
 
 def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_canon: bool = False) -> List[Dict]:
     """Extract gender and danbooru tags for all active characters in chat.
@@ -4437,7 +4618,7 @@ def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_ca
         include_visual_canon: If True, load visual_canon bindings (NEW)
         
     Returns:
-        List of dicts with 'name', 'gender', 'danbooru_tag' + optional visual_canon fields for each character
+        List of dicts with 'name', 'gender', 'danbooru_tag', 'description', 'personality' + optional visual_canon fields for each character
     """
     chars_data = []
     active_chars = chat.get("activeCharacters", [])
@@ -4454,6 +4635,8 @@ def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_ca
             
             char_dict = {
                 'name': npc_data.get('name', 'Unknown'),
+                'description': data.get('description', ''),
+                'personality': data.get('personality', ''),
                 'gender': extensions.get('gender', ''),
                 'danbooru_tag': extensions.get('danbooru_tag', '')
             }
@@ -4479,6 +4662,8 @@ def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_ca
             
             char_dict = {
                 'name': get_character_name(char_data),
+                'description': data.get('description', ''),
+                'personality': data.get('personality', ''),
                 'gender': extensions.get('gender', ''),
                 'danbooru_tag': extensions.get('danbooru_tag', '')
             }
@@ -4589,8 +4774,8 @@ def aggregate_danbooru_tags(chars_data: List[Dict], override_count: Optional[str
     if total_filtered > 0:
         print(f"[AGGREGATE] Total count tags filtered: {total_filtered}, remaining: {len(all_tags)}")
 
-    # Limit to first 12 tags (more space for visual details)
-    return ', '.join(all_tags[:12])
+    # Limit to first 30 tags (supports 3 characters × 10 tags)
+    return ', '.join(all_tags[:30])
 
 @app.post("/api/chat/snapshot")
 async def generate_chat_snapshot(request: SnapshotRequest):
@@ -4621,7 +4806,28 @@ async def generate_chat_snapshot(request: SnapshotRequest):
 
         # Extract active characters' gender and danbooru tags WITH visual canon data (NEW)
         chars_data = get_active_characters_data(chat, max_chars=3, include_visual_canon=True)
-        
+
+        # Determine primary character from mode
+        character_names = [c.get('name', '') for c in chars_data if c.get('name')]
+        primary_char_name = get_primary_character_name(
+            request.mode,
+            chat.get("activeCharacters", []),
+            character_names
+        )
+
+        # Load primary character card if specific character selected
+        primary_char_card = None
+        if primary_char_name:
+            for char_data in chars_data:
+                if char_data.get('name') == primary_char_name:
+                    # Use description + personality only (not full card)
+                    primary_char_card = char_data.get('description', '') + ' ' + char_data.get('personality', '')
+                    # Strip character names from description and personality to prevent LLM from copying them to JSON output
+                    primary_char_card = snapshot_analyzer._strip_character_names(primary_char_card, [primary_char_name])
+                    break
+
+        print(f"[SNAPSHOT] Primary character: {primary_char_name}")
+
         # Build user data for snapshot if enabled
         user_data = None
         
@@ -4645,21 +4851,36 @@ async def generate_chat_snapshot(request: SnapshotRequest):
             }
             print(f"[SNAPSHOT] Including user in snapshot: gender={user_data['gender']}")
         
-        # Auto-count characters by gender (including user if enabled)
+        # Filter characters for danbooru tags and counting based on mode
+        chars_for_tags = filter_characters_by_mode(chars_data, request.mode, primary_char_name, for_counting=False)
+        chars_for_count = filter_characters_by_mode(chars_data, request.mode, primary_char_name, for_counting=True)
+        print(f"[SNAPSHOT] Mode={request.mode}, chars_for_tags={len(chars_for_tags)}, chars_for_count={len(chars_for_count)}")
+        
+        # Auto-count characters by gender
         user_gender = user_data.get('gender') if user_data else None
-        count_tags = auto_count_characters_by_gender(chars_data, user_gender=user_gender, include_user=bool(user_data))
+        
+        # Use LLM fallback if no active characters
+        if len(chars_for_count) == 0 and len(chars_data) == 0:
+            print("[SNAPSHOT] No active characters, inferring counts from conversation")
+            count_tags = await infer_character_counts_from_conversation(
+                messages, snapshot_http_client, CONFIG, chat_settings
+            )
+        else:
+            count_tags = auto_count_characters_by_gender(chars_for_count, user_gender=user_gender, include_user=bool(user_data))
+        
         print(f"[SNAPSHOT] Auto-counted: {count_tags}")
         
-        # Aggregate danbooru tags with gender override
-        character_tags = aggregate_danbooru_tags(chars_data, override_count=count_tags if count_tags else None)
+        # Aggregate danbooru tags from filtered characters only
+        character_tags = aggregate_danbooru_tags(chars_for_tags, override_count=count_tags if count_tags else None)
         print(f"[SNAPSHOT] Aggregated character tags: {character_tags}")
-        
-        # Extract character names for name-stripping (prevents name leakage to LLM)
-        character_names = [c.get('name', '') for c in chars_data if c.get('name')]
-        
-        # Analyze scene using new JSON extraction
+
+        # Analyze scene using character-scoped JSON extraction
         scene_analysis = await snapshot_analyzer.analyze_scene(
-            messages, request.chat_id, character_names=character_names
+            messages,
+            request.chat_id,
+            character_names=character_names,
+            primary_character=primary_char_name,
+            primary_character_card=primary_char_card
         )
         
         # Extract scene JSON for simplified prompt building
@@ -6045,12 +6266,16 @@ async def fork_chat(request: ForkRequest):
     # 4. Generate branch chat ID
     branch_chat_id = f"{origin_chat_name}_fork_{int(time.time())}"
 
-    # 5. Copy metadata with NPCs
+    # 5. CRITICAL: Create empty chat record before entity remapping
+    # This prevents FOREIGN KEY constraint failure when inserting entities
+    db_create_empty_chat(branch_chat_id)
+
+    # 6. Copy metadata with NPCs
     branch_metadata = origin_chat.get("metadata", {}).copy()
     localnpcs = branch_metadata.get("localnpcs", {}).copy()
 
-    # 6. CRITICAL: Remap NPC entity IDs for branch safety
-    entity_mapping = db_copy_npcs_for_branch(
+    # 7. CRITICAL: Remap NPC entity IDs for branch safety
+    entity_mapping = db_remap_entities_for_branch(
         origin_chat_name,
         branch_chat_id,
         localnpcs  # modified in place
@@ -6058,8 +6283,8 @@ async def fork_chat(request: ForkRequest):
 
     branch_metadata["localnpcs"] = localnpcs
 
-    
-    # 7. Update activeCharacters with new NPC entity IDs
+
+    # 8. Update activeCharacters with new NPC entity IDs
     active_chars = origin_chat.get('activeCharacters', []).copy()
     updated_active_chars = []
     for char_ref in active_chars:
@@ -6069,8 +6294,8 @@ async def fork_chat(request: ForkRequest):
         else:
             # Keep global character filenames as-is
             updated_active_chars.append(char_ref)
-    
-    # 8. Assemble branch data
+
+    # 9. Assemble branch data
     branch_data = {
         'messages': branch_messages,
         'summary': origin_chat.get('summary', ''),
@@ -6085,8 +6310,8 @@ async def fork_chat(request: ForkRequest):
             'created_at': time.time()
         }
     }
-    
-    # 9. Copy relationship states with entity ID mapping BEFORE saving branch
+
+    # 10. Copy relationship states with entity ID mapping BEFORE saving branch
     # This ensures entity_mapping is complete before branch data is persisted
     db_copy_relationship_states_with_mapping(
         origin_chat_name,
@@ -6094,8 +6319,8 @@ async def fork_chat(request: ForkRequest):
         fork_from_message_id,
         entity_mapping
     )
-    
-    # 10. Save branch chat AFTER relationship copying
+
+    # 11. Save branch chat AFTER relationship copying
     db_save_chat(branch_chat_id, branch_data, autosaved=True)
     
     print(f"[FORK] Created branch {branch_chat_id} from {origin_chat_name} at message {fork_from_message_id}")

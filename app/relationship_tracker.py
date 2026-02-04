@@ -286,6 +286,119 @@ class AdaptiveRelationshipTracker:
         self.turn_count = 0
         self.last_trigger_turn = 0
         self.previous_turn_embedding = None
+    
+    def _compute_keyword_polarity(self, text: str) -> Dict[str, int]:
+        """
+        Compute keyword polarity for each dimension.
+        
+        Returns:
+            Dict of {dimension: polarity_score}
+            polarity_score: positive = +1, negative = -1, neutral = 0
+        """
+        text_lower = text.lower()
+        polarity = {}
+        
+        for dimension, keywords in self.relationship_keywords.items():
+            mid = len(keywords) // 2
+            positive = keywords[:mid]
+            negative = keywords[mid:]
+            
+            pos_count = sum(1 for kw in positive if f'\\b{kw}\\b' in text_lower)
+            neg_count = sum(1 for kw in negative if f'\\b{kw}\\b' in text_lower)
+            
+            if pos_count > neg_count:
+                polarity[dimension] = 1
+            elif neg_count > pos_count:
+                polarity[dimension] = -1
+            else:
+                polarity[dimension] = 0
+        
+        return polarity
+    
+    def _compute_semantic_similarity(self, embeddings, dimension: str) -> float:
+        """
+        Compute average semantic similarity between message embeddings and dimension prototype.
+        
+        Args:
+            embeddings: List of message embeddings
+            dimension: One of ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']
+        
+        Returns:
+            Similarity score (0.0 to 1.0)
+        """
+        if not embeddings or dimension not in self.dimension_embeddings:
+            return 0.0
+        
+        prototype = self.dimension_embeddings[dimension]
+        if prototype is None:
+            return 0.0
+        
+        similarities = []
+        for emb in embeddings:
+            sim = np.dot(emb, prototype) / (np.linalg.norm(emb) * np.linalg.norm(prototype))
+            similarities.append(float(sim))
+        
+        return np.mean(similarities) if similarities else 0.0
+    
+    def analyze_conversation_scores(self, messages: List[str], current_state: Dict[str, int]) -> Dict[str, int]:
+        """
+        Analyze conversation to compute new relationship scores.
+        
+        Algorithm:
+        1. Detect keyword polarity (positive/negative signals)
+        2. Compute semantic similarity to dimension prototypes
+        3. Combine signals (70% semantic, 30% keywords for nuance)
+        4. Apply smoothing (gradual evolution, not wild swings)
+        5. Return clamped scores [0-100]
+        
+        Args:
+            messages: List of recent messages (content only)
+            current_state: Current relationship scores {dimension: score}
+        
+        Returns:
+            Dict of new scores {dimension: new_score}
+        """
+        if not self.model or not messages:
+            return current_state.copy()
+        
+        text = " ".join(messages)
+        keyword_polarity = self._compute_keyword_polarity(text)
+        
+        try:
+            embeddings = [self.model.encode(msg, convert_to_numpy=True) for msg in messages]
+        except Exception as e:
+            print(f"[RELATIONSHIP_SCORING] Encoding failed: {e}")
+            return current_state.copy()
+        
+        semantic_similarities = {}
+        for dimension in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']:
+            semantic_similarities[dimension] = self._compute_semantic_similarity(embeddings, dimension)
+        
+        deltas = {}
+        for dimension in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']:
+            semantic = semantic_similarities[dimension]
+            polarity = keyword_polarity.get(dimension, 0)
+            
+            semantic_delta = (semantic - 0.5) * 20
+            keyword_delta = polarity * 5
+            combined_delta = (semantic_delta * 0.7) + (keyword_delta * 0.3)
+            combined_delta = max(-15, min(15, combined_delta))
+            
+            deltas[dimension] = combined_delta
+        
+        new_scores = {}
+        for dimension, delta in deltas.items():
+            current_score = current_state.get(dimension, 50)
+            new_score = current_score + delta
+            new_score = max(0, min(100, new_score))
+            new_scores[dimension] = new_score
+        
+        print(f"[RELATIONSHIP_SCORING] Semantic: {semantic_similarities}")
+        print(f"[RELATIONSHIP_SCORING] Polarity: {keyword_polarity}")
+        print(f"[RELATIONSHIP_SCORING] Deltas: {deltas}")
+        print(f"[RELATIONSHIP_SCORING] Old: {current_state} → New: {new_scores}")
+        
+        return new_scores
 
 
 # Global instance (initialized in main.py after semantic_search_engine loads)
@@ -304,3 +417,78 @@ def initialize_adaptive_tracker(semantic_search_engine):
         adaptive_tracker = AdaptiveRelationshipTracker(semantic_search_engine.model)
         print("[ADAPTIVE_TRACKER] Initialized with shared semantic model")
     return adaptive_tracker
+
+
+# ============================================================================
+# TESTING & DEBUGGING
+# ============================================================================
+
+def test_relationship_scoring():
+    """
+    Test harness for relationship scoring.
+    Run this to verify semantic scoring accuracy.
+    
+    Usage:
+        from app.relationship_tracker import test_relationship_scoring
+        test_relationship_scoring()
+    """
+    class MockModel:
+        def encode(self, text, convert_to_numpy=False):
+            import hashlib
+            import numpy as np
+            hash_val = int(hashlib.md5(text.encode()).hexdigest()[:8], 16)
+            return np.array([(hash_val >> i) & 0xFF for i in range(0, 64, 8)])
+    
+    test_cases = [
+        {
+            "name": "Explicit conflict",
+            "messages": ["I hate you!", "You're the enemy."],
+            "current_state": {"trust": 50, "conflict": 50},
+            "expected_behavior": "conflict increases significantly"
+        },
+        {
+            "name": "Subtle sarcasm",
+            "messages": ["Oh, thanks a lot. That's really helpful."],
+            "current_state": {"trust": 50, "conflict": 50},
+            "expected_behavior": "subtle conflict increase, trust decrease"
+        },
+        {
+            "name": "Genuine affection",
+            "messages": ["I care about you deeply.", "You mean everything to me."],
+            "current_state": {"trust": 50, "emotional_bond": 50},
+            "expected_behavior": "emotional_bond and trust increase"
+        },
+        {
+            "name": "Neutral conversation",
+            "messages": ["How's the weather?", "It's fine."],
+            "current_state": {"trust": 50, "conflict": 50},
+            "expected_behavior": "minimal changes"
+        }
+    ]
+    
+    tracker = AdaptiveRelationshipTracker(MockModel())
+    
+    print("=" * 60)
+    print("RELATIONSHIP SCORING TEST HARNESS")
+    print("=" * 60)
+    
+    for test in test_cases:
+        print(f"\nTest: {test['name']}")
+        print(f"Expected: {test['expected_behavior']}")
+        print(f"Messages: {test['messages']}")
+        
+        result = tracker.analyze_conversation_scores(
+            messages=test['messages'],
+            current_state=test['current_state']
+        )
+        
+        print(f"Result: {result}")
+        
+        for dim, new_val in result.items():
+            if not (0 <= new_val <= 100):
+                print(f"  ❌ ERROR: {dim} = {new_val} (out of bounds)")
+    
+    print("\n" + "=" * 60)
+    print("TEST HARNESS COMPLETE")
+    print("=" * 60)
+

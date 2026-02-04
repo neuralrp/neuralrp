@@ -4,15 +4,15 @@ Snapshot Prompt Builder - Simplified Version
 Builds SD prompts using JSON scene extraction instead of complex semantic matching.
 
 New Architecture:
-1. Extract scene JSON from LLM (location, action, dress)
+1. Extract scene JSON from LLM (location, action, activity, dress, expression)
 2. Combine directly with character tags and quality tags
 3. No semantic search, no tag tables, no scoring
 
 Final Prompt Structure:
-[Block 0: Quality] + [Character Tags (Count + Appearance)] + [Action] + [Dress] + [Location] + [User Tags]
+[Block 0: Quality] + [Character Tags (Count + Appearance)] + [Action, Activity, Expression] + [Dress] + [Location] + [User Tags]
 
 Example:
-"masterpiece, best quality, high quality, 1girl, solo, blonde hair, blue eyes, sitting and drinking beer, wearing leather armor, tavern interior"
+"masterpiece, best quality, high quality, 1girl, solo, blonde hair, blue eyes, sitting, at basketball game, smiling, leather armor, tavern interior"
 """
 
 from typing import List, Dict, Tuple, Optional, Any
@@ -37,23 +37,23 @@ class SnapshotPromptBuilder:
                          character_count_tags: str) -> Tuple[str, str]:
         """
         Build simplified prompt using JSON extraction.
-        
+
         Args:
-            scene_json: {'location': str, 'action': str, 'dress': str}
+            scene_json: {'location': str, 'action': str, 'activity': str, 'dress': str, 'expression': str}
             character_tags: List of danbooru tags from character visual_canon
             user_tags: List of danbooru tags from user settings
             character_count_tags: String like "1girl" or "2girls, 1boy"
-            
+
         Returns:
             (positive_prompt, negative_prompt)
-            
+
         Example:
-        >>> scene_json = {'location': 'tavern interior', 'action': 'sitting and drinking', 'dress': 'leather armor'}
+        >>> scene_json = {'location': 'tavern interior', 'action': 'sitting', 'activity': 'drinking beer', 'dress': 'leather armor', 'expression': 'smiling'}
         >>> character_tags = ['blonde hair', 'blue eyes']
         >>> user_tags = []
         >>> character_count_tags = '1girl, solo'
         >>> builder.build_simple_prompt(scene_json, character_tags, user_tags, character_count_tags)
-        'masterpiece, best quality, high quality, 1girl, solo, blonde hair, blue eyes, sitting and drinking, leather armor, tavern interior'
+        'masterpiece, best quality, high quality, 1girl, solo, blonde hair, blue eyes, sitting, drinking beer, smiling, leather armor, tavern interior'
         """
         parts = []
 
@@ -63,19 +63,33 @@ class SnapshotPromptBuilder:
         # Character tags (count + appearance combined)
         if character_count_tags:
             parts.append(character_count_tags)
-        parts.extend(character_tags[:5])
+        parts.extend(character_tags[:20])
 
-        # Action (from LLM JSON)
-        if scene_json.get('action'):
-            parts.append(scene_json['action'])
+        # Action + Activity + Expression (from LLM JSON)
+        action_text = scene_json.get('action', '')
+        activity_text = scene_json.get('activity', '')
+        expression_text = scene_json.get('expression', '')
+
+        # Build action+activity+expression combination
+        action_parts = []
+        if action_text:
+            action_parts.append(action_text)
+        if activity_text:
+            action_parts.append(activity_text)
+        if expression_text:
+            action_parts.append(expression_text)  # Expression after action+activity
+
+        if action_parts:
+            parts.append(', '.join(action_parts))
 
         # Dress (from LLM JSON)
         if scene_json.get('dress'):
             parts.append(scene_json['dress'])
 
-        # Location (from LLM JSON)
+        # Location (from LLM JSON) - force "at" prefix
         if scene_json.get('location'):
-            parts.append(scene_json['location'])
+            location = scene_json['location'].strip()
+            parts.append(f"at {location}")
 
         # User tags
         parts.extend(user_tags[:5])

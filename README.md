@@ -165,8 +165,8 @@ Automatic selectable step/resolution reduction when context is large (>12K token
 
 ### 4. Snapshots
 
-- **Generated from Context** – Generate images from chat context automatically; AI analyzes the last turn, providing location, actions, and dress, which is then directly matched to a LLM-optimized prompt. Semantic matching is used as a fallback.
-- **How is it Different?** - It doesn't just ask the LLM for a complete prompt and shove it into A1111, it doesn't leak text into the context window. It takes a specific framework optimized for Anime-based LLM generation models, using Danbooru tags that those models are specifically trained on, to create consistent images. The LLM is just delivering keywords - action, location, and dress. This is a fundamentally different process from every other solution out there. 
+- **Generated from Context** – Generate images from chat context automatically; AI analyzes the last turn, providing location, action, activity, dress, and facial expression, which is then directly matched to a LLM-optimized prompt. Semantic matching is used as a fallback.
+- **How is it Different?** - It doesn't just ask the LLM for a complete prompt and shove it into A1111, it doesn't leak text into the context window. It takes a specific framework optimized for Anime-based LLM generation models, using Danbooru tags that those models are specifically trained on, to create consistent images. The LLM is just delivering keywords - action, location, activity, dress, and facial expression. This is a fundamentally different process from every other solution out there. 
 
 ### 5. Browse and Save Your Images
 - **Images Folder** - separate images folder where every generation is saved, even if you delete it in the chat

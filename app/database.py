@@ -1400,6 +1400,44 @@ def db_get_chat(chat_id: str, include_summarized: bool = False) -> Optional[Dict
         }
 
 
+def db_create_empty_chat(chat_id: str, branch_name: Optional[str] = None) -> bool:
+    """Create an empty chat record in the database.
+    
+    Used by fork_chat() to ensure chat exists before inserting entities
+    (prevents foreign key constraint violation).
+    
+    Args:
+        chat_id: Unique identifier for the chat
+        branch_name: Optional branch name for the chat
+    
+    Returns:
+        bool: True if chat created successfully, False otherwise
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            timestamp = int(time.time())
+            
+            cursor.execute("""
+                INSERT OR IGNORE INTO chats 
+                (id, branch_name, summary, metadata, created_at, autosaved)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (chat_id, branch_name, '', '{}', timestamp, False))
+            
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                print(f"[DB] Created empty chat record: {chat_id}")
+                return True
+            else:
+                print(f"[DB] Chat {chat_id} already exists")
+                return False
+    except Exception as e:
+        print(f"[DB] Error creating empty chat {chat_id}: {e}")
+        return False
+
+
 def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> Dict[str, int]:
     """Save or update a chat session with all messages using soft delete.
     
