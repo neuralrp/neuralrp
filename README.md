@@ -12,7 +12,7 @@
 
 **Next step: Open [Quickstart Guide](docs/QUICKSTART.md) for setup, recommended LLM models, and example characters and worlds**
 
-**Status**: Actively developed, v1.10.x is still under testing. Expect bugs. 
+**Status**: Actively developed, v1.10.x is still under testing. Expect bugs. Tell me about any you find in Discussions!
 ---
 
 ## Table of Contents
@@ -35,6 +35,27 @@
 - [License](#license)
 
 ---
+
+## v1.10.3: Snapshot Overhaul, Relationship Smarts, and Increased Reliabilty
+
+1. **Snapshot Overhaul** - Faster, more accurate, and better at matching what's actually happening:
+
+- Larger Context Window: Expanded from 2-message to 20-message analysis for much better scene understanding
+- 5-Field Extraction: Enhanced detail: location, action, activity, dress, and expression (up from 3 fields)
+- Primary Character Mode: Mode-based character focus (auto, focus:name, narrator) so snapshots lock onto the right character
+- Better Danbooru Compatibility – Handles possessives cleanly ("Rebecca's" → "another's") to avoid name-induced SD artifacts.
+
+2. **Relationship Smarts** - Because sometimes characters are more subtle than just "drawing their sword"
+
+- Dual-Signal Analysis: Combines semantic similarity (70%) with keyword polarity (30%) for more stable, believable relationship changes.
+- Keyword Polarity Library – Uses 60+ relationship keywords across trust, emotional bond, conflict, power dynamic, and fear/anxiety.
+- Prototype Matching – Compares conversation embeddings to dimension prototypes (e.g., “love, affection, romance, care, adoration” for emotional bond) for subtler nuance.
+
+3. **Increased Reliabilty** - Found these while trying to push limits in RP
+
+- Chat Forking with NPCs — Fixed bug where branching chats containing NPCs failed with foreign key constraint violations. 
+- Capsule Generation Consistency — Fixed `regenerate()` function not sending `chat_id`, which caused NPCs to fall back to generic description+personality instead of voice fingerprint capsules.
+- Variable Scoring Fixes — Fixed `user_name` undefined error during summarization-triggered relationship analysis.
 
 ## Why It’s Different
 
