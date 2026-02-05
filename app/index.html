@@ -1972,18 +1972,6 @@
                                                         <!-- Scene Analysis Details (Toggleable) -->
                                                         <div x-show="msg.showDetails" x-transition class="mt-3 space-y-2">
                                                             <div class="bg-slate-950/50 rounded-lg p-2">
-                                                                <div class="text-[9px] text-slate-400 font-bold uppercase mb-1">Scene Type</div>
-                                                                <div class="text-[10px] text-slate-200" x-text="msg.snapshot.scene_analysis.scene_type"></div>
-                                                            </div>
-                                                            <div class="bg-slate-950/50 rounded-lg p-2">
-                                                                <div class="text-[9px] text-slate-400 font-bold uppercase mb-1">Setting</div>
-                                                                <div class="text-[10px] text-slate-200" x-text="msg.snapshot.scene_analysis.setting || 'Unknown'"></div>
-                                                            </div>
-                                                            <div class="bg-slate-950/50 rounded-lg p-2">
-                                                                <div class="text-[9px] text-slate-400 font-bold uppercase mb-1">Mood</div>
-                                                                <div class="text-[10px] text-slate-200" x-text="msg.snapshot.scene_analysis.mood || 'Unknown'"></div>
-                                                            </div>
-                                                            <div class="bg-slate-950/50 rounded-lg p-2">
                                                                 <div class="text-[9px] text-slate-400 font-bold uppercase mb-1">Prompt</div>
                                                                 <div class="text-[9px] text-slate-300 font-mono break-all" x-text="msg.snapshot.prompt"></div>
                                                             </div>
@@ -3158,7 +3146,8 @@
             worldInfos: [],
             activeWI: null,
             expandedWorlds: new Set(),
-            currentChatId: null,
+             currentChatId: null,
+            currentChatMetadata: null,
             newWIEntry: { keys: '', content: '' },
             editingMessageId: null,
             editBuffer: '',
@@ -4207,11 +4196,11 @@
 
                     // Load NPCs BEFORE restoring activeCharacters
                     await this.loadChatNPCs(this.currentChatId);
-
+                    
                     // Now restore activeCharacters, validating NPC references
                     const savedActiveChars = d.activeCharacters || [];
                     this.activeCharacters = [];
-
+                    
                     for (const charRef of savedActiveChars) {
                         if (typeof charRef === 'string') {
                             if (charRef.startsWith('npc_')) {
@@ -4233,7 +4222,10 @@
                             }
                         }
                     }
-
+                    
+                    // Preserve metadata to prevent NPC bleeding between forked chats
+                    this.currentChatMetadata = d.metadata || {};
+                    
                     this.showForkDialog = false;
                     this.showBranchDialog = false;
                     this.showRenameDialog = false;
@@ -4280,6 +4272,7 @@
                     activeCharacters: normalizedActiveChars,
                     activeWI: this.activeWI,
                     settings: this.settings,
+                    metadata: this.currentChatMetadata || {},
                 };
 
                 try {
@@ -6724,7 +6717,10 @@
                 this.isGeneratingSnapshot = true;
 
                 try {
-                    const response = await axios.post(`/api/chat/${this.currentChatId}/snapshot/regenerate`);
+                    const response = await axios.post(`/api/chat/${this.currentChatId}/snapshot/regenerate`, {
+                        width: this.sdParams.width,
+                        height: this.sdParams.height
+                    });
 
                     if (response.data.error) {
                         alert('Regeneration failed: ' + response.data.error);

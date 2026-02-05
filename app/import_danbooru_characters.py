@@ -101,11 +101,11 @@ def import_characters(df, db_path=DB_PATH):
         print("[IMPORT FATAL] Embeddings are required for this application.")
         sys.exit(1)
     
-    # Load embedding model
+    # Load embedding model (local only to avoid network calls)
     print("[IMPORT] Loading embedding model (all-mpnet-base-v2)...")
     try:
         from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer('all-mpnet-base-v2')
+        model = SentenceTransformer('all-mpnet-base-v2', local_files_only=True)
         print("[IMPORT] Embedding model loaded successfully")
     except ImportError as e:
         print(f"[IMPORT FATAL] sentence-transformers not available: {e}")

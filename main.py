@@ -1,5 +1,5 @@
 # Simple FastAPI app with NPC support
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi import Request
@@ -68,9 +68,8 @@ from app.database import (
     db_cleanup_old_autosaved_chats, db_cleanup_empty_chats,
     # Relationship tracker functions
     db_get_relationship_state, db_get_all_relationship_states, db_update_relationship_state,
-    db_copy_relationship_states_with_mapping,
     # Branch fork functions
-    db_remap_entities_for_branch,
+    db_remap_entities_for_branch, db_fork_chat_transaction,
     # Change log cleanup
     db_cleanup_old_changes,
 )
@@ -78,6 +77,7 @@ from app.database import (
 from app.tag_manager import parse_tag_string
 from app.snapshot_analyzer import SnapshotAnalyzer
 from app.snapshot_prompt_builder import SnapshotPromptBuilder
+from app.danbooru_tag_generator import parse_physical_body_plist
 
 # NPC helper functions are now integrated in load_character_profiles()
 
@@ -787,36 +787,69 @@ class WorldEditEntryRequest(BaseModel):
 def get_character_name(character_obj: Any) -> str:
     """
     Extract character name consistently from any character reference.
-    
+
     CRITICAL: This is the ONLY approved way to get character names.
     DO NOT extract first name only or modify the name string.
     This ensures relationship tracker and other features work correctly.
-    
+
     Args:
         character_obj: Can be:
             - Dict with 'data.name' (from db_get_character)
             - Dict with 'name' (from character card)
             - String (already a name)
-    
+
     Returns:
         Full character name, never empty
     """
     if isinstance(character_obj, str):
         # Already a name string
         return character_obj.strip() or "Unknown"
-    
+
     if isinstance(character_obj, dict):
         # Standard format: {'data': {'name': '...'}}
         if 'data' in character_obj:
             name = character_obj['data'].get('name', 'Unknown')
             if name and isinstance(name, str):
                 return name.strip()
-        
+
         # Fallback: {'name': '...'}
         name = character_obj.get('name', 'Unknown')
         if name and isinstance(name, str):
             return name.strip()
-    
+
+    return "Unknown"
+
+
+def get_entity_id(character_obj: Any) -> str:
+    """
+    Extract entity ID consistently from any character reference.
+    Used for relationship tracking to ensure proper entity identification.
+
+    Args:
+        character_obj: Can be:
+            - Dict with '_filename' (global character)
+            - Dict with 'entity_id' (local NPC)
+            - String (already an entity ID)
+
+    Returns:
+        Entity ID string or 'Unknown' if not found
+    """
+    if isinstance(character_obj, str):
+        # Already an entity ID string
+        return character_obj.strip() or "Unknown"
+
+    if isinstance(character_obj, dict):
+        # Global character: use _filename (e.g., 'alice.json')
+        if '_filename' in character_obj:
+            return character_obj['_filename']
+
+        # Local NPC: use entity_id (e.g., 'npc_123456_789')
+        if 'entity_id' in character_obj:
+            return character_obj['entity_id']
+
+        # Fallback: try to derive from name
+        return get_character_name(character_obj)
+
     return "Unknown"
 
 # Token counting helper
@@ -1137,8 +1170,8 @@ class SemanticSearchEngine:
             # Detect optimal device
             device = self._detect_device()
             
-            # Load model with explicit device assignment
-            self.model = SentenceTransformer(self.model_name, device=device)
+            # Load model with explicit device assignment (local only to avoid network calls)
+            self.model = SentenceTransformer(self.model_name, device=device, local_files_only=True)
             
             # Verify model is on correct device
             if hasattr(self.model, 'device'):
@@ -1428,61 +1461,89 @@ RELATIONSHIP_TEMPLATES = {
 }
 
 
-def get_relationship_context(chat_id: str, characters: list, user_name: str, 
+def get_relationship_context(chat_id: str, character_objs: list, user_name: str,
                             recent_messages: list) -> str:
     """
     Generate compact relationship context for prompt injection.
     Uses Tier 3 semantic filtering to only include dimensions relevant to current conversation.
     Returns 0-75 tokens depending on active interactions.
-    
-    CRITICAL: characters list should already be extracted with get_character_name().
+
+    CRITICAL: character_objs should be full character objects (not just names).
+    This function extracts entity IDs and names for proper relationship tracking.
     """
     import random
-    
+
+    # Extract entity IDs and names from character objects
+    entity_map = {}  # entity_id -> name
+    name_map = {}    # name -> entity_id
+    for char_obj in character_objs:
+        entity_id = get_entity_id(char_obj)
+        name = get_character_name(char_obj)
+        entity_map[entity_id] = name
+        name_map[name] = entity_id
+
     # Identify active speakers in last 5 messages
     # Fix: Access Pydantic model attributes directly (m.speaker, m.role)
     active_speakers = set(m.speaker or m.role for m in recent_messages[-5:])
-    active_characters = [c for c in characters if c in active_speakers]
+
+    # Find active characters (by entity ID or name)
+    active_characters = []
+    for entity_id, name in entity_map.items():
+        if entity_id in active_speakers or name in active_speakers:
+            active_characters.append((entity_id, name))
+
     user_is_active = any(
         m.role == 'user' or m.speaker == user_name
         for m in recent_messages[-5:]
     )
-    
+
     # Need at least 2 entities (char+char or char+user)
     if not ((len(active_characters) >= 1 and user_is_active) or len(active_characters) >= 2):
         return ""
-    
+
     # Get current turn text for semantic relevance filtering
     # Use the most recent message's content
     current_text = ""
     if recent_messages:
         current_text = recent_messages[-1].content or ""
-    
+
     lines = []
-    
+
     # Build relationship states dictionary for all active entity pairs
     # Format: {from_entity: {dimension: score}}
     relationship_states = {}
-    
+
     # Character-to-character relationships
-    for char_from in active_characters:
-        for char_to in active_characters:
-            if char_from == char_to:
+    for from_id, from_name in active_characters:
+        for to_id, to_name in active_characters:
+            if from_id == to_id:
                 continue
-            
-            state = db_get_relationship_state(chat_id, char_from, char_to)
+
+            state = db_get_relationship_state(chat_id, from_id, to_id)
             if state:
-                entity_key = f"{char_from}→{char_to}"
-                relationship_states[entity_key] = state
-    
+                entity_key = f"{from_name}→{to_name}"
+                relationship_states[entity_key] = {
+                    'trust': state['trust'],
+                    'emotional_bond': state['emotional_bond'],
+                    'conflict': state['conflict'],
+                    'power_dynamic': state['power_dynamic'],
+                    'fear_anxiety': state['fear_anxiety']
+                }
+
     # Character-to-user relationships
     if user_is_active and active_characters:
         user_name_or_default = user_name or "User"
-        for char_from in active_characters:
-            state = db_get_relationship_state(chat_id, char_from, user_name_or_default)
+        for from_id, from_name in active_characters:
+            state = db_get_relationship_state(chat_id, from_id, user_name_or_default)
             if state:
-                entity_key = f"{char_from}→{user_name_or_default}"
-                relationship_states[entity_key] = state
+                entity_key = f"{from_name}→{user_name_or_default}"
+                relationship_states[entity_key] = {
+                    'trust': state['trust'],
+                    'emotional_bond': state['emotional_bond'],
+                    'conflict': state['conflict'],
+                    'power_dynamic': state['power_dynamic'],
+                    'fear_anxiety': state['fear_anxiety']
+                }
     
     # Use adaptive tracker's Tier 3 semantic filtering if available
     if adaptive_tracker and relationship_states:
@@ -1506,15 +1567,20 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
                     continue
                 
                 # Generate templates for each relevant dimension
+                lines_before = len(lines)
                 for dim in relevant_dims:
                     score = state[dim]
+                    # Clamp score to valid range to prevent lookup failures
+                    score = max(0, min(100, score))
                     for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
                         if low <= score <= high:
                             if templates:
                                 template = random.choice(templates)
                                 lines.append(template.format(from_=char_from, to=char_to))
+                            break  # Found matching range, stop searching
                 
-                if lines:
+                # Only add period if this iteration added content
+                if len(lines) > lines_before:
                     lines.append(".")
             
             if lines:
@@ -1529,14 +1595,15 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
     
     # Fallback: Legacy behavior without semantic filtering
     # For each active character, describe notable feelings
-    for char_from in active_characters:
+    # Note: active_characters contains tuples of (entity_id, name)
+    for from_id, from_name in active_characters:
         # Check toward other characters
-        for char_to in active_characters:
-            if char_from == char_to:
+        for to_id, to_name in active_characters:
+            if from_id == to_id:
                 continue
             
-            # Get relationship state
-            state = db_get_relationship_state(chat_id, char_from, char_to)
+            # Get relationship state using entity IDs
+            state = db_get_relationship_state(chat_id, from_id, to_id)
             if not state:
                 continue
             
@@ -1546,6 +1613,8 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
             
             for dim in dimensions:
                 score = state[dim]
+                # Clamp score to valid range to prevent lookup failures
+                score = max(0, min(100, score))
                 if abs(score - 50) > 15:
                     notable.append((dim, score))
             
@@ -1554,22 +1623,26 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
             top_two = notable[:2]
             
             # Generate templates for top two dimensions
+            lines_before = len(lines)
             for dim, score in top_two:
                 for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
                     if low <= score <= high:
                         if templates:
                             template = random.choice(templates)
-                            lines.append(template.format(from_=char_from, to=char_to))
+                            lines.append(template.format(from_=from_name, to=to_name))
+                        break  # Found matching range, stop searching
             
-            if lines:
+            # Only add period if this iteration added content
+            if len(lines) > lines_before:
                 lines.append(".")
     
     # Also check toward user if user is active (fallback only)
     if user_is_active and active_characters:
         user_name_or_default = user_name or "User"
         
-        for char_from in active_characters:
-            state = db_get_relationship_state(chat_id, char_from, user_name_or_default)
+        for from_id, from_name in active_characters:
+            # Get relationship state using entity ID
+            state = db_get_relationship_state(chat_id, from_id, user_name_or_default)
             if not state:
                 continue
             
@@ -1579,6 +1652,8 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
             
             for dim in dimensions:
                 score = state[dim]
+                # Clamp score to valid range to prevent lookup failures
+                score = max(0, min(100, score))
                 if abs(score - 50) > 15:
                     notable.append((dim, score))
             
@@ -1587,14 +1662,17 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
             top_two = notable[:2]
             
             # Generate templates for top two dimensions
+            lines_before = len(lines)
             for dim, score in top_two:
                 for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
                     if low <= score <= high:
                         if templates:
                             template = random.choice(templates)
-                            lines.append(template.format(from_=char_from, to=user_name_or_default))
+                            lines.append(template.format(from_=from_name, to=user_name_or_default))
+                        break  # Found matching range, stop searching
             
-            if lines:
+            # Only add period if this iteration added content
+            if len(lines) > lines_before:
                 lines.append(".")
     
     if lines:
@@ -1607,92 +1685,121 @@ def get_relationship_context(chat_id: str, characters: list, user_name: str,
 cleanup_task = None
 
 
-async def analyze_and_update_relationships(chat_id: str, messages: list, 
-                                      characters: list, user_name: str = None):
+async def analyze_and_update_relationships(chat_id: str, messages: list,
+                                      character_objs: list, user_name: str = None):
     """
     Analyze relationships using semantic embeddings.
     Triggered at summarization boundary (every 10 messages).
+
+    CRITICAL: character_objs should be full character objects (not just names).
+    This function extracts entity IDs and names for proper relationship tracking.
     
-    CRITICAL: characters list should already be extracted with get_character_name().
+    Note: Semantic scoring can be disabled by setting environment variable:
+    NEURALRP_DISABLE_SEMANTIC_SCORING=1
     """
-    USE_SEMANTIC_SCORING = True
-    
+    import os
+    USE_SEMANTIC_SCORING = os.environ.get('NEURALRP_DISABLE_SEMANTIC_SCORING', '0') != '1'
+
     if not USE_SEMANTIC_SCORING:
-        print("[RELATIONSHIP] Semantic scoring disabled, skipping")
+        print("[RELATIONSHIP] Semantic scoring disabled via environment variable, skipping")
         return
-    
-    if len(characters) < 1:
+
+    if len(character_objs) < 1:
         return
-    
+
     if adaptive_tracker is None:
         print("[RELATIONSHIP] Adaptive tracker not initialized, skipping")
         return
-    
-    all_entities = characters.copy()
+
+    # Extract entity IDs and names from character objects
+    entity_map = {}  # entity_id -> name
+    name_map = {}    # name -> entity_id
+    for char_obj in character_objs:
+        entity_id = get_entity_id(char_obj)
+        name = get_character_name(char_obj)
+        entity_map[entity_id] = name
+        name_map[name] = entity_id
+
+    # Build entity list for relationship analysis
+    all_entity_ids = list(entity_map.keys())
+    user_entity_id = None
+
+    # Add user to entity list if provided
     if user_name:
-        all_entities.append(user_name)
-    
-    recent_speakers = set(m.get('speaker') for m in messages[-10:])
-    
-    for char_from in characters:
-        if char_from not in recent_speakers:
+        user_entity_id = "user_default"  # Standardized entity ID format
+        all_entity_ids.append(user_entity_id)
+        entity_map[user_entity_id] = user_entity_id
+        name_map[user_entity_id] = user_name  # Keep display name mapping
+
+    recent_speakers = set(m.speaker or m.role for m in messages[-10:])
+
+    for char_from_id in all_entity_ids:
+        char_from_name = entity_map.get(char_from_id, char_from_id)
+
+        if char_from_name not in recent_speakers and char_from_id not in recent_speakers:
             continue
-        
-        for entity_to in all_entities:
-            if char_from == entity_to:
+
+        for char_to_id in all_entity_ids:
+            if char_from_id == char_to_id:
                 continue
-            
-            if entity_to not in recent_speakers:
+
+            char_to_name = entity_map.get(char_to_id, char_to_id)
+
+            if char_to_name not in recent_speakers and char_to_id not in recent_speakers:
                 continue
-            
-            current_state = db_get_relationship_state(chat_id, char_from, entity_to)
-            
+
+            current_state = db_get_relationship_state(chat_id, char_from_id, char_to_id)
+
             if not current_state:
                 current_state = {
                     'trust': 50, 'emotional_bond': 50, 'conflict': 50,
                     'power_dynamic': 50, 'fear_anxiety': 50
                 }
-            
+
             relationship_messages = []
             for msg in messages[-10:]:
-                speaker = msg.get('speaker', '')
-                content = msg.get('content', '')
-                
-                if char_from in speaker and entity_to in content.lower():
-                    relationship_messages.append(content)
-                
-                if char_from in speaker and any(word in content.lower() for word in [entity_to.lower(), 'he', 'she', 'they', 'you']):
-                    relationship_messages.append(content)
-            
+                speaker = msg.speaker or msg.role
+                content = msg.content or ''
+
+                # Check if speaker is the character_from entity
+                if char_from_id in speaker or char_from_name in speaker:
+                    # Check if content mentions character_to entity
+                    if char_to_id.lower() in content.lower() or char_to_name.lower() in content.lower():
+                        relationship_messages.append(content)
+
+                    # Check for pronoun references
+                    if any(word in content.lower() for word in ['he', 'she', 'they', 'you']):
+                        relationship_messages.append(content)
+
             if not relationship_messages:
                 continue
-            
+
             try:
                 new_scores = adaptive_tracker.analyze_conversation_scores(
                     messages=relationship_messages,
                     current_state=current_state
                 )
-                
+
                 if new_scores is None:
                     continue
-                
-                if any(abs(new_scores[dim] - current_state[dim]) > 5 
+
+                if any(abs(new_scores[dim] - current_state[dim]) > 5
                        for dim in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']):
-                    
+
                     db_update_relationship_state(
                         chat_id=chat_id,
-                        character_from=char_from,
-                        character_to=entity_to,
+                        character_from=char_from_id,
+                        character_to=char_to_id,
                         scores=new_scores,
-                        last_message_id=messages[-1].get('id', 0)
+                        last_message_id=messages[-1].id if messages else 0
                     )
-                    
-                    print(f"[RELATIONSHIP] {char_from}→{entity_to}: "
+
+                    print(f"[RELATIONSHIP] {char_from_name}→{char_to_name}: "
                           f"trust={new_scores['trust']}, bond={new_scores['emotional_bond']}, "
                           f"conflict={new_scores['conflict']}")
-            
+
             except Exception as e:
-                print(f"[RELATIONSHIP] Scoring failed for {char_from}→{entity_to}: {e}")
+                print(f"[RELATIONSHIP] Scoring failed for {char_from_name}→{char_to_name}: {e}")
                 continue
 
 
@@ -2451,13 +2558,37 @@ def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_t
     WORLD_INFO_CACHE[cache_key] = result
     return result
 
-def character_has_speaker(messages: List[ChatMessage], char_name: str) -> bool:
-    """Check if a character has ever spoken in the message history."""
-    for msg in messages:
-        speaker = msg.speaker or msg.role
-        if char_name in speaker:
-            return True
-    return False
+    def character_has_speaker(messages: List[ChatMessage], char_name: str) -> bool:
+        """Check if a character has ever spoken in the message history."""
+        for msg in messages:
+            speaker = msg.speaker or msg.role
+            if char_name in speaker:
+                return True
+        return False
+
+    def character_has_appeared_recently(messages: List[ChatMessage], char_name: str) -> bool:
+        """Check if a character has appeared in recent N messages.
+        
+        This is used to determine if a character should be treated as "reappearing"
+        after being absent from the conversation for a while. Characters who haven't
+        appeared in recent messages should get a fresh sticky window on return.
+        
+        Args:
+            messages: Message history (may be truncated after summarization)
+            char_name: Character name to search for
+            
+        Returns:
+            True if character found in last 20 messages, False otherwise
+        """
+        # Check only the most recent 20 messages
+        # This threshold allows characters to be treated as "reappearing" after being absent
+        recent_messages = messages[-20:] if len(messages) > 20 else messages
+        
+        for msg in recent_messages:
+            speaker = msg.speaker or msg.role
+            if char_name in speaker:
+                return True
+        return False
 
 def normalize_string_for_comparison(s: str) -> str:
     """Normalize a string for robust comparison.
@@ -2541,7 +2672,7 @@ def is_first_message_auto_added(messages: List[ChatMessage], char_obj: dict) -> 
     return content_matches
 
 # Prompt Construction Engine
-def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, int] = None):
+def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, int] = None, absolute_turn: int = None):
     if character_first_turns is None:
         character_first_turns = {}
     settings = request.settings
@@ -2553,7 +2684,11 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     
     # Calculate current turn number (counting user messages, 1-indexed)
     # Turn 1 = first user message, Turn 2 = second user message, etc.
-    current_turn = sum(1 for msg in request.messages if msg.role == "user")
+    # Use absolute_turn if provided (survives summarization), otherwise calculate from messages
+    if absolute_turn is not None:
+        current_turn = absolute_turn
+    else:
+        current_turn = sum(1 for msg in request.messages if msg.role == "user")
     
     # Initial turns (1 and 2) get special treatment for world info and canon law
     is_initial_turn = current_turn <= 2
@@ -2638,19 +2773,6 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         if triggered_lore:
             full_prompt += "### World Knowledge:\n" + "\n".join(triggered_lore) + "\n"
 
-        # === 5.5. RELATIONSHIP CONTEXT (character-to-character and character-to-user dynamics) ===
-    # Only inject if there are characters to have relationships
-    if request.chat_id and (request.characters or user_name):
-        relationship_context = get_relationship_context(
-            chat_id=request.chat_id,
-            characters=active_names,  # Already extracted with get_character_name()
-            user_name=user_name,
-            recent_messages=request.messages[-10:]  # Last 10 messages for relevance filtering
-        )
-        
-        if relationship_context:
-            full_prompt += relationship_context + "\n"
-    
     # === 6.5. RECENT UPDATES (one-time notification, independent of intervals) ===
     # This is completely separate from reinforcement intervals:
     # - Does NOT affect current_turn calculation
@@ -2725,8 +2847,12 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         # Check if this character is an NPC
         is_npc = char_obj.get("is_npc", False)
         
-        # Check if character has appeared in real conversation
-        char_has_appeared = character_has_speaker(request.messages, name)
+        # Check if character has appeared in RECENT conversation (last 20 messages)
+        # This handles re-appearance after long absences, even after summarization
+        char_has_appeared_recently = character_has_appeared_recently(request.messages, name)
+        
+        # Check if character has ever appeared (for backward compatibility with other logic)
+        char_has_ever_appeared = character_has_speaker(request.messages, name)
         
         # Special case: if first assistant message is auto-added first_mes, treat as "not appeared"
         # This handles both single-message and multi-message cases (e.g., [first_mes, user_msg])
@@ -2737,8 +2863,17 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         char_ref = char_obj.get("_filename") or char_obj.get("entity_id")
         
         # Record first turn if character just appeared (or was just added to chat)
+        # Also record new first turn if character reappears after absence
+        needs_new_first_turn = False
         if char_ref and char_ref not in character_first_turns:
+            # First time ever in chat
             character_first_turns[char_ref] = current_turn
+            needs_new_first_turn = True
+        elif not char_has_appeared_recently:
+            # Reappearing after long absence - record new first turn for fresh sticky window
+            character_first_turns[char_ref] = current_turn
+            needs_new_first_turn = True
+            print(f"[CONTEXT] {name} reappearing after absence - new first turn: {current_turn}")
         
         # Check sticky window (first 3 turns: 1, 2, 3)
         first_turn = character_first_turns.get(char_ref) if char_ref else None
@@ -2752,13 +2887,14 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         )
         
         # Determine if injection is needed
-        needs_injection = (not char_has_appeared) or is_auto_first_mes_only or is_in_sticky_window
+        # Inject if: never appeared, auto first_mes only, or in sticky window
+        needs_injection = (not char_has_ever_appeared) or is_auto_first_mes_only or is_in_sticky_window
         
         # === CHARACTER INJECTION LOGIC ===
         if needs_injection:
             # Log injection reason for debugging
             injection_reason = []
-            if not char_has_appeared:
+            if not char_has_ever_appeared:
                 injection_reason.append("first_appearance")
             if is_auto_first_mes_only:
                 injection_reason.append("auto_first_mes")
@@ -2867,6 +3003,19 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     # Show canon law on turns 1-2 (initial) and every world_reinforce_freq turns thereafter
     if canon_law_entries and world_reinforce_freq > 0 and (is_initial_turn or (current_turn > 2 and (current_turn - 2) % world_reinforce_freq == 0)):
         full_prompt += "\n### Canon Law (World Rules):\n" + "\n".join(canon_law_entries) + "\n"
+
+    # === 8.5. RELATIONSHIP CONTEXT (character-to-character and character-to-user dynamics) ===
+    # Only inject if there are characters to have relationships
+    if request.chat_id and (request.characters or user_name):
+        relationship_context = get_relationship_context(
+            chat_id=request.chat_id,
+            character_objs=request.characters,  # Full character objects for entity ID extraction
+            user_name=user_name,
+            recent_messages=request.messages[-10:]  # Last 10 messages for relevance filtering
+        )
+
+        if relationship_context:
+            full_prompt += relationship_context + "\n"
 
     # === 9. CONTINUE HINT + LEAD-IN ===
     if is_single_char:
@@ -3429,6 +3578,9 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
     """Extract PList-formatted content from LLM output and ensure proper format."""
     import re
     
+    print(f"[PLIST_EXTRACT] Processing field_type='{field_type}', char_name='{char_name}'")
+    print(f"[PLIST_EXTRACT] Raw result: {result[:200]}...")
+    
     # If result already starts with bracket, it's likely PList formatted
     if result.strip().startswith('['):
         # Extract all bracketed entries
@@ -3438,6 +3590,7 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
         lines = [entry.strip() for entry in bracketed_entries if entry.strip()]
         
         if lines:
+            print(f"[PLIST_EXTRACT] Found {len(lines)} bracketed entries")
             return '\n'.join(lines)
     
     # Try to parse structured format if LLM returned sections
@@ -3446,25 +3599,76 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
     
     # Handle different field types
     if field_type in ['personality', 'body']:
-        # For personality/body, extract trait lists and format as PList
-        trait_pattern = r'(?:personality_traits|physical_traits|personality|body):\s*([^\n]*)'
-        match = re.search(trait_pattern, result_lower, re.IGNORECASE)
+        # Try multiple patterns to extract traits
+        
+        # Pattern 1: Section headers (PERSONALITY_TRAITS:, PHYSICAL_TRAITS:, etc.)
+        trait_pattern = r'(?:personality_traits|physical_traits|personality|body):\s*(.*?)(?=\n\n|\n[A-Z]|$)'
+        match = re.search(trait_pattern, result, re.IGNORECASE | re.DOTALL)
         
         if match:
-            traits_text = match.group(1)
+            traits_text = match.group(1).strip()
+            print(f"[PLIST_EXTRACT] Extracted traits text: {traits_text[:150]}...")
+            
             # Extract traits from comma-separated or quoted list
+            # Handle both quoted and unquoted traits
             if '"' in traits_text or "'" in traits_text:
                 # Quoted traits
                 traits = re.findall(r'["\']([^"\']+)["\']', traits_text)
+                print(f"[PLIST_EXTRACT] Extracted {len(traits)} quoted traits")
             else:
-                # Unquoted traits (comma-separated)
-                traits = [t.strip() for t in traits_text.split(',') if t.strip()]
+                # Unquoted traits (comma-separated) - handle multi-line
+                # Split by comma, but also handle newlines and extra text
+                raw_lines = traits_text.replace('\n', ',').split(',')
+                traits = [t.strip() for t in raw_lines if t.strip() and len(t.strip()) > 2]
+                # Filter out non-trait words
+                traits = [t for t in traits if not t.lower() in ['include', 'features', 'appearance', 'traits', 'physical']]
+                print(f"[PLIST_EXTRACT] Extracted {len(traits)} unquoted traits")
             
             if traits:
                 # Format as PList
                 trait_list = ', '.join([f'"{trait.strip()}"' for trait in traits])
                 plist_key = 'Personality' if field_type == 'personality' else 'body'
-                return f"[{char_name}'s {plist_key}= {trait_list}]"
+                formatted = f"[{char_name}'s {plist_key}= {trait_list}]"
+                print(f"[PLIST_EXTRACT] Formatted PList: {formatted[:100]}...")
+                return formatted
+        
+        # FALLBACK: Try to parse entire result as comma-separated list
+        # This handles cases where LLM returned plain traits without section headers
+        print(f"[PLIST_EXTRACT] No section patterns found, trying fallback parsing")
+        
+        # Remove common LLM artifacts
+        cleaned = re.sub(r'\(.*?\)', '', result)  # Remove parenthetical explanations
+        cleaned = re.sub(r'\[.*?\]', '', cleaned)  # Remove any bracketed content
+        cleaned = cleaned.replace('\n', ',')  # Convert newlines to commas
+        
+        # Split by comma and clean up
+        potential_traits = [t.strip() for t in cleaned.split(',') if t.strip()]
+        
+        # Filter out non-trait words
+        traits = []
+        for t in potential_traits:
+            t_lower = t.lower()
+            # Skip common non-trait words and sentence fragments
+            skip_words = ['include', 'features', 'appearance', 'traits', 'physical', 'personality', 
+                        'here', 'are', 'some', 'the', 'is', 'and', 'or', 'such as', 'like', 
+                        'including', 'with', 'for', 'a', 'an', 'of']
+            if (len(t) > 2 and t_lower not in skip_words and 
+                not t_lower.startswith('list') and 
+                not t_lower.endswith('etc') and
+                not re.match(r'^\d+', t)):  # Skip numbered lists
+                traits.append(t)
+        
+        print(f"[PLIST_EXTRACT] Fallback extracted {len(traits)} traits from: {cleaned[:100]}...")
+        
+        if traits and len(traits) >= 2:  # Only use if we found at least 2 traits
+            # Format as PList
+            trait_list = ', '.join([f'"{trait.strip()}"' for trait in traits])
+            plist_key = 'Personality' if field_type == 'personality' else 'body'
+            formatted = f"[{char_name}'s {plist_key}= {trait_list}]"
+            print(f"[PLIST_EXTRACT] Fallback formatted PList: {formatted[:100]}...")
+            return formatted
+        else:
+            print(f"[PLIST_EXTRACT] Fallback failed: insufficient traits found")
     
     elif field_type == 'full':
         # Full character card generation - extract multiple sections
@@ -3974,6 +4178,10 @@ async def chat(request: PromptRequest):
     if request.chat_id:
         chat_data = db_get_chat(request.chat_id)
 
+    # Capture absolute turn count BEFORE any summarization truncation
+    # This ensures turn-based logic (sticky window, reinforcement) survives summarization
+    absolute_turn = sum(1 for msg in request.messages if msg.role == "user")
+
     # ========== CHARACTER RESOLUTION ==========
     # Check if characters are already resolved (dicts with 'data' field)
     # This happens on subsequent messages after first resolution
@@ -4113,7 +4321,7 @@ async def chat(request: PromptRequest):
     new_summary = request.summary or ""
     
     # Initial token check
-    prompt = construct_prompt(current_request, character_first_turns)
+    prompt = construct_prompt(current_request, character_first_turns, absolute_turn=absolute_turn)
     tokens = await get_token_count(prompt)
     
     # Summarization loop
@@ -4153,23 +4361,20 @@ async def chat(request: PromptRequest):
                 # Rebuild request with new summary and fewer messages
                 current_request.messages = remaining_messages
                 current_request.summary = new_summary
-                prompt = construct_prompt(current_request, character_first_turns)
+                prompt = construct_prompt(current_request, character_first_turns, absolute_turn=absolute_turn)
                 tokens = await get_token_count(prompt)
             except Exception as e:
                 print(f"Summarization failed: {e}")
         
         # === RELATIONSHIP ANALYSIS (Step 5 of relationship tracker) ===
         # Trigger relationship analysis at summarization boundary
-        # Extract character names using get_character_name() for consistency
+        # Pass full character objects (not just names) for entity ID extraction
         user_name = request.settings.get("user_name", "")
-        active_character_names = []
-        for char_obj in request.characters:
-            active_character_names.append(get_character_name(char_obj))
-        
+
         await analyze_and_update_relationships(
             chat_id=current_request.chat_id,
             messages=current_request.messages,
-            characters=active_character_names,
+            character_objs=request.characters,
             user_name=user_name
         )
     
@@ -4730,6 +4935,29 @@ def auto_count_characters_by_gender(chars_data: List[Dict], user_gender: Optiona
     
     return ', '.join(count_tags) if count_tags else ''
 
+def parse_personality_plist(personality: str) -> str:
+    """Extract personality traits from PList format.
+    
+    Args:
+        personality: PList-formatted personality string like [Name's Personality= "trait1", "trait2"]
+        
+    Returns:
+        Clean comma-separated string of traits
+    """
+    if not personality:
+        return ""
+    
+    # Pattern: [Name's Personality= "trait1", "trait2", ...]
+    match = re.search(r'\[.+?\'s Personality\s*=\s*(.*?)\]', personality, re.DOTALL | re.IGNORECASE)
+    if match:
+        plist_content = match.group(1).strip()
+        traits = re.findall(r'["\']([^"\']+)["\']', plist_content)
+        if traits:
+            return ', '.join(traits)
+    
+    # Fallback: return as-is if no PList format detected
+    return personality.strip()
+
 def aggregate_danbooru_tags(chars_data: List[Dict], override_count: Optional[str] = None) -> str:
     """Aggregate danbooru tags from all characters with gender count override.
 
@@ -4747,6 +4975,12 @@ def aggregate_danbooru_tags(chars_data: List[Dict], override_count: Optional[str
         danbooru_tag = char.get('danbooru_tag', '').strip()
         if not danbooru_tag:
             continue
+
+        # Parse PList format to extract clean traits
+        traits = parse_physical_body_plist(danbooru_tag)
+        if traits:
+            # Convert extracted traits back to comma-separated string
+            danbooru_tag = ', '.join(traits)
 
         # Parse comma-separated tags
         tags = [t.strip() for t in danbooru_tag.split(',') if t.strip()]
@@ -4820,8 +5054,20 @@ async def generate_chat_snapshot(request: SnapshotRequest):
         if primary_char_name:
             for char_data in chars_data:
                 if char_data.get('name') == primary_char_name:
-                    # Use description + personality only (not full card)
-                    primary_char_card = char_data.get('description', '') + ' ' + char_data.get('personality', '')
+                    # Parse PList-formatted description and personality
+                    description = char_data.get('description', '')
+                    personality = char_data.get('personality', '')
+                    
+                    # Extract traits from PList format
+                    desc_traits = parse_physical_body_plist(description)
+                    person_traits = parse_personality_plist(personality)
+                    
+                    # Build clean card
+                    desc_text = ', '.join(desc_traits) if desc_traits else description
+                    person_text = person_traits if person_traits else personality
+                    
+                    primary_char_card = desc_text + ' ' + person_text
+                    
                     # Strip character names from description and personality to prevent LLM from copying them to JSON output
                     primary_char_card = snapshot_analyzer._strip_character_names(primary_char_card, [primary_char_name])
                     break
@@ -4975,6 +5221,12 @@ class SnapshotSettingsRequest(BaseModel):
     user_danbooru_tag: str = ""
 
 
+class SnapshotRegenerateRequest(BaseModel):
+    """Request model for regenerating snapshot."""
+    width: Optional[int] = None  # Image width
+    height: Optional[int] = None  # Image height
+
+
 @app.post("/api/chats/{chat_id}/snapshot-settings")
 async def save_snapshot_settings(chat_id: str, request: SnapshotSettingsRequest):
     """
@@ -5037,12 +5289,14 @@ class SnapshotFavoriteRequest(BaseModel):
 
 
 @app.post("/api/chat/{chat_id}/snapshot/regenerate")
-async def regenerate_snapshot(chat_id: str):
+async def regenerate_snapshot(chat_id: str, request: SnapshotRegenerateRequest):
     """
     Regenerate snapshot with variation mode enabled.
 
-    Uses same scene analysis as previous snapshot, but applies
-    novelty scoring to generate different tag combinations.
+    Uses variation mode scene analysis (no examples in LLM prompt) to generate
+    alternative interpretations of current scene, while maintaining the same
+    character tags, visual canon data, and user settings. Variation emerges
+    from lack of example priming, not from temperature changes.
     """
     try:
         # Load chat
@@ -5051,24 +5305,76 @@ async def regenerate_snapshot(chat_id: str):
             return {"error": "Chat not found"}
 
         messages = chat.get('messages', [])
-        
+
+        # RELOAD chat from database to get latest snapshot settings
+        # Settings may have been updated via /api/chats/{id}/snapshot-settings endpoint
+        chat = db_get_chat(chat_id)
+        if chat:
+            chat_settings = chat.get('metadata', {}).get('snapshot_settings', {})
+            print(f"[SNAPSHOT VARIATION] Chat reloaded from database, snapshot settings: {chat_settings}")
+        else:
+            chat_settings = {}
+            print(f"[SNAPSHOT VARIATION] Chat reload failed, using empty settings")
+
+        # Build user data for snapshot if enabled
+        user_data = None
+        include_user = chat_settings.get('include_user_in_snapshots', False)
+        if include_user:
+            user_data = {
+                'gender': chat_settings.get('user_gender', ''),
+                'danbooru_tag': chat_settings.get('user_danbooru_tag', ''),
+                'include_user': True
+            }
+            print(f"[SNAPSHOT VARIATION] Including user in variation: {user_data}")
+
         # Extract active characters' gender and danbooru tags WITH visual canon data (NEW)
         chars_data = get_active_characters_data(chat, max_chars=3, include_visual_canon=True)
         
         # Auto-count characters by gender
-        count_tags = auto_count_characters_by_gender(chars_data)
-        print(f"[SNAPSHOT] Regenerate auto-counted: {count_tags}")
-        
+        user_gender = user_data.get('gender') if user_data else None
+        count_tags = auto_count_characters_by_gender(chars_data, user_gender=user_gender, include_user=bool(user_data))
+        print(f"[SNAPSHOT VARIATION] Auto-counted: {count_tags}")
+
         # Aggregate danbooru tags with gender override
         character_tags = aggregate_danbooru_tags(chars_data, override_count=count_tags if count_tags else None)
-        print(f"[SNAPSHOT] Regenerate aggregated tags: {character_tags}")
+        print(f"[SNAPSHOT VARIATION] Aggregated tags: {character_tags}")
         
         # Extract character names for name-stripping (prevents name leakage to LLM)
         character_names = [c.get('name', '') for c in chars_data if c.get('name')]
-        
-        # Analyze scene (re-run for current context)
-        scene_analysis = await snapshot_analyzer.analyze_scene(
-            messages, chat_id, character_names=character_names
+
+        # Determine primary character for variation mode (default to first active character or narrator if no focus)
+        primary_char_name = None
+        primary_char_card = None
+        if character_names:
+            primary_char_name = character_names[0]  # Default to first character
+
+            for char_data in chars_data:
+                if char_data.get('name') == primary_char_name:
+                    # Parse PList-formatted description and personality
+                    description = char_data.get('description', '')
+                    personality = char_data.get('personality', '')
+
+                    # Extract traits from PList format
+                    desc_traits = parse_physical_body_plist(description)
+                    person_traits = parse_personality_plist(personality)
+
+                    # Build clean card
+                    desc_text = ', '.join(desc_traits) if desc_traits else description
+                    person_text = person_traits if person_traits else personality
+
+                    primary_char_card = desc_text + ' ' + person_text
+
+                    # Strip character names from description and personality
+                    primary_char_card = snapshot_analyzer._strip_character_names(primary_char_card, [primary_char_name])
+                    break
+
+        print(f"[SNAPSHOT VARIATION] Primary character: {primary_char_name}")
+
+        # Analyze scene using VARIATION mode (creative interpretation, temperature 0.8)
+        scene_analysis = await snapshot_analyzer.analyze_scene_variation(
+            messages, chat_id, character_names=character_names,
+            primary_character=primary_char_name,
+            primary_character_card=primary_char_card
         )
         
         # Extract scene JSON for simplified prompt building
@@ -5078,12 +5384,17 @@ async def regenerate_snapshot(chat_id: str):
         char_tags = []
         if character_tags:
             char_tags = [t.strip() for t in character_tags.split(',') if t.strip()]
-        
-        # Build prompt using simplified builder (no variation mode needed - simpler is better)
+
+        # Build user tags list from user_data if present
+        user_tags = []
+        if user_data and user_data.get('danbooru_tag'):
+            user_tags = [t.strip() for t in user_data['danbooru_tag'].split(',') if t.strip()]
+
+        # Build prompt using simplified builder
         positive_prompt, negative_prompt = prompt_builder.build_simple_prompt(
             scene_json=scene_json,
             character_tags=char_tags,
-            user_tags=[],  # Regenerate doesn't include user by default
+            user_tags=user_tags,
             character_count_tags=count_tags
         )
 
@@ -5092,8 +5403,8 @@ async def regenerate_snapshot(chat_id: str):
             prompt=positive_prompt,
             negative_prompt=negative_prompt,
             steps=20,
-            width=512,
-            height=512,
+            width=request.width if request.width else 512,
+            height=request.height if request.height else 512,
             cfg_scale=7.0,
             sampler_name='Euler a',
             scheduler='Automatic',
@@ -6238,102 +6549,136 @@ class ForkRequest(BaseModel):
 async def fork_chat(request: ForkRequest):
     """
     Fork a chat at a specific message.
-    UPDATED: Now handles NPC entity ID remapping and relationship copying.
+    v1.10.4: Complete transaction-based refactor with metadata remapping and validation.
     """
     origin_chat_name = request.origin_chat_name
     fork_from_message_id = request.fork_from_message_id
     branch_name = request.branch_name
+    branch_chat_id = None
     
-    # 1. Load origin chat
-    origin_chat = db_get_chat(origin_chat_name)
-    if not origin_chat:
-        return {"success": False, "error": "Origin chat not found"}
-    
-    # 2. Find fork point and extract messages
-    messages = origin_chat.get('messages', [])
-    fork_index = None
-    for i, msg in enumerate(messages):
-        if msg.get('id') == fork_from_message_id:
-            fork_index = i
-            break
-    
-    if fork_index is None:
-        return {"success": False, "error": "Fork message not found"}
-    
-    # 3. Create branch data (messages up to fork point)
-    branch_messages = messages[:fork_index + 1]
-    
-    # 4. Generate branch chat ID
-    branch_chat_id = f"{origin_chat_name}_fork_{int(time.time())}"
-
-    # 5. CRITICAL: Create empty chat record before entity remapping
-    # This prevents FOREIGN KEY constraint failure when inserting entities
-    db_create_empty_chat(branch_chat_id)
-
-    # 6. Copy metadata with NPCs
-    branch_metadata = origin_chat.get("metadata", {}).copy()
-    localnpcs = branch_metadata.get("localnpcs", {}).copy()
-
-    # 7. CRITICAL: Remap NPC entity IDs for branch safety
-    entity_mapping = db_remap_entities_for_branch(
-        origin_chat_name,
-        branch_chat_id,
-        localnpcs  # modified in place
-    )
-
-    branch_metadata["localnpcs"] = localnpcs
-
-
-    # 8. Update activeCharacters with new NPC entity IDs
-    active_chars = origin_chat.get('activeCharacters', []).copy()
-    updated_active_chars = []
-    for char_ref in active_chars:
-        if char_ref in entity_mapping:
-            # Replace old NPC ID with new branch NPC ID
-            updated_active_chars.append(entity_mapping[char_ref])
-        else:
-            # Keep global character filenames as-is
-            updated_active_chars.append(char_ref)
-
-    # 9. Assemble branch data
-    branch_data = {
-        'messages': branch_messages,
-        'summary': origin_chat.get('summary', ''),
-        'activeCharacters': updated_active_chars,
-        'activeWI': origin_chat.get('activeWI'),
-        'settings': origin_chat.get('settings', {}).copy(),
-        'metadata': {
-            **branch_metadata,
+    try:
+        # 1. Load origin chat
+        origin_chat = db_get_chat(origin_chat_name)
+        if not origin_chat:
+            raise HTTPException(status_code=404, detail="Origin chat not found")
+        
+        # 2. Find fork point and extract messages
+        messages = origin_chat.get('messages', [])
+        fork_index = None
+        for i, msg in enumerate(messages):
+            if msg.get('id') == fork_from_message_id:
+                fork_index = i
+                break
+        
+        if fork_index is None:
+            raise HTTPException(status_code=404, detail="Fork message not found")
+        
+        # 3. Generate branch chat ID
+        branch_chat_id = f"{origin_chat_name}_fork_{int(time.time())}"
+        
+        # 4. Prepare metadata and NPCs
+        branch_metadata = origin_chat.get("metadata", {}).copy()
+        localnpcs = branch_metadata.get("localnpcs", {}).copy()
+        
+        # 5. Remap NPC entity IDs for branch safety
+        entity_mapping = db_remap_entities_for_branch(
+            origin_chat_name,
+            branch_chat_id,
+            localnpcs  # modified in place
+        )
+        
+        print(f"[FORK] Entity mapping created with {len(entity_mapping)} NPCs remapped")
+        for old_id, new_id in entity_mapping.items():
+            print(f"[FORK]   {old_id} -> {new_id}")
+        
+        branch_metadata["localnpcs"] = localnpcs
+        
+        # 6. CRITICAL: Remap metadata entity IDs for characterCapsules
+        old_capsules = branch_metadata.get("characterCapsules", {})
+        if old_capsules:
+            new_capsules = {
+                entity_mapping.get(old_id, old_id): capsule 
+                for old_id, capsule in old_capsules.items()
+            }
+            branch_metadata["characterCapsules"] = new_capsules
+            print(f"[FORK] Remapped {len(old_capsules)} characterCapsules entries")
+        
+        # 7. CRITICAL: Remap metadata entity IDs for characterFirstTurns
+        old_turns = branch_metadata.get("characterFirstTurns", {})
+        if old_turns:
+            new_turns = {
+                entity_mapping.get(old_id, old_id): turn 
+                for old_id, turn in old_turns.items()
+            }
+            branch_metadata["characterFirstTurns"] = new_turns
+            print(f"[FORK] Remapped {len(old_turns)} characterFirstTurns entries")
+        
+        # 8. Execute fork in single atomic transaction
+        branch_data = db_fork_chat_transaction(
+            origin_chat_id=origin_chat_name,
+            branch_chat_id=branch_chat_id,
+            fork_message_id=fork_from_message_id,
+            fork_index=fork_index,
+            origin_chat=origin_chat,
+            entity_mapping=entity_mapping,
+            localnpcs=localnpcs
+        )
+        
+        # 9. Update branch metadata with fork-specific info
+        branch_data['metadata'].update({
             'origin_chat_id': origin_chat_name,
             'origin_message_id': fork_from_message_id,
             'branch_name': branch_name or f"Fork from message {fork_from_message_id}",
-            'created_at': time.time()
-        }
-    }
-
-    # 10. Copy relationship states with entity ID mapping BEFORE saving branch
-    # This ensures entity_mapping is complete before branch data is persisted
-    db_copy_relationship_states_with_mapping(
-        origin_chat_name,
-        branch_chat_id,
-        fork_from_message_id,
-        entity_mapping
-    )
-
-    # 11. Save branch chat AFTER relationship copying
-    db_save_chat(branch_chat_id, branch_data, autosaved=True)
-    
-    print(f"[FORK] Created branch {branch_chat_id} from {origin_chat_name} at message {fork_from_message_id}")
-    print(f"[FORK] Remapped {len(entity_mapping)} NPC entity IDs")
-    
-    return {
-        "success": True,
-        "name": branch_chat_id,
-        "branch_name": branch_name,
-        "origin_chat_name": origin_chat_name,
-        "fork_from_message_id": fork_from_message_id,
-        "remapped_entities": len(entity_mapping)
-    }
+            'created_at': time.time(),
+            'characterCapsules': branch_metadata.get("characterCapsules", {}),
+            'characterFirstTurns': branch_metadata.get("characterFirstTurns", {})
+        })
+        
+        # 10. Save the final branch data
+        db_save_chat(branch_chat_id, branch_data, autosaved=True)
+        
+        # 11. Validation: Check for any "Unknown" entity references
+        validation_issues = []
+        for char_ref in branch_data.get('activeCharacters', []):
+            if char_ref.startswith('npc_') and char_ref not in entity_mapping.values():
+                validation_issues.append(f"NPC {char_ref} not found in entity mapping")
+        
+        if validation_issues:
+            print(f"[FORK WARNING] Validation issues detected:")
+            for issue in validation_issues:
+                print(f"[FORK WARNING]   - {issue}")
+        
+        print(f"[FORK SUCCESS] Created branch {branch_chat_id} from {origin_chat_name} at message {fork_from_message_id}")
+        print(f"[FORK SUCCESS] Remapped {len(entity_mapping)} NPC entity IDs, preserved {len(branch_metadata.get('characterCapsules', {}))} capsules")
+        
+        return JSONResponse({
+            "success": True,
+            "name": branch_chat_id,
+            "branch_name": branch_name,
+            "origin_chat_name": origin_chat_name,
+            "fork_from_message_id": fork_from_message_id,
+            "remapped_entities": len(entity_mapping),
+            "message": f"Forked chat with {len(entity_mapping)} entities remapped"
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Cleanup if branch was partially created
+        if branch_chat_id:
+            try:
+                # Check if chat exists and delete it
+                existing = db_get_chat(branch_chat_id)
+                if existing:
+                    db_delete_chat(branch_chat_id)
+                    print(f"[FORK CLEANUP] Deleted partial branch {branch_chat_id}")
+            except Exception as cleanup_error:
+                print(f"[FORK CLEANUP FAILED] {cleanup_error}")
+        
+        print(f"[FORK ERROR] Fork failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Fork failed: {str(e)}")
 
 @app.get("/api/chats/{name}/branches")
 async def get_chat_branches(name: str):

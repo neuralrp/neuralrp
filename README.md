@@ -36,26 +36,43 @@
 
 ---
 
-## v1.10.3: Snapshot Overhaul, Relationship Smarts, and Increased Reliabilty
+## v1.10.4: Relationship Positioning, Branching Reliability, and Context Fixes
 
-1. **Snapshot Overhaul** - Faster, more accurate, and better at matching what's actually happening:
+1. **Relationship Context Positioning** - Moved to end of prompt (after Canon Law, before Generation Lead-In) for maximum LLM attention before generation
 
-- Larger Context Window: Expanded from 2-message to 20-message analysis for much better scene understanding
-- 5-Field Extraction: Enhanced detail: location, action, activity, dress, and expression (up from 3 fields)
-- Primary Character Mode: Mode-based character focus (auto, focus:name, narrator) so snapshots lock onto the right character
-- Better Danbooru Compatibility – Handles possessives cleanly ("Rebecca's" → "another's") to avoid name-induced SD artifacts.
+2. **Snapshot Variation Mode** - Implemented alternative phrase generation through example removal for more variety in generated images
 
-2. **Relationship Smarts** - Because sometimes characters are more subtle than just "drawing their sword"
+3. **Relationship System Fixes** - Fixed critical bugs causing crashes and tracking failures:
 
-- Dual-Signal Analysis: Combines semantic similarity (70%) with keyword polarity (30%) for more stable, believable relationship changes.
-- Keyword Polarity Library – Uses 60+ relationship keywords across trust, emotional bond, conflict, power dynamic, and fear/anxiety.
-- Prototype Matching – Compares conversation embeddings to dimension prototypes (e.g., “love, affection, romance, care, adoration” for emotional bond) for subtler nuance.
+- Error logging for database write failures
+- Per-chat turn counter prevents cooldown sharing between concurrent chats
+- User entity ID standardized to `user_default`
+- Chat switch detection automatically resets tracking state
+- Fixed ChatMessage property access (Pydantic models → direct attributes)
+- Fixed semantic filtering (dimension score extraction mismatch)
+- Fixed keyword polarity regex (word boundary matching)
+- Fixed entity ID vs name inconsistency (added `get_entity_id()` helper)
+- Fixed template range lookup (score clamping 0-100, early exit)
 
-3. **Increased Reliabilty** - Found these while trying to push limits in RP
+4. **Branching System Reliability** - Transaction-based refactor for reliable chat forking:
 
-- Chat Forking with NPCs — Fixed bug where branching chats containing NPCs failed with foreign key constraint violations. 
-- Capsule Generation Consistency — Fixed `regenerate()` function not sending `chat_id`, which caused NPCs to fall back to generic description+personality instead of voice fingerprint capsules.
-- Variable Scoring Fixes — Fixed `user_name` undefined error during summarization-triggered relationship analysis.
+- Atomic transactions with automatic rollback on failure
+- Preserved interaction counts from origin chat
+- Fixed metadata entity ID remapping (`characterCapsules`, `characterFirstTurns`)
+- Added missing NPC fields (`visual_canon_tags`, promotion fields)
+- Enhanced error handling with cleanup on failed forks
+
+5. **Additional Fixes** - Resolved various bugs across the system:
+
+- **PList Generation**: Robust format detection and output for character fields and danbooru tag generation
+- **Tag Filtering**: Fixed character/world tag filtering by removing stale capsule column reference
+- **Turn Counting**: Fixed turn-based logic during summarization by capturing turn count at request start
+- **Character/NPC Re-appearance**: Fixed injection logic for characters returning after long absence
+- **NPC Bleeding**: Fixed metadata isolation between forked and original chats
+
+---
+
+**Note on Extended Chat**: v1.10.4 includes substantial improvements, but I'm actively working on fixing bugs related to auto-summarization and character/NPC card insertion in long-form chat. These improvements will be coming in v1.10.5. I wanted to release v1.10.4 now as it's becoming quite dense, but extended chat optimization is a priority for the next release.
 
 ## Why It’s Different
 

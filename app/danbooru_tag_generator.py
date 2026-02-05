@@ -118,10 +118,10 @@ def parse_physical_body_plist(description: str) -> List[str]:
         List of physical traits extracted from body field
 
     Examples:
-        Input: "[Lila's body= \"Skinny\", \"perky breasts\", ...]"
+        Input: "[Lila's body= "Skinny", "perky breasts", ...]"
         Output: ["Skinny", "perky breasts", ...]
 
-        Input: "[Sarah the Sorcerer's body= \"pretty\", \"powerful\", ...]"
+        Input: "Sarah the Sorcerer's body= "pretty", "powerful", ...]"
         Output: ["pretty", "powerful", ...]
 
         Input: "She has long blonde hair and pointed ears"
@@ -130,19 +130,42 @@ def parse_physical_body_plist(description: str) -> List[str]:
     if not description:
         return []
 
-    # Generic PList format pattern: matches any character name
-    pattern = r'\[.+?\'s body\s*=\s*(.*?)\]'
-    match = re.search(pattern, description, re.DOTALL | re.IGNORECASE)
+    # Pattern 1: Brackets with 's body= - [Name's body= "trait1", "trait2"]
+    pattern_bracketed = r'\[.+?\'s body\s*=\s*(.*?)\]'
+    match = re.search(pattern_bracketed, description, re.DOTALL | re.IGNORECASE)
 
     if match:
         plist_content = match.group(1).strip()
-
-        # Extract quoted traits from PList
-        traits = re.findall(r'"([^"]+)"', plist_content)
+        print(f"[DANBOORU_GEN] Found bracketed PList format")
+        
+        # Extract quoted traits from PList (handles both " and ' quotes)
+        traits = re.findall(r'["\']([^"\']+)["\']', plist_content)
 
         if traits:
-            print(f"[DANBOORU_GEN] Parsed {len(traits)} traits from PList: {traits[:5]}...")
+            print(f"[DANBOORU_GEN] Parsed {len(traits)} traits from bracketed PList: {traits[:5]}...")
             return traits
+
+    # Pattern 2: Unbracketed format - Name's body= "trait1", "trait2"
+    pattern_unbracketed = r'.+?\'s body\s*=\s*(.*?)(?:\n|$)'
+    match = re.search(pattern_unbracketed, description, re.DOTALL | re.IGNORECASE)
+
+    if match:
+        plist_content = match.group(1).strip()
+        print(f"[DANBOORU_GEN] Found unbracketed PList format")
+        
+        # Extract quoted traits from PList (handles both " and ' quotes)
+        traits = re.findall(r'["\']([^"\']+)["\']', plist_content)
+
+        if traits:
+            print(f"[DANBOORU_GEN] Parsed {len(traits)} traits from unbracketed PList: {traits[:5]}...")
+            return traits
+
+    # Fallback: Check if description contains quoted traits without PList wrapper
+    # This handles cases like: "Skinny", "perky breasts", "long hair"
+    all_quoted = re.findall(r'["\']([^"\']+)["\']', description)
+    if len(all_quoted) >= 2:  # Only if we found at least 2 quoted items
+        print(f"[DANBOORU_GEN] Found {len(all_quoted)} quoted traits without PList wrapper")
+        return all_quoted
 
     # Fallback: treat entire description as a single trait
     print(f"[DANBOORU_GEN] No PList format detected, using full description as trait")
@@ -234,8 +257,8 @@ def map_body_type_to_breast_size(trait: str) -> Optional[str]:
         corpus.append(breast_tag.replace('_', ' '))  # Add target tag
         corpus.extend(synonyms)  # Add all synonyms
 
-    # Generate embeddings
-    model = SentenceTransformer('all-mpnet-base-v2')
+    # Generate embeddings (local only to avoid network calls)
+    model = SentenceTransformer('all-mpnet-base-v2', local_files_only=True)
     trait_embedding = model.encode([trait_lower])
     corpus_embeddings = model.encode(corpus)
 
@@ -618,7 +641,17 @@ def build_final_tag_string(
 
     # Add original PList physical traits (limit to max_traits)
     if raw_traits:
-        tags.extend(raw_traits[:max_traits])
+        # Clean up traits - remove any "Name's body=" prefix that might be present
+        cleaned_traits = []
+        for trait in raw_traits:
+            # Remove PList wrapper prefix if present
+            cleaned = re.sub(r'^.+?\'s body\s*=\s*', '', trait, flags=re.IGNORECASE)
+            # Remove surrounding quotes if present
+            cleaned = cleaned.strip().strip('"').strip("'")
+            if cleaned:
+                cleaned_traits.append(cleaned)
+        
+        tags.extend(cleaned_traits[:max_traits])
 
     # Remove duplicates while preserving order
     seen = set()

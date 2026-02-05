@@ -820,7 +820,7 @@ def db_get_characters_by_tags(tags: List[str]) -> List[Dict[str, Any]]:
     
     placeholders = ','.join(['?'] * len(normalized_tags))
     query = f"""
-        SELECT c.filename, c.data, c.danbooru_tag, c.capsule, c.created_at
+        SELECT c.filename, c.data, c.danbooru_tag, c.created_at
         FROM characters c
         JOIN character_tags t ON t.char_id = c.filename
         WHERE t.tag IN ({placeholders})
@@ -1483,35 +1483,47 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
             metadata["activeCharacters"] = data.get("activeCharacters", metadata.get("activeCharacters", []))
             metadata["activeWI"] = data.get("activeWI", metadata.get("activeWI"))
             metadata["settings"] = data.get("settings", metadata.get("settings", {}))
+            
+            # Validate fork isolation to prevent NPC bleeding between forked and original chats
+            incoming_metadata = data.get("metadata", {})
+            origin_chat_id = metadata.get("origin_chat_id")
+            incoming_origin = incoming_metadata.get("origin_chat_id")
+            
+            if origin_chat_id and incoming_origin and incoming_origin != origin_chat_id:
+                # This chat is a fork, but incoming metadata references different origin
+                # This indicates cross-contamination (e.g., forked chat data saved to original)
+                print(f"[FORK VALIDATION] Blocked save: metadata origin mismatch")
+                print(f"  Expected origin: {origin_chat_id}")
+                print(f"  Incoming origin: {incoming_origin}")
+                raise ValueError(f"Cannot save fork metadata to different chat (origin mismatch)")
+            
             # Preserve localnpcs for NPC metadata
-            metadata["localnpcs"] = data.get("metadata", {}).get("localnpcs", metadata.get("localnpcs", {}))
+            metadata["localnpcs"] = incoming_metadata.get("localnpcs", metadata.get("localnpcs", {}))
             # Preserve snapshot_settings for snapshot feature
-            metadata["snapshot_settings"] = data.get("metadata", {}).get("snapshot_settings", metadata.get("snapshot_settings", {}))
-
+            metadata["snapshot_settings"] = incoming_metadata.get("snapshot_settings", metadata.get("snapshot_settings", {}))
+            
             # Preserve backend-managed metadata (characterFirstTurns, characterCapsules)
             # These are set by /api/chat and should not be overwritten by frontend autosave
-            incoming_metadata = data.get("metadata", {})
             if "characterFirstTurns" not in incoming_metadata:
                 metadata["characterFirstTurns"] = metadata.get("characterFirstTurns", {})
             else:
                 metadata["characterFirstTurns"] = incoming_metadata["characterFirstTurns"]
-
+ 
             if "characterCapsules" not in incoming_metadata:
                 metadata["characterCapsules"] = metadata.get("characterCapsules", {})
             else:
                 metadata["characterCapsules"] = incoming_metadata["characterCapsules"]
-
+ 
             # Preserve snapshot_history (backend-managed snapshot data)
             if "snapshot_history" not in incoming_metadata:
                 metadata["snapshot_history"] = metadata.get("snapshot_history", [])
             else:
                 metadata["snapshot_history"] = incoming_metadata["snapshot_history"]
-
+ 
             # Critical: Ensure localnpcs exists (preserves NPCs from atomic creation)
             if "localnpcs" not in metadata:
                 metadata["localnpcs"] = {}
-
-            
+             
             # Extract branch_name from metadata or data
             branch_name = metadata.get('branch_name') or data.get('branch_name')
             
@@ -2029,7 +2041,7 @@ def db_migrate_danbooru_tags():
         return
 
     tags = get_tags_as_tuples()
-    model = SentenceTransformer('all-mpnet-base-v2')
+    model = SentenceTransformer('all-mpnet-base-v2', local_files_only=True)
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -2121,7 +2133,7 @@ def db_add_dynamic_danbooru_tag(tag_text: str) -> bool:
             
             # Generate embedding for the new tag
             print(f"[DB] Generating embedding for new dynamic tag: '{tag_text}'")
-            model = SentenceTransformer('all-mpnet-base-v2')
+            model = SentenceTransformer('all-mpnet-base-v2', local_files_only=True)
             embedding = model.encode(tag_text).astype(np.float32).tobytes()
             
             # Insert into vec table for semantic search
@@ -3367,6 +3379,7 @@ def db_update_relationship_state(chat_id: str, character_from: str, character_to
             conn.commit()
             return True
     except Exception as e:
+        print(f"[RELATIONSHIP_DB] Failed to update {character_from}→{character_to}: {e}")
         return False
 
 
@@ -3439,111 +3452,221 @@ def db_copy_relationship_states_for_branch(origin_chat_id: str, branch_chat_id: 
             conn.commit()
             return copied_count
     except Exception as e:
+        print(f"[RELATIONSHIP_DB] Failed to copy states for branch {branch_chat_id}: {e}")
         return 0
 
 
-def db_copy_relationship_states_with_mapping(
-    origin_chat_id: str, 
+def db_fork_chat_transaction(
+    origin_chat_id: str,
     branch_chat_id: str,
     fork_message_id: int,
-    entity_mapping: Dict[str, str]
-) -> int:
+    fork_index: int,
+    origin_chat: dict,
+    entity_mapping: Dict[str, str],
+    localnpcs: Dict[str, Any]
+) -> dict:
     """
-    Copy relationship states to branch with entity ID remapping.
+    Execute complete fork operation in single transaction.
     
     Args:
         origin_chat_id: Original chat ID
-        branch_chat_id: New branch chat ID
+        branch_chat_id: New branch chat ID  
         fork_message_id: Message ID where fork occurred
+        fork_index: Array index where fork occurred
+        origin_chat: Complete origin chat data
         entity_mapping: Maps old_entity_id -> new_entity_id for NPCs
+        localnpcs: NPCs dictionary with updated entity IDs
     
     Returns:
-        Number of relationships copied
+        Branch chat data dict or raises exception on failure
+    
+    Raises:
+        Exception: If any database operation fails (transaction is rolled back)
     """
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
             
-            # Get all relationships from origin chat
-            cursor.execute('''
-                SELECT character_from, character_to, 
-                       trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
-                       history, interaction_count
-                FROM relationship_states
-                WHERE chat_id = ?
-            ''', (origin_chat_id,))
+            # Start transaction
+            cursor.execute('BEGIN TRANSACTION')
             
-            origin_states = cursor.fetchall()
-            copied_count = 0
-            
-            for state in origin_states:
-                # Remap entity IDs using mapping (NPCs get new IDs, characters stay same)
-                from_entity = entity_mapping.get(state['character_from'], 
-                                                 state['character_from'])
-                to_entity = entity_mapping.get(state['character_to'], 
-                                               state['character_to'])
-                
-                # Parse history to find state at fork point
-                history = json.loads(state['history']) if state['history'] else []
-                fork_point_snapshot = None
-                
-                for snapshot in history:
-                    if snapshot.get('message_id', 0) <= fork_message_id:
-                        fork_point_snapshot = snapshot
-                    else:
-                        break  # Stop at first snapshot after fork
-                
-                # Use fork point state or current state
-                if fork_point_snapshot:
-                    values = (
-                        fork_point_snapshot['trust'],
-                        fork_point_snapshot['emotional_bond'],
-                        fork_point_snapshot['conflict'],
-                        fork_point_snapshot['power_dynamic'],
-                        fork_point_snapshot['fear_anxiety']
-                    )
-                else:
-                    # No history, use current values
-                    values = (
-                        state['trust'],
-                        state['emotional_bond'],
-                        state['conflict'],
-                        state['power_dynamic'],
-                        state['fear_anxiety']
-                    )
-                
-                # Create new history starting at fork point
-                new_history = [{
-                    'message_id': fork_message_id,
-                    'timestamp': time.time(),
-                    'trust': values[0],
-                    'emotional_bond': values[1],
-                    'conflict': values[2],
-                    'power_dynamic': values[3],
-                    'fear_anxiety': values[4],
-                    'note': 'Branch fork point'
-                }]
-                
-                # Insert relationship state for branch
+            try:
+                # 1. Create branch chat record
                 cursor.execute('''
-                    INSERT INTO relationship_states
-                    (chat_id, character_from, character_to, 
-                     trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
-                     last_updated, last_analyzed_message_id, interaction_count, history)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    INSERT INTO chats (id, branch_name, metadata, created_at, autosaved)
+                    VALUES (?, ?, ?, ?, ?)
                 ''', (
-                    branch_chat_id, from_entity, to_entity,
-                    *values,
-                    time.time(), fork_message_id, json.dumps(new_history)
+                    branch_chat_id,
+                    branch_chat_id,
+                    json.dumps({}),
+                    time.time(),
+                    1
                 ))
                 
-                copied_count += 1
-            
-            conn.commit()
-            return copied_count
-            
+                # 2. Copy NPCs to chat_npcs with remapped IDs
+                cursor.execute('''
+                    SELECT entity_id, name, data, created_from_text, appearance_count, is_active, 
+                           visual_canon_id, visual_canon_tags, last_used_turn, promoted, promoted_at, global_filename
+                    FROM chat_npcs WHERE chat_id = ? AND is_active = 1
+                ''', (origin_chat_id,))
+                
+                npcs = cursor.fetchall()
+                for npc in npcs:
+                    old_entity_id = npc['entity_id']
+                    # Look up new entity ID in mapping
+                    new_entity_id = entity_mapping.get(old_entity_id, old_entity_id)
+                    
+                    cursor.execute('''
+                        INSERT INTO chat_npcs 
+                        (chat_id, entity_id, name, data, created_from_text, 
+                         created_at, appearance_count, is_active, visual_canon_id, visual_canon_tags, 
+                         last_used_turn, promoted, promoted_at, global_filename)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        branch_chat_id,
+                        new_entity_id,
+                        npc['name'],
+                        npc['data'],
+                        npc['created_from_text'],
+                        time.time(),
+                        npc['appearance_count'],
+                        npc['is_active'],
+                        npc['visual_canon_id'],
+                        npc['visual_canon_tags'],
+                        npc['last_used_turn'],
+                        npc['promoted'],
+                        npc['promoted_at'],
+                        npc['global_filename'],
+                    ))
+                    
+                    # Register entity for the branch chat
+                    cursor.execute('''
+                        INSERT INTO entities 
+                        (entity_id, entity_type, name, chat_id, first_seen, last_seen)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        new_entity_id,
+                        'npc',
+                        npc['name'],
+                        branch_chat_id,
+                        int(time.time()),
+                        int(time.time())
+                    ))
+                
+                # 3. Copy relationship states with remapped entity IDs
+                cursor.execute('''
+                    SELECT character_from, character_to, 
+                           trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
+                           interaction_count, history
+                    FROM relationship_states 
+                    WHERE chat_id = ?
+                ''', (origin_chat_id,))
+                
+                relationships = cursor.fetchall()
+                for state in relationships:
+                    # Remap entity IDs
+                    from_entity = entity_mapping.get(state['character_from'], state['character_from'])
+                    to_entity = entity_mapping.get(state['character_to'], state['character_to'])
+                    
+                    # Parse history to find state at fork point
+                    history = json.loads(state['history']) if state['history'] else []
+                    fork_point_snapshot = None
+                    
+                    for snapshot in history:
+                        if snapshot.get('message_id', 0) <= fork_message_id:
+                            fork_point_snapshot = snapshot
+                        else:
+                            break
+                    
+                    # Use fork point state or current state
+                    if fork_point_snapshot:
+                        values = (
+                            fork_point_snapshot['trust'],
+                            fork_point_snapshot['emotional_bond'],
+                            fork_point_snapshot['conflict'],
+                            fork_point_snapshot['power_dynamic'],
+                            fork_point_snapshot['fear_anxiety']
+                        )
+                    else:
+                        values = (
+                            state['trust'],
+                            state['emotional_bond'],
+                            state['conflict'],
+                            state['power_dynamic'],
+                            state['fear_anxiety']
+                        )
+                    
+                    # Create new history starting at fork point
+                    new_history = [{
+                        'message_id': fork_message_id,
+                        'timestamp': time.time(),
+                        'trust': values[0],
+                        'emotional_bond': values[1],
+                        'conflict': values[2],
+                        'power_dynamic': values[3],
+                        'fear_anxiety': values[4],
+                        'note': 'Branch fork point'
+                    }]
+                    
+                    # CRITICAL: Preserve interaction_count from origin
+                    cursor.execute('''
+                        INSERT INTO relationship_states
+                        (chat_id, character_from, character_to, 
+                         trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
+                         last_updated, last_analyzed_message_id, interaction_count, history)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        branch_chat_id, from_entity, to_entity,
+                        *values,
+                        time.time(), fork_message_id, state['interaction_count'], json.dumps(new_history)
+                    ))
+                
+                # Commit transaction
+                conn.commit()
+                
+                # 4. Prepare branch data for return
+                branch_messages = origin_chat.get('messages', [])[:fork_index + 1] if origin_chat.get('messages') else []
+                
+                # Prepare metadata
+                branch_metadata = origin_chat.get('metadata', {}).copy()
+                branch_metadata['localnpcs'] = localnpcs.copy()
+                
+                # Assemble branch data
+                branch_data = {
+                    'id': branch_chat_id,
+                    'name': branch_chat_id,
+                    'messages': branch_messages,
+                    'summary': origin_chat.get('summary', ''),
+                    'activeCharacters': origin_chat.get('activeCharacters', []),
+                    'activeWI': origin_chat.get('activeWI'),
+                    'settings': origin_chat.get('settings', {}).copy(),
+                    'metadata': {
+                        **branch_metadata,
+                        'origin_chat_id': origin_chat_id,
+                        'origin_message_id': fork_message_id,
+                        'created_at': time.time()
+                    }
+                }
+                
+                # Update activeCharacters with new NPC entity IDs
+                updated_active_chars = []
+                for char_ref in branch_data['activeCharacters']:
+                    if char_ref in entity_mapping:
+                        updated_active_chars.append(entity_mapping[char_ref])
+                    else:
+                        updated_active_chars.append(char_ref)
+                branch_data['activeCharacters'] = updated_active_chars
+                
+                return branch_data
+                
+            except Exception as e:
+                # Rollback on any error
+                conn.rollback()
+                raise e
+                
     except Exception as e:
-        return 0
+        print(f"[FORK TRANSACTION] Transaction failed: {e}")
+        raise
 
 
 # ============================================================================
@@ -4302,56 +4425,6 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
         return False, None, f"Unexpected error: {str(e)}"
 
 
-def db_copy_npcs_for_branch(origin_chat_id: str, branch_chat_id: str) -> int:
-    """
-    Copy NPCs to branch when forking.
-    Preserves entity_ids for relationship continuity and registers them in entities.
-    """
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT entity_id, name, data, created_from_text, appearance_count
-                FROM chat_npcs WHERE chat_id = ? AND is_active = 1
-            ''', (origin_chat_id,))
-            
-            npcs = cursor.fetchall()
-            copied_count = 0
-            
-            for npc in npcs:
-                cursor.execute('''
-                    INSERT INTO chat_npcs 
-                    (chat_id, entity_id, name, data, created_from_text, 
-                     created_at, appearance_count, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-                ''', (
-                    branch_chat_id,
-                    npc['entity_id'],   # preserve entity_id
-                    npc['name'],
-                    npc['data'],
-                    npc['created_from_text'],
-                    time.time(),
-                    npc['appearance_count'],
-                ))
-
-                # Register entity for the branch chat
-                db_create_entity(
-                    chat_id=branch_chat_id,
-                    entity_id=npc['entity_id'],
-                    name=npc['name'],
-                    entity_type='npc',
-                )
-
-                copied_count += 1
-            
-            conn.commit()
-            print(f"[FORK] Copied {copied_count} NPCs to branch {branch_chat_id}")
-            return copied_count
-    except Exception as e:
-        print(f"[FORK] Error copying NPCs: {e}")
-        return 0
-
-
 # ============================================================================
 # FILTERED RELATIONSHIP CONTEXT (v1.6.1 - Adaptive Tier 3)
 # ============================================================================
@@ -4692,8 +4765,8 @@ def db_search_danbooru_characters_semantically(
         print("[WARN] sentence-transformers or sqlite-vec not available, using random selection")
         return db_get_danbooru_characters(gender=gender, limit=k)
     
-    # Generate query embedding
-    model = SentenceTransformer('all-mpnet-base-v2')
+    # Generate query embedding (local only to avoid network calls)
+    model = SentenceTransformer('all-mpnet-base-v2', local_files_only=True)
     query_embedding = model.encode(query_text).astype(np.float32)
     query_bytes = query_embedding.tobytes()
     
@@ -4779,8 +4852,8 @@ def db_search_danbooru_tags_semantically(
     if not query_text or not query_text.strip():
         return []
     
-    # Generate query embedding
-    model = SentenceTransformer('all-mpnet-base-v2')
+    # Generate query embedding (local only to avoid network calls)
+    model = SentenceTransformer('all-mpnet-base-v2', local_files_only=True)
     query_embedding = model.encode(query_text).astype(np.float32)
     query_bytes = query_embedding.tobytes()
     

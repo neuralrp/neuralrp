@@ -38,6 +38,7 @@ class AdaptiveRelationshipTracker:
         self.turn_count = 0
         self.last_trigger_turn = 0
         self.cooldown_turns = 3  # Minimum turns between adaptive triggers
+        self.current_chat_id: Optional[str] = None  # Track which chat we're in
         
         # Tier 1: Strong relationship keywords by dimension (positive and negative)
         # Uses word boundary matching to avoid false positives (e.g., "trust" in "distrust")
@@ -172,7 +173,7 @@ class AdaptiveRelationshipTracker:
             print(f"[ADAPTIVE_TRACKER] Error computing similarity: {e}")
             return None
     
-    def should_trigger_adaptive_analysis(self, current_text: str) -> Tuple[bool, str]:
+    def should_trigger_adaptive_analysis(self, current_text: str, chat_id: Optional[str] = None) -> Tuple[bool, str]:
         """
         Determine if adaptive relationship analysis should be triggered.
         
@@ -183,10 +184,16 @@ class AdaptiveRelationshipTracker:
         
         Args:
             current_text: Current turn's message text
+            chat_id: Chat identifier for per-chat turn tracking
         
         Returns:
             Tuple of (should_trigger: bool, reason: str)
         """
+        # Reset counters on chat switch (prevents cooldown sharing between chats)
+        if chat_id and chat_id != self.current_chat_id:
+            self.reset_turn_counter()
+            self.current_chat_id = chat_id
+        
         self.turn_count += 1
         
         # Cooldown check: Don't trigger too frequently
@@ -290,29 +297,29 @@ class AdaptiveRelationshipTracker:
     def _compute_keyword_polarity(self, text: str) -> Dict[str, int]:
         """
         Compute keyword polarity for each dimension.
-        
+
         Returns:
             Dict of {dimension: polarity_score}
             polarity_score: positive = +1, negative = -1, neutral = 0
         """
         text_lower = text.lower()
         polarity = {}
-        
+
         for dimension, keywords in self.relationship_keywords.items():
             mid = len(keywords) // 2
             positive = keywords[:mid]
             negative = keywords[mid:]
-            
-            pos_count = sum(1 for kw in positive if f'\\b{kw}\\b' in text_lower)
-            neg_count = sum(1 for kw in negative if f'\\b{kw}\\b' in text_lower)
-            
+
+            pos_count = sum(1 for kw in positive if re.search(r'\b' + re.escape(kw) + r'\b', text_lower))
+            neg_count = sum(1 for kw in negative if re.search(r'\b' + re.escape(kw) + r'\b', text_lower))
+
             if pos_count > neg_count:
                 polarity[dimension] = 1
             elif neg_count > pos_count:
                 polarity[dimension] = -1
             else:
                 polarity[dimension] = 0
-        
+
         return polarity
     
     def _compute_semantic_similarity(self, embeddings, dimension: str) -> float:
