@@ -610,6 +610,7 @@ def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
         
         char_data = json.loads(row['data'])
         char_data['_filename'] = row['filename']
+        char_data['updated_at'] = row['updated_at']  # Include updated_at timestamp
         
         # Inject extensions
         if 'data' in char_data and 'extensions' not in char_data['data']:
@@ -3981,7 +3982,7 @@ def db_get_chat_npcs(chat_id: str) -> list:
         try:
             cursor.execute("""
                 SELECT entity_id, chat_id, name, data, is_active, created_at
-                FROM chat_npcs 
+                FROM chat_npcs
                 WHERE chat_id = ?
             """, (chat_id,))
             rows = cursor.fetchall()
@@ -4310,7 +4311,7 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                 # Insert NPC into chat_npcs table
                 cursor.execute(
                     """
-                    INSERT INTO chat_npcs 
+                    INSERT INTO chat_npcs
                         (chat_id, entity_id, name, data, created_from_text, created_at, 
                          appearance_count, last_used_turn, is_active)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

@@ -16,7 +16,7 @@ import random
 import re
 import time
 import asyncio
-from typing import Dict, List, Optional, Any, Literal
+from typing import Dict, List, Optional, Any, Literal, Tuple, Set
 from pydantic import BaseModel
 
 # Set up logging
@@ -382,7 +382,9 @@ CONFIG = {
     "kobold_url": "http://127.0.0.1:5001",
     "sd_url": "http://127.0.0.1:7861",
     "system_prompt": "Write a highly detailed, creative, and immersive response. Stay in character at all times.",
-    "performance_mode_enabled": True
+    "performance_mode_enabled": True,
+    "max_context": 8192,
+    "summarize_threshold": 0.80
 }
 
 # Multi-Character Mode Instruction Templates
@@ -418,6 +420,30 @@ Respond directly to what just happened in the previous message, in {CharacterNam
 {CharacterName} only knows what they've witnessed or been told in the scene.
 
 Keep the reply under 3–5 paragraphs."""
+
+SCENE_CAPSULE_PROMPT = """### System: Summarize the following conversation into a scene capsule.
+
+Requirements:
+- Use neutral, factual, past-tense prose
+- Include key events and plot developments
+- Note relationship changes between characters
+- Record any world information discovered
+- Explicitly mention when characters enter or exit
+
+Do NOT:
+- Mimic character voices or speech patterns
+- Include direct dialogue quotes
+- Add stylistic flourishes
+
+{departed_note}
+
+{canon_echo}
+
+### Conversation (Turns {start_turn}-{end_turn}):
+{conversation_text}
+
+### Scene Capsule:
+Scene (Turns {start_turn}-{end_turn}):"""
 
 def clean_llm_response(text: str) -> str:
     """Remove any reinforcement markers that might have leaked into the LLM response."""
@@ -535,7 +561,7 @@ class CardGenRequest(BaseModel):
 async def generate_dialogue_for_edit(
     char_name: str,
     personality: str = "",
-    depth_prompt: str = "",
+    description: str = "",
     scenario: str = "",
     current_example: str = ""
 ) -> str:
@@ -547,7 +573,7 @@ async def generate_dialogue_for_edit(
     Args:
         char_name: Character name for placeholder
         personality: Personality traits for voice reference
-        depth_prompt: Additional traits/extensions
+        description: Physical description and appearance for context
         scenario: Character's scenario for context
         current_example: Existing dialogue text (if any) to use as style reference
 
@@ -562,10 +588,10 @@ Name: {char_name}
 """
     if personality:
         prompt += f"Personality: {personality}\n"
+    if description:
+        prompt += f"Description: {description}\n"
     if scenario:
         prompt += f"Scenario: {scenario}\n"
-    if depth_prompt:
-        prompt += f"Additional Traits: {depth_prompt}\n"
     if current_example:
         prompt += f"\nCurrent Example (use as reference for style):\n{current_example}\n"
 
@@ -589,7 +615,7 @@ Output ONLY DIALOGUE_EXAMPLES section, nothing else."""
 async def generate_personality_for_edit(
     char_name: str,
     current_personality: str,
-    depth_prompt: str = "",
+    description: str = "",
     scenario: str = ""
 ) -> str:
     """Generate or expand personality field using PList format.
@@ -597,7 +623,7 @@ async def generate_personality_for_edit(
     Args:
         char_name: Character name for PList label
         current_personality: Existing personality traits (if any)
-        depth_prompt: Additional traits for reference
+        description: Physical description and appearance for context
         scenario: Character scenario for context
 
     Returns:
@@ -609,10 +635,10 @@ async def generate_personality_for_edit(
 """
     if current_personality:
         prompt += f"Current Personality: {current_personality}\n"
+    if description:
+        prompt += f"Description: {description}\n"
     if scenario:
         prompt += f"Scenario: {scenario}\n"
-    if depth_prompt:
-        prompt += f"Additional Traits: {depth_prompt}\n"
 
     prompt += """
 Generate or expand personality traits in PList format:
@@ -628,7 +654,7 @@ async def generate_scenario_for_edit(
     char_name: str,
     current_scenario: str,
     personality: str = "",
-    depth_prompt: str = ""
+    description: str = ""
 ) -> str:
     """Generate or expand scenario field.
 
@@ -636,7 +662,7 @@ async def generate_scenario_for_edit(
         char_name: Character name
         current_scenario: Existing scenario (if any)
         personality: Personality traits for consistency
-        depth_prompt: Additional traits for context
+        description: Physical description and appearance for context
 
     Returns:
         Single sentence scenario string
@@ -649,8 +675,8 @@ async def generate_scenario_for_edit(
         prompt += f"Current Scenario: {current_scenario}\n"
     if personality:
         prompt += f"Personality: {personality}\n"
-    if depth_prompt:
-        prompt += f"Additional Traits: {depth_prompt}\n"
+    if description:
+        prompt += f"Description: {description}\n"
 
     prompt += """
 Generate or expand scenario as a single sentence describing the situation.
@@ -666,7 +692,7 @@ async def generate_first_message_for_edit(
     current_first_msg: str,
     personality: str = "",
     scenario: str = "",
-    depth_prompt: str = ""
+    description: str = ""
 ) -> str:
     """Generate or expand first message.
 
@@ -675,7 +701,7 @@ async def generate_first_message_for_edit(
         current_first_msg: Existing first message (if any)
         personality: Personality traits for voice
         scenario: Scenario context
-        depth_prompt: Additional traits for reference
+        description: Physical description and appearance for context
 
     Returns:
         First message string with *actions* and "speech"
@@ -690,8 +716,8 @@ async def generate_first_message_for_edit(
         prompt += f"Personality: {personality}\n"
     if scenario:
         prompt += f"Scenario: {scenario}\n"
-    if depth_prompt:
-        prompt += f"Additional Traits: {depth_prompt}\n"
+    if description:
+        prompt += f"Description: {description}\n"
 
     prompt += """
 Generate or expand first message as 2-3 sentences that introduce the character and establish the scenario.
@@ -706,6 +732,7 @@ async def generate_body_for_edit(
     char_name: str,
     current_body: str,
     personality: str = "",
+    description: str = "",
     scenario: str = ""
 ) -> str:
     """Generate or expand physical description using PList format.
@@ -714,6 +741,7 @@ async def generate_body_for_edit(
         char_name: Character name for PList label
         current_body: Existing physical description (if any)
         personality: Personality traits for consistency
+        description: Physical description and appearance for context
         scenario: Scenario context
 
     Returns:
@@ -727,6 +755,8 @@ async def generate_body_for_edit(
         prompt += f"Current Body: {current_body}\n"
     if personality:
         prompt += f"Personality: {personality}\n"
+    if description:
+        prompt += f"Description: {description}\n"
     if scenario:
         prompt += f"Scenario: {scenario}\n"
 
@@ -852,6 +882,128 @@ def get_entity_id(character_obj: Any) -> str:
 
     return "Unknown"
 
+
+def build_entity_name_mapping(
+    characters: List[Dict],
+    npcs: Dict
+) -> Dict[str, str]:
+    """
+    Build mapping from entity_id to display name.
+    
+    Used by build_scene_update_block() to convert entity IDs to readable names.
+    
+    Returns:
+        {entity_id: display_name, ...}
+    """
+    mapping = {}
+    
+    # Global characters
+    for char in characters:
+        entity_id = char.get('_filename')
+        name = get_character_name(char)
+        if entity_id and name:
+            mapping[entity_id] = name
+    
+    # Local NPCs
+    for npc_id, npc in npcs.items():
+        entity_id = npc.get('entity_id') or npc_id
+        name = npc.get('name', 'Unknown NPC')
+        if entity_id:
+            mapping[entity_id] = name
+    
+    return mapping
+
+
+def detect_cast_change(
+    current_characters: List[Dict],
+    current_npcs: Dict,
+    mode: str,
+    previous_metadata: Dict
+) -> Tuple[bool, Set[str], Set[str], Dict]:
+    """
+    Detect if cast changed since last turn.
+    
+    Cast change definition:
+        ALL modes (NARRATOR and FOCUS): active_set changed only
+        
+    Focus changes within same cast do NOT trigger cast change.
+    
+    Returns:
+        (changed: bool, departed: Set[str], arrived: Set[str], updated_metadata: Dict)
+    """
+    # Build current active set (entity IDs)
+    current_set = set()
+    for char in current_characters:
+        if char.get('is_active', True):
+            current_set.add(char.get('_filename'))
+    for npc_id, npc in current_npcs.items():
+        if npc.get('is_active', True):
+            current_set.add(npc.get('entity_id') or npc_id)
+    
+    # Get previous state from provided metadata
+    previous_set = set(previous_metadata.get('previous_active_cast', []))
+    previous_focus = previous_metadata.get('previous_focus_character')
+    
+    # Determine current focus (for tracking, NOT for cast change detection)
+    current_focus = None
+    if mode.startswith('focus:'):
+        focus_name = mode.split(':', 1)[1]
+        
+        # Search global characters
+        for char in current_characters:
+            if get_character_name(char) == focus_name:
+                current_focus = char.get('_filename')
+                break
+        
+        # Search NPCs if not found
+        if not current_focus:
+            for npc_id, npc in current_npcs.items():
+                if npc.get('name') == focus_name:
+                    current_focus = npc.get('entity_id') or npc_id
+                    break
+    
+    # Cast change = active set changed (focus change alone doesn't count)
+    cast_changed = (current_set != previous_set)
+    
+    # Calculate departed and arrived
+    departed = previous_set - current_set
+    arrived = current_set - previous_set
+    
+    # Build updated metadata dict (don't save here - pure function)
+    updated_metadata = {
+        'previous_active_cast': list(current_set),
+        'previous_focus_character': current_focus  # Track for future use
+    }
+    
+    return (cast_changed, departed, arrived, updated_metadata)
+
+
+def build_scene_update_block(
+    departed: Set[str],
+    arrived: Set[str],
+    entity_to_name: Dict[str, str]
+) -> str:
+    """
+    Build SCENE UPDATE block when cast changes.
+    Only emitted on turn where change is detected.
+    """
+    if not departed and not arrived:
+        return ""
+    
+    lines = ["SCENE UPDATE"]
+    
+    for entity_id in departed:
+        name = entity_to_name.get(entity_id, entity_id)
+        lines.append(f"- {name} has left the scene.")
+    
+    for entity_id in arrived:
+        name = entity_to_name.get(entity_id, entity_id)
+        lines.append(f"- {name} has entered the scene.")
+    
+    lines.append("- Adjust your portrayal to reflect only the currently active characters listed in SCENE CAST below.")
+    
+    return "\n".join(lines)
+
 # Token counting helper
 async def get_token_count(text: str):
     async with httpx.AsyncClient() as client:
@@ -938,77 +1090,19 @@ WORLD_INFO_CACHE = LRUCache(max_size=300)
 # Recent Edits Tracking System (v1.7.3)
 # In-memory tracking for one-time flash notifications
 # Completely separate from reinforcement intervals - appears once then disappears
-# Format: {'character': {filename: (timestamp, field, content)}, ...}
-RECENT_EDITS = {
-    'character': {},  # filename -> (timestamp, field, full_field_content)
-    'world': {},     # 'world_name:entry_uid' -> (timestamp, field, full_field_content)
-    'npc': {}        # 'chat_id:entity_id' -> (timestamp, field, full_field_content)
-}
 
-def add_recent_edit(edit_type: str, entity_id: str, field: str, content: str) -> None:
-    """Record a recent edit with timestamp.
-    
-    This is independent of reinforcement intervals - it's a one-time notification system.
-    Edits appear on next chat turn, then are cleared.
-    
-    Args:
-        edit_type: 'character', 'world', or 'npc'
-        entity_id: filename (character), 'world_name:entry_uid' (world), or 'chat_id:entity_id' (npc)
-        field: The field that was edited (e.g., 'personality', 'description')
-        content: Full content of edited field (entire field content, not just changes)
-    """
-    timestamp = time.time()
-    RECENT_EDITS[edit_type][entity_id] = (timestamp, field, content)
-    print(f"[RECENT_EDIT] Recorded {edit_type} {entity_id}: {field} (will show on next turn)")
-
-def get_and_clear_recent_edits(edit_type: str, entity_ids: List[str] = None) -> Dict[str, tuple]:
-    """Get and clear recent edits for specified entities.
-    
-    This is a one-time retrieval - edits are removed immediately after.
-    This ensures edits only appear on ONE chat turn, then disappear.
-    
-    Args:
-        edit_type: 'character', 'world', or 'npc'
-        entity_ids: Specific entity IDs to retrieve (list), or None for all (for world info)
-    
-    Returns:
-        Dict of entity_id -> (timestamp, field, content)
-    """
-    if edit_type not in RECENT_EDITS:
-        return {}
-    
-    if entity_ids is None:
-        # For world info, return and clear ALL entries
-        edits = RECENT_EDITS[edit_type].copy()
-        RECENT_EDITS[edit_type].clear()
-        return edits
-    else:
-        # For characters/NPCs, return only specified IDs
-        edits = {}
-        for entity_id in entity_ids:
-            if entity_id in RECENT_EDITS[edit_type]:
-                edits[entity_id] = RECENT_EDITS[edit_type][entity_id]
-                del RECENT_EDITS[edit_type][entity_id]
-        return edits
-
-def cleanup_old_edits(max_age_seconds: int = 300) -> None:
-    """Remove edits older than max_age_seconds.
-    
-    Safety cleanup in case edits aren't consumed (e.g., chat abandoned, server restart).
-    Called periodically to prevent memory leaks.
-    
-    Args:
-        max_age_seconds: Maximum age before cleanup (default: 5 minutes)
-    """
-    current_time = time.time()
-    for edit_type in RECENT_EDITS:
-        for entity_id in list(RECENT_EDITS[edit_type].keys()):
-            timestamp, _, _ = RECENT_EDITS[edit_type][entity_id]
-            if current_time - timestamp > max_age_seconds:
-                del RECENT_EDITS[edit_type][entity_id]
-                print(f"[RECENT_EDIT] Cleaned up old edit: {edit_type} {entity_id} (age: {int(current_time - timestamp)}s)")
 
 # Semantic Search Engine
+def get_npc_timestamp(entity_id: str, chat_id: str) -> int:
+    """Get NPC's last update timestamp from chat metadata."""
+    chat = db_get_chat(chat_id)
+    if chat and "metadata" in chat:
+        npcs = chat["metadata"].get("localnpcs", {})
+        npc = npcs.get(entity_id, {})
+        return npc.get("updated_at", 0)
+    return 0
+
+
 class SemanticSearchEngine:
     GENERIC_KEYS = {
         # structural/generic
@@ -2094,9 +2188,6 @@ async def import_characters_json_files_async(force: bool = False) -> int:
     
     Args:
         force: If True, reimport even if character exists (overwrites DB)
-    
-    Returns:
-        Number of characters imported
     """
     import_count = 0
     char_dir = os.path.join(DATA_DIR, "characters")
@@ -2117,6 +2208,26 @@ async def import_characters_json_files_async(force: bool = False) -> int:
                     char_data = normalize_character_v2(char_data)
                     
                     if db_save_character(char_data, f):
+                        # Auto-generate capsule for newly imported character
+                        try:
+                            capsule = await generate_capsule_for_character(
+                                char_name=char_data.get('name', ''),
+                                description=char_data.get('description', ''),
+                                personality=char_data.get('personality', ''),
+                                scenario=char_data.get('scenario', ''),
+                                mes_example=char_data.get('mes_example', ''),
+                                gender=char_data.get('extensions', {}).get('gender', '')
+                            )
+                            # Update character data with generated capsule
+                            if 'extensions' not in char_data:
+                                char_data['extensions'] = {}
+                            char_data['extensions']['multi_char_summary'] = capsule
+                            # Re-save with capsule
+                            db_save_character(char_data, f)
+                            print(f"  [CAPSULE] Auto-generated capsule for {f}")
+                        except Exception as e:
+                            print(f"  [CAPSULE] Failed to generate capsule for {f}: {e}")
+                        
                         import_count += 1
                         print(f"Imported character: {f}")
             except Exception as e:
@@ -2131,9 +2242,7 @@ async def import_characters_json_files_async(force: bool = False) -> int:
 def import_characters_json_files(force: bool = False) -> int:
     """Sync wrapper for async import (for startup compatibility).
     
-    Note: Capsules are no longer generated during import. They are
-    generated on-demand during multi-character chats and stored in
-    chat metadata.
+    Note: Capsules are auto-generated during import for new characters.
     """
     import_count = 0
     char_dir = os.path.join(DATA_DIR, "characters")
@@ -2558,37 +2667,37 @@ def get_cached_world_entries(world_info, recent_text, max_entries=10, semantic_t
     WORLD_INFO_CACHE[cache_key] = result
     return result
 
-    def character_has_speaker(messages: List[ChatMessage], char_name: str) -> bool:
-        """Check if a character has ever spoken in the message history."""
-        for msg in messages:
-            speaker = msg.speaker or msg.role
-            if char_name in speaker:
-                return True
-        return False
+def character_has_speaker(messages: List[ChatMessage], char_name: str) -> bool:
+    """Check if a character has ever spoken in the message history."""
+    for msg in messages:
+        speaker = msg.speaker or msg.role
+        if char_name in speaker:
+            return True
+    return False
 
-    def character_has_appeared_recently(messages: List[ChatMessage], char_name: str) -> bool:
-        """Check if a character has appeared in recent N messages.
+def character_has_appeared_recently(messages: List[ChatMessage], char_name: str) -> bool:
+    """Check if a character has appeared in recent N messages.
+    
+    This is used to determine if a character should be treated as "reappearing"
+    after being absent from the conversation for a while. Characters who haven't
+    appeared in recent messages should get a fresh sticky window on return.
+    
+    Args:
+        messages: Message history (may be truncated after summarization)
+        char_name: Character name to search for
         
-        This is used to determine if a character should be treated as "reappearing"
-        after being absent from the conversation for a while. Characters who haven't
-        appeared in recent messages should get a fresh sticky window on return.
-        
-        Args:
-            messages: Message history (may be truncated after summarization)
-            char_name: Character name to search for
-            
-        Returns:
-            True if character found in last 20 messages, False otherwise
-        """
-        # Check only the most recent 20 messages
-        # This threshold allows characters to be treated as "reappearing" after being absent
-        recent_messages = messages[-20:] if len(messages) > 20 else messages
-        
-        for msg in recent_messages:
-            speaker = msg.speaker or msg.role
-            if char_name in speaker:
-                return True
-        return False
+    Returns:
+        True if character found in last 20 messages, False otherwise
+    """
+    # Check only the most recent 20 messages
+    # This threshold allows characters to be treated as "reappearing" after being absent
+    recent_messages = messages[-20:] if len(messages) > 20 else messages
+    
+    for msg in recent_messages:
+        speaker = msg.speaker or msg.role
+        if char_name in speaker:
+            return True
+    return False
 
 def normalize_string_for_comparison(s: str) -> str:
     """Normalize a string for robust comparison.
@@ -2672,9 +2781,11 @@ def is_first_message_auto_added(messages: List[ChatMessage], char_obj: dict) -> 
     return content_matches
 
 # Prompt Construction Engine
-def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, int] = None, absolute_turn: int = None):
+def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, int] = None, absolute_turn: int = None, scene_update_block: str = "", character_full_card_turns: Dict[str, int] = None):
     if character_first_turns is None:
         character_first_turns = {}
+    if character_full_card_turns is None:
+        character_full_card_turns = {}
     settings = request.settings
     system_prompt = settings.get("system_prompt", CONFIG["system_prompt"])
     user_persona = settings.get("user_persona", "")
@@ -2704,6 +2815,31 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     active_names = []
     for char_obj in request.characters:
         active_names.append(get_character_name(char_obj))
+    
+    # Extract capsules from character objects for SCENE CAST
+    character_capsules = {}
+    for char in request.characters:
+        entity_id = char.get('_filename')
+        if entity_id:
+            capsule = char.get('data', {}).get('extensions', {}).get('multi_char_summary')
+            if capsule:
+                character_capsules[entity_id] = capsule
+    
+    for char in request.characters:
+        if char.get('is_npc'):
+            entity_id = char.get('entity_id')
+            if entity_id:
+                capsule = char.get('data', {}).get('extensions', {}).get('multi_char_summary')
+                if capsule:
+                    character_capsules[entity_id] = capsule
+    
+    # === RECORD FIRST TURNS FOR NEW CHARACTERS ===
+    for char in request.characters:
+        char_ref = char.get('_filename') or char.get('entity_id')
+        
+        # If not in dict, this is first appearance - record it
+        if char_ref and char_ref not in character_first_turns:
+            character_first_turns[char_ref] = absolute_turn
     
     # === 1. SYSTEM PROMPT ===
     narrator_instruction = " Act as a Narrator. Describe the world and speak for any NPCs the user encounters. Do not speak for the {{user}}"
@@ -2739,8 +2875,13 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         full_prompt += f"### Long-Term Context (Summary of earlier turns):\n{summary}\n"
     
     # === 4. USER PERSONA ===
-    if user_persona:
-        full_prompt += f"### User Description:\n{user_persona}\n"
+    if user_name or user_persona:
+        full_prompt += "### User Description:\n"
+        if user_name:
+            full_prompt += f"Name: {user_name}\n"
+        if user_persona:
+            full_prompt += f"{user_persona}\n"
+        full_prompt += "\n"
 
     # === 5. WORLD KNOWLEDGE (moved up - world context frames characters) ===
     canon_law_entries = []
@@ -2773,225 +2914,95 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         if triggered_lore:
             full_prompt += "### World Knowledge:\n" + "\n".join(triggered_lore) + "\n"
 
+    # === 6. SCENE UPDATE (only if cast changed this turn - Phase 2) ===
+    if scene_update_block:
+        full_prompt += f"\n{scene_update_block}\n"
+
     # === 6.5. RECENT UPDATES (one-time notification, independent of intervals) ===
-    # This is completely separate from reinforcement intervals:
+    # This is completely separate from SCENE CAST and canon law:
     # - Does NOT affect current_turn calculation
-    # - Does NOT affect reinforce_freq timing
     # - Does NOT affect world_reinforce_freq timing
     # - Does NOT affect semantic search
+    # - Character reinforcement replaced by SCENE CAST (v1.11.0)
     # Appears on ONE turn after edit, then disappears
-    recent_updates = []
+
     
-    if request.chat_id:
-        # Check for recent character/NPC edits
-        for char_obj in request.characters:
-            char_filename = char_obj.get("_filename")
-            entity_id = char_obj.get("entity_id")
-            is_npc = char_obj.get("is_npc", False)
-            char_name = char_obj.get("name", "Unknown")
-            
-            if is_npc and entity_id:
-                # NPC: entity_id format is 'chat_id:entity_id'
-                npc_entity_id = f"{request.chat_id}:{entity_id}"
-                edit = get_and_clear_recent_edits('npc', [npc_entity_id]).get(npc_entity_id)
-                if edit:
-                    _, field, content = edit
-                    recent_updates.append(f"[NPC Updated: {char_name} - {field}]\n{content}")
-                    print(f"[RECENT_EDIT] NPC {char_name} edit will show this turn: {field}")
-            elif char_filename:
-                # Character: entity_id is filename
-                edit = get_and_clear_recent_edits('character', [char_filename]).get(char_filename)
-                if edit:
-                    _, field, content = edit
-                    recent_updates.append(f"[Character Updated: {char_name} - {field}]\n{content}")
-                    print(f"[RECENT_EDIT] Character {char_name} edit will show this turn: {field}")
-        
-        # Check for recent world info edits
-        if request.world_info:
-            world_name = request.world_info.get("name", "")
-            # Get all recent edits for this world (None = get all world edits)
-            world_edits = get_and_clear_recent_edits('world', None)
-            
-            # Filter edits for current world
-            for entity_id, edit in world_edits.items():
-                if entity_id.startswith(world_name + ":"):
-                    entry_uid = entity_id.split(":", 1)[1]
-                    _, field, content = edit
-                    recent_updates.append(f"[World Info Updated - Entry {entry_uid} - {field}]\n{content}")
-                    print(f"[RECENT_EDIT] World info {world_name}:{entry_uid} edit will show this turn: {field}")
+    # === 6. HYBRID CHARACTER INJECTION (full cards + SCENE CAST) ===
     
-    # Add to prompt if there are any recent updates
-    # Section only appears if recent_updates is non-empty (no wasted tokens)
-    if recent_updates:
-        full_prompt += "\n### Recent Updates:\n" + "\n\n".join(recent_updates) + "\n"
-    
-    # === 6. CHARACTER PROFILES (characters exist in the world context) ===
-    reinforcement_chunks = []
-    chars_injected_this_turn = set()  # Track characters injected this turn to avoid duplication with reinforcement
-    
-    # Determine chat mode DYNAMICALLY (based on current active characters, not first turn)
-    # This handles mid-chat character additions/removals
-    is_group_chat = len(request.characters) >= 2
-    is_single_char = len(request.characters) == 1
-    
-    for char_obj in request.characters:
-        data = char_obj.get("data", {})
-        name = get_character_name(char_obj)
-        description = data.get("description", "")
-        personality = data.get("personality", "")
-        scenario = data.get("scenario", "")
-        mes_example = data.get("mes_example", "")
-        multi_char_summary = data.get("extensions", {}).get("multi_char_summary", "")
-        gender = data.get("extensions", {}).get("gender", "")
+    # Detect characters needing full cards (reset points)
+    chars_needing_full_card = []
+    for char in request.characters:
+        char_ref = char.get('_filename') or char.get('entity_id')
+        char_name = get_character_name(char)
         
-        # Check if this character is an NPC
-        is_npc = char_obj.get("is_npc", False)
+        # Skip if no entity ID
+        if not char_ref:
+            continue
         
-        # Check if character has appeared in RECENT conversation (last 20 messages)
-        # This handles re-appearance after long absences, even after summarization
-        char_has_appeared_recently = character_has_appeared_recently(request.messages, name)
+        # Get first turn from metadata (already recorded at function start)
+        first_turn = character_first_turns.get(char_ref)
         
-        # Check if character has ever appeared (for backward compatibility with other logic)
-        char_has_ever_appeared = character_has_speaker(request.messages, name)
+        # First appearance?
+        is_first_appearance = (first_turn == absolute_turn)
         
-        # Special case: if first assistant message is auto-added first_mes, treat as "not appeared"
-        # This handles both single-message and multi-message cases (e.g., [first_mes, user_msg])
-        is_auto_first_mes_only = is_first_message_auto_added(request.messages, char_obj)
+        # Returning after long absence?
+        # Only check if we have enough message history (more than just auto first_mes)
+        has_appeared_recently = False
+        if len(request.messages) > 0:
+            has_appeared_recently = character_has_appeared_recently(
+                request.messages[-20:], 
+                char_name
+            )
         
-        # === STICKY FIRST 3 TURNS LOGIC ===
-        # Get character reference for tracking (filename for chars, entity_id for NPCs)
-        char_ref = char_obj.get("_filename") or char_obj.get("entity_id")
+        is_returning = (first_turn is not None and 
+                        first_turn < absolute_turn and 
+                        not has_appeared_recently)
         
-        # Record first turn if character just appeared (or was just added to chat)
-        # Also record new first turn if character reappears after absence
-        needs_new_first_turn = False
-        if char_ref and char_ref not in character_first_turns:
-            # First time ever in chat
-            character_first_turns[char_ref] = current_turn
-            needs_new_first_turn = True
-        elif not char_has_appeared_recently:
-            # Reappearing after long absence - record new first turn for fresh sticky window
-            character_first_turns[char_ref] = current_turn
-            needs_new_first_turn = True
-            print(f"[CONTEXT] {name} reappearing after absence - new first turn: {current_turn}")
-        
-        # Check sticky window (first 3 turns: 1, 2, 3)
-        first_turn = character_first_turns.get(char_ref) if char_ref else None
-        turns_since_first = current_turn - first_turn if first_turn is not None else None
-        
-        # Sticky injection window: first appearance + 2 more turns (total 3)
+        # Sticky window: get full card for 2 more turns after first appearance or return
+        full_card_turn = character_full_card_turns.get(char_ref)
         is_in_sticky_window = (
-            first_turn is not None and
-            turns_since_first is not None and
-            turns_since_first <= 2
+            full_card_turn is not None and
+            absolute_turn - full_card_turn <= 2
         )
         
-        # Determine if injection is needed
-        # Inject if: never appeared, auto first_mes only, or in sticky window
-        needs_injection = (not char_has_ever_appeared) or is_auto_first_mes_only or is_in_sticky_window
-        
-        # === CHARACTER INJECTION LOGIC ===
-        if needs_injection:
-            # Log injection reason for debugging
-            injection_reason = []
-            if not char_has_ever_appeared:
-                injection_reason.append("first_appearance")
-            if is_auto_first_mes_only:
-                injection_reason.append("auto_first_mes")
-            if is_in_sticky_window:
-                injection_reason.append(f"sticky_window(turn_{turns_since_first})")
-            print(f"[CONTEXT] {name} injection needed: {', '.join(injection_reason)}")
+        if is_first_appearance or is_returning or is_in_sticky_window:
+            chars_needing_full_card.append(char_ref)
             
-            if is_single_char:
-                # Single character: full card injection
-                label = "[NPC]" if is_npc else "[Character]"
-                print(f"[CONTEXT] {label} {name} full card injection")
-                
-                full_prompt += f"### Character Profile: {name}\n"
-                if gender:
-                    full_prompt += f"Gender: {gender}\n"
-                if description:
-                    full_prompt += f"{description}\n"
-                if personality:
-                    full_prompt += f"{personality}\n"
-                if scenario:
-                    full_prompt += f"{scenario}\n"
-                if mes_example:
-                    full_prompt += f"Example dialogue:\n{mes_example}\n"
-                
-                chars_injected_this_turn.add(name)
-                
-            elif is_group_chat and multi_char_summary:
-                # Group chat: capsule injection
-                label = "[NPC]" if is_npc else "[Character]"
-                print(f"[CONTEXT] {label} {name} introduced (capsule)")
-                full_prompt += f"### [{name}]: {multi_char_summary}\n"
-                
-                chars_injected_this_turn.add(name)
-                
-            elif is_group_chat and not multi_char_summary:
-                # Group chat but character has no capsule - use description + personality as fallback
-                label = "[NPC]" if is_npc else "[Character]"
-                print(f"[CONTEXT] {label} {name} using fallback (description + personality)")
-                
-                fallback_content = ""
-                if gender:
-                    fallback_content += f"{name} is a {gender} character. "
-                if description:
-                    fallback_content += description
-                if personality:
-                    if fallback_content:
-                        fallback_content += " "
-                    fallback_content += personality
-                
-                if fallback_content:
-                    full_prompt += f"### [{name}]: {fallback_content}\n"
-                    chars_injected_this_turn.add(name)
-                else:
-                    print(f"[CONTEXT] Warning: {name} has no description or personality, skipping injection")
-        else:
-            # Character not injected - log reason for debugging
-            print(f"[CONTEXT] {name} NOT injected (char_has_appeared={char_has_appeared}, auto_first_mes={is_auto_first_mes_only}, is_in_sticky_window={is_in_sticky_window})")
-        
-        # === REINFORCEMENT CHUNK PREPARATION ===
-        # Unified: description + personality for ALL characters (single or multi-chat)
-        reinforcement_parts = []
-        if gender:
-            reinforcement_parts.append(f"{name} is a {gender} character.")
-        if description:
-            reinforcement_parts.append(description)
-        if personality:
-            reinforcement_parts.append(personality)
-        
-        if reinforcement_parts:
-            reinforcement_content = " ".join(reinforcement_parts)
-            reinforcement_chunks.append(reinforcement_content)
-        else:
-            print(f"[REINFORCEMENT] Warning: {name} has no description or personality, skipping")
-
-    # === 7. CHAT HISTORY (with reinforcement) ===
-    full_prompt += "\n### Chat History:\n"
-    reinforce_freq = settings.get("reinforce_freq", 5)
-    world_reinforce_freq = settings.get("world_info_reinforce_freq", 3)  # Default to every 3 turns
-    
-    # Character reinforcement logic every X turns
-    if reinforce_freq > 0 and current_turn > 0 and current_turn % reinforce_freq == 0:
-        print(f"[REINFORCEMENT] Turn {current_turn}: Reinforcing character profiles")
-        
-        if reinforcement_chunks:
-            # Skip reinforcement if any character was just injected this turn to avoid duplication
-            if chars_injected_this_turn:
-                print(f"[REINFORCEMENT] Skipping reinforcement (characters injected this turn: {', '.join(chars_injected_this_turn)})")
+            if is_in_sticky_window:
+                print(f"[CONTEXT] {char_name}: Full card (sticky window)")
             else:
-                print(f"[REINFORCEMENT] Reinforcing {len(reinforcement_chunks)} character profiles")
-                full_prompt += "[REINFORCEMENT: " + " | ".join(reinforcement_chunks) + "]\n"
-        elif is_narrator_mode:
-            # Narrator reinforcement
-            print(f"[REINFORCEMENT] Narrator mode reinforced")
-            full_prompt += f"[REINFORCEMENT: {narrator_instruction.strip()}]\n"
+                reason = "first appearance" if is_first_appearance else "returning after absence"
+                print(f"[CONTEXT] {char_name}: Full card ({reason})")
     
-    # Add chat history messages
-    for msg in request.messages:
+    # Build combined block: FULL CARDS + SCENE CAST
+    if chars_needing_full_card or request.characters:
+        full_prompt += "\n### Active Characters:\n\n"
+    
+    # Full cards for reset characters
+    for char in request.characters:
+        char_ref = char.get('_filename') or char.get('entity_id')
+        if char_ref in chars_needing_full_card:
+            full_card = build_full_character_card(char)
+            full_prompt += full_card + "\n\n"
+            
+            # Record that this character got a full card this turn
+            character_full_card_turns[char_ref] = absolute_turn
+    
+    # SCENE CAST capsules for remaining characters (no duplicates)
+    scene_cast = build_scene_cast_block(
+        request.characters,
+        character_capsules,
+        exclude=chars_needing_full_card
+    )
+    if scene_cast:
+        full_prompt += scene_cast + "\n\n"
+
+    # === 7. CHAT HISTORY (split into recent/old) ===
+    # Use new window-based approach: recent 10 exchanges verbatim
+    recent_messages, old_messages = split_messages_by_window(request.messages)
+
+    full_prompt += "\n### Chat History:\n"
+    for msg in recent_messages:
         # Filter out meta-messages like "Visual System" if they exist
         if msg.speaker == "Visual System":
             continue
@@ -3000,8 +3011,8 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         full_prompt += f"{speaker}: {msg.content}\n"
 
     # === 8. CANON LAW (pinned for recency bias - right before generation) ===
-    # Show canon law on turns 1-2 (initial) and every world_reinforce_freq turns thereafter
-    if canon_law_entries and world_reinforce_freq > 0 and (is_initial_turn or (current_turn > 2 and (current_turn - 2) % world_reinforce_freq == 0)):
+    world_reinforce_freq = settings.get("world_info_reinforce_freq", 3)
+    if canon_law_entries and world_reinforce_freq > 0 and should_show_canon_law(current_turn, world_reinforce_freq):
         full_prompt += "\n### Canon Law (World Rules):\n" + "\n".join(canon_law_entries) + "\n"
 
     # === 8.5. RELATIONSHIP CONTEXT (character-to-character and character-to-user dynamics) ===
@@ -3057,6 +3068,374 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     
     return full_prompt
 
+def should_show_canon_law(current_turn: int, freq: int) -> bool:
+    """Determine if canon law should be shown on current turn."""
+    return current_turn <= 2 or (current_turn > 2 and (current_turn - 2) % freq == 0)
+
+def split_messages_by_window(
+    messages: List[ChatMessage],
+    max_exchanges: int = 6
+) -> Tuple[List[ChatMessage], List[ChatMessage]]:
+    """
+    Split messages into recent (verbatim) and old (candidates for summarization).
+    
+    An exchange = 1 user message + 1 assistant response.
+    Counts from the end, keeping most recent max_exchanges exchanges.
+    
+    Returns:
+        (recent_messages, old_messages)
+    """
+    if not messages:
+        return ([], [])
+    
+    exchange_count = 0
+    split_index = 0
+    
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].role == 'user':
+            exchange_count += 1
+            if exchange_count > max_exchanges:
+                split_index = i + 1
+                break
+    
+    old_messages = messages[:split_index]
+    recent_messages = messages[split_index:]
+    
+    return (recent_messages, old_messages)
+
+def calculate_turn_for_message(messages: List[ChatMessage], target_index: int) -> int:
+    """
+    Calculate which turn a message belongs to (1-indexed).
+    Turn = count of user messages up to and including this message.
+    """
+    return sum(1 for msg in messages[:target_index+1] if msg.role == 'user')
+
+def group_messages_into_scenes(
+    messages: List[ChatMessage],
+    cast_change_turns: List[int],
+    max_exchanges_per_scene: int = 15
+) -> List[Tuple[int, int, List[ChatMessage]]]:
+    """
+    Group messages into scenes for capsule generation.
+
+    Boundaries:
+    1. Cast changes force a scene boundary
+    2. Otherwise, every 15 exchanges = new scene
+
+    Returns:
+        List of (start_turn, end_turn, messages) tuples
+    """
+    scenes = []
+    current_scene_messages = []
+    current_scene_start = 1
+    exchange_count = 0
+    turn_counter = 0
+
+    for i, msg in enumerate(messages):
+        if msg.role == 'user':
+            turn_counter += 1
+
+        is_cast_boundary = turn_counter in cast_change_turns
+
+        if msg.role == 'user':
+            exchange_count += 1
+        hit_exchange_limit = (exchange_count >= max_exchanges_per_scene)
+
+        if (is_cast_boundary or hit_exchange_limit) and current_scene_messages:
+            scenes.append((
+                current_scene_start,
+                turn_counter - 1,
+                current_scene_messages
+            ))
+            current_scene_messages = []
+            current_scene_start = turn_counter
+            exchange_count = 0
+
+        current_scene_messages.append(msg)
+
+    if current_scene_messages:
+        scenes.append((current_scene_start, turn_counter, current_scene_messages))
+
+    return scenes
+
+async def generate_scene_capsule(
+    messages: List[ChatMessage],
+    start_turn: int,
+    end_turn: int,
+    departed_note: str = "",
+    canon_law_entries: List[str] = None
+) -> str:
+    """
+    Generate a scene capsule from a list of messages.
+    """
+    conversation_text = "\n".join([
+        f"{m.speaker or m.role}: {m.content}"
+        for m in messages
+    ])
+
+    canon_echo = ""
+    if canon_law_entries:
+        canon_echo = "\n### Note: Active Canon Laws to maintain:\n" + "\n".join(canon_law_entries)
+
+    prompt = SCENE_CAPSULE_PROMPT.format(
+        departed_note=departed_note,
+        canon_echo=canon_echo,
+        start_turn=start_turn,
+        end_turn=end_turn,
+        conversation_text=conversation_text
+    )
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{CONFIG['kobold_url']}/api/v1/generate",
+                json={
+                    "prompt": prompt,
+                    "max_length": 200,
+                    "temperature": 0.5,
+                    "stop_sequence": ["###", "\nUser:", "\nAssistant:", "\nScene ("]
+                },
+                timeout=60.0
+            )
+            data = response.json()
+            capsule = data["results"][0]["text"].strip()
+            return capsule
+        except Exception as e:
+            logger.error(f"Failed to generate scene capsule (turns {start_turn}-{end_turn}): {e}")
+            return ""
+
+async def trigger_cast_change_summarization(
+    chat_id: str,
+    departed_characters: Set[str],
+    entity_to_name: Dict[str, str],
+    canon_law_entries: List[str] = None
+):
+    """
+    Summarize old messages after a cast change.
+    Simple approach: ONE capsule for all messages outside 10-exchange window.
+    """
+    try:
+        chat = db_get_chat(chat_id)
+        if not chat:
+            logger.warning(f"Cast-change summarization: chat {chat_id} not found")
+            return
+
+        messages = chat.get('messages', [])
+        recent, old = split_messages_by_window(messages)
+
+        if not old:
+            logger.info(f"Cast-change summarization: no old messages for chat {chat_id}")
+            return
+
+        old_start_index = len(messages) - len(recent) - len(old)
+        start_turn = calculate_turn_for_message(messages, old_start_index)
+        end_turn = calculate_turn_for_message(messages, len(messages) - 1)
+
+        departed_names = [entity_to_name.get(e, e) for e in departed_characters]
+        departed_note = f"Note: {', '.join(departed_names)} exited during this scene. Mention their departure."
+
+        scene_capsule = await generate_scene_capsule(
+            old,
+            start_turn=start_turn,
+            end_turn=end_turn,
+            departed_note=departed_note,
+            canon_law_entries=canon_law_entries
+        )
+
+        if not scene_capsule:
+            logger.warning(f"Cast-change summarization: failed for chat {chat_id}")
+            return
+
+        existing_summary = chat.get('summary', '')
+        new_summary = (existing_summary + "\n\n" + scene_capsule).strip()
+        chat['summary'] = new_summary
+        db_save_chat(chat_id, chat)
+
+        logger.info(f"Cast-change summarization completed for chat {chat_id} ({len(old)} messages)")
+
+    except Exception as e:
+        logger.error(f"Cast-change summarization failed for chat {chat_id}: {e}")
+        logger.exception(e)
+
+async def trigger_threshold_summarization(
+    chat_id: str,
+    canon_law_entries: List[str] = None
+):
+    """
+    Summarize old messages when context exceeds 70% threshold.
+    Uses scene grouping: multiple capsules based on cast changes + 15-exchange limit.
+    """
+    try:
+        chat = db_get_chat(chat_id)
+        if not chat:
+            logger.warning(f"Threshold summarization: chat {chat_id} not found")
+            return
+
+        messages = chat.get('messages', [])
+        recent, old = split_messages_by_window(messages)
+
+        if not old:
+            logger.info(f"Threshold summarization: no old messages for chat {chat_id}")
+            return
+
+        metadata = chat.get('metadata', {})
+        cast_change_turns = metadata.get('cast_change_turns', [])
+
+        scenes = group_messages_into_scenes(old, cast_change_turns, max_exchanges_per_scene=15)
+
+        if not scenes:
+            logger.warning(f"Threshold summarization: no scenes for chat {chat_id}")
+            return
+
+        capsules = []
+        for start, end, scene_msgs in scenes:
+            capsule = await generate_scene_capsule(
+                scene_msgs,
+                start_turn=start,
+                end_turn=end,
+                departed_note="",
+                canon_law_entries=canon_law_entries
+            )
+            if capsule:
+                capsules.append(capsule)
+
+        if not capsules:
+            logger.warning(f"Threshold summarization: no capsules for chat {chat_id}")
+            return
+
+        existing_summary = chat.get('summary', '')
+        combined_capsules = "\n\n".join(capsules)
+        new_summary = (existing_summary + "\n\n" + combined_capsules).strip()
+        chat['summary'] = new_summary
+        db_save_chat(chat_id, chat)
+
+        logger.info(f"Threshold summarization completed for chat {chat_id} ({len(scenes)} scenes, {len(old)} messages)")
+
+    except Exception as e:
+        logger.error(f"Threshold summarization failed for chat {chat_id}: {e}")
+        logger.exception(e)
+
+def count_tokens(text: str) -> int:
+    """
+    Estimate token count using heuristic.
+    Uses ~4 chars per token for backward compatibility.
+    """
+    return len(text) // 4
+
+def build_fallback_capsule(name: str, data: Dict) -> str:
+    """Build minimal capsule when pre-generated capsule unavailable."""
+    parts = []
+
+    if data.get('extensions', {}).get('gender'):
+        parts.append(data['extensions']['gender'].capitalize())
+
+    if data.get('description'):
+        desc = data['description'].split('.')[0][:100]
+        parts.append(desc)
+
+    if data.get('personality'):
+        pers = data['personality'][:50]
+        parts.append(pers)
+
+    if data.get('scenario'):
+        scenario = data['scenario'][:80]
+        parts.append(f"In {scenario}")
+
+    if data.get('mes_example'):
+        example = data['mes_example'].strip()
+        if example:
+            lines = example.split('\n')
+            for line in lines:
+                if '"' in line:
+                    start = line.find('"')
+                    end = line.rfind('"') + 1
+                    if end > start:
+                        parts.append(f'Speaks like: {line[start:end]}')
+                        break
+
+    return '. '.join(parts) if parts else "No description available"
+
+def build_full_character_card(char: Dict) -> str:
+    """Build full character card for reset points.
+    
+    Same format for single/multi-char, global/NPC.
+    """
+    data = char.get('data', {})
+    name = get_character_name(char)
+    
+    parts = [f"### Character: {name}"]
+    
+    if data.get('description'):
+        parts.append(data['description'])
+    
+    if data.get('personality'):
+        parts.append(data['personality'])
+    
+    if data.get('scenario'):
+        parts.append(data['scenario'])
+    
+    if data.get('mes_example'):
+        parts.append(f"Example dialogue:\n{data['mes_example']}")
+    
+    return "\n\n".join(parts)
+
+def build_scene_cast_block(
+    characters: List[Dict],
+    character_capsules: Dict[str, str],
+    exclude: List[str] = []
+) -> str:
+    """
+    Build SCENE CAST block using capsule format for all active characters.
+    
+    This replaces the separate reinforcement cycle - shown every turn.
+    
+    Args:
+        characters: List of character objects (global chars and NPCs, resolved)
+        character_capsules: Dict of entity_id -> capsule text (includes both chars and NPCs)
+        exclude: List of entity_ids to exclude from SCENE CAST (full card characters)
+    """
+    # Filter to only active characters
+    active_chars = [c for c in characters if c.get('is_active', True)]
+    
+    # Filter out excluded entity_ids (full card characters)
+    active_chars = [c for c in active_chars 
+                    if c.get('_filename') not in exclude 
+                    and c.get('entity_id') not in exclude]
+    
+    if not active_chars:
+        return ""
+    
+    lines = [
+        "SCENE CAST (ACTIVE ONLY)",
+        "The following characters are currently present. Follow their speech styles and personalities.",
+        ""
+    ]
+    
+    for char in active_chars:
+        is_npc = char.get('is_npc', False)
+        
+        # Get entity ID (different format for global chars vs NPCs)
+        if is_npc:
+            entity_id = char.get('entity_id')
+        else:
+            entity_id = char.get('_filename')
+        
+        name = get_character_name(char)
+        
+        # Get capsule or build fallback
+        capsule = character_capsules.get(entity_id)
+        if not capsule:
+            data = char.get('data', {})
+            capsule = build_fallback_capsule(name, data)
+        
+        # Format based on type
+        if is_npc:
+            lines.append(f"[{name} (NPC): {capsule}]")
+        else:
+            lines.append(f"[{name}: {capsule}]")
+    
+    return "\n".join(lines)
+
 # Character Card Generation Logic (Ported from Char_card_app)
 async def call_llm_helper(system_prompt: str, user_prompt: str, max_tokens: int = 500):
     async with httpx.AsyncClient() as client:
@@ -3083,6 +3462,27 @@ async def call_llm_helper(system_prompt: str, user_prompt: str, max_tokens: int 
         except Exception as e:
             print(f"LLM Call Exception: {str(e)}")
             raise Exception(f"API Error: {str(e)}")
+
+async def summarize_text(text: str) -> str:
+    """Summarize provided text into a concise version."""
+    system = "You are an expert at distilling information into concise summaries."
+    
+    prompt = f"""Summarize the following text into a more concise version while preserving all key information.
+
+Requirements:
+- Reduce length by 50-70%
+- Keep important plot points, character actions, and world details
+- Maintain neutral, factual tone
+- Do NOT add new information
+- Remove redundancy and filler
+
+Text to summarize:
+{text}
+
+Output only the summarized text, nothing else."""
+
+    result = await call_llm_helper(system, prompt, 300)
+    return result.strip()
 
 @app.post("/api/card-gen/generate-field")
 async def generate_card_field(req: CardGenRequest):
@@ -3706,20 +4106,34 @@ def extract_plist_from_llm_output(result: str, field_type: str, char_name: str) 
     return result.strip()
 
 # Capsule Generation for Multi-Character Optimization
-async def generate_capsule_for_character(char_name: str, description: str, depth_prompt: str = "", gender: str = "") -> str:
+async def generate_capsule_for_character(
+    char_name: str,
+    description: str,
+    personality: str,
+    scenario: str,
+    mes_example: str,
+    gender: str = ""
+) -> str:
     """Generate a capsule summary for use in multi-character scenarios."""
     system = "You are an expert at distilling roleplay character cards into minimal capsule summaries for efficient multi-character prompts."
-    
+
     full_card_text = f"Name: {char_name}"
     if gender:
         full_card_text += f"\nGender: {gender}"
-    full_card_text += f"\n\nDescription/Dialogue:\n{description}"
-    if depth_prompt:
-        full_card_text += f"\n\nPersonality/Context:\n{depth_prompt}"
+    if description:
+        full_card_text += f"\n\nDescription:\n{description}"
+    if personality:
+        full_card_text += f"\n\nPersonality:\n{personality}"
+    if scenario:
+        full_card_text += f"\n\nScenario:\n{scenario}"
+    if mes_example:
+        full_card_text += f"\n\nExample Dialogue:\n{mes_example}"
     
     prompt = f"""Convert this character card into a capsule summary for efficient multi-character prompts.
 Use this exact format (one paragraph, no line breaks):
-Name: [Name]. Gender: [gender if specified]. Role: [1 sentence role/situation]. Key traits: [3-5 comma-separated personality traits]. Speech style: [short/long, formal/casual, any verbal tics]. Example line: "[One characteristic quote from descriptions]"
+Name: [Name]. Gender: [gender if specified]. Role: [1 sentence character archetype or typical role]. Key traits: [3-5 comma-separated personality traits]. Speech style: [short/long, formal/casual, any verbal tics]. Example line: "[One characteristic quote from descriptions]"
+
+IMPORTANT: The scenario field describes the character's lived experience, worldview, or yearning - NOT their current fixed location or event. Distill the scenario into character motivations, yearnings, or typical situations they encounter. Do NOT include specific places (like "at her mother's house") in the Role field.
 
 Full Card:
 {full_card_text}
@@ -3747,11 +4161,7 @@ async def edit_character_field(req: CharacterEditRequest):
 
         # Update the field
         if req.field == "body":
-            if "extensions" not in char_data["data"]:
-                char_data["data"]["extensions"] = {}
-            if "depth_prompt" not in char_data["data"]["extensions"]:
-                char_data["data"]["extensions"]["depth_prompt"] = {}
-            char_data["data"]["extensions"]["depth_prompt"]["prompt"] = req.new_value
+            char_data["data"]["description"] = req.new_value
         else:
             char_data["data"][req.field] = req.new_value
         
@@ -3764,8 +4174,7 @@ async def edit_character_field(req: CharacterEditRequest):
         if not sync_result["success"]:
             print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
         
-        # Record recent edit for immediate context injection
-        add_recent_edit('character', req.filename, req.field, req.new_value)
+
         
         return {"success": True, "message": f"Field '{req.field}' updated successfully"}
         
@@ -3802,43 +4211,44 @@ async def edit_character_field_ai(req: CharacterEditFieldRequest):
 
         char_name = char_data["data"]["name"]
         personality = char_data["data"].get("personality", "")
-        depth_prompt = char_data["data"]["extensions"].get("depth_prompt", {}).get("prompt", "")
+        description = char_data["data"].get("description", "")
         scenario = char_data["data"].get("scenario", "")
+        mes_example = char_data["data"].get("mes_example", "")
 
         result = ""
 
         if req.field == "mes_example":
             current_example = char_data["data"].get("mes_example", "")
             result = await generate_dialogue_for_edit(
-                char_name, personality, depth_prompt, scenario, current_example
+                char_name, personality, description, scenario, current_example
             )
             char_data["data"]["mes_example"] = result
 
         elif req.field == "personality":
             current_personality = char_data["data"].get("personality", "")
             result = await generate_personality_for_edit(
-                char_name, current_personality, depth_prompt, scenario
+                char_name, current_personality, description, scenario
             )
             char_data["data"]["personality"] = result
 
         elif req.field == "body":
             current_body = char_data["data"].get("description", "")
             result = await generate_body_for_edit(
-                char_name, current_body, personality, scenario
+                char_name, current_body, personality, description, scenario
             )
             char_data["data"]["description"] = result
 
         elif req.field == "scenario":
             current_scenario = char_data["data"].get("scenario", "")
             result = await generate_scenario_for_edit(
-                char_name, current_scenario, personality, depth_prompt
+                char_name, current_scenario, personality, description, scenario
             )
             char_data["data"]["scenario"] = result
 
         elif req.field == "first_message":
             current_first_msg = char_data["data"].get("first_mes", "")
             result = await generate_first_message_for_edit(
-                char_name, current_first_msg, personality, scenario, depth_prompt
+                char_name, current_first_msg, personality, description, scenario
             )
             char_data["data"]["first_mes"] = result
 
@@ -3854,8 +4264,7 @@ async def edit_character_field_ai(req: CharacterEditFieldRequest):
         if not sync_result["success"]:
             print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
 
-        # Record recent edit for immediate context injection on next chat turn
-        add_recent_edit('character', req.filename, req.field, result)
+
 
         return {"success": True, "text": result}
 
@@ -4137,7 +4546,8 @@ def load_character_profiles(active_chars: List[str], localnpcs: Dict) -> List[di
                     'name': npc['name'],
                     'data': npc_data_normalized,
                     'entity_id': char_ref,
-                    'is_npc': True
+                    'is_npc': True,
+                    'updated_at': npc.get('updated_at', 0)
                 })
             else:
                 print(f"[WARNING] NPC {char_ref} not found in chat metadata, skipping")
@@ -4154,7 +4564,8 @@ def load_character_profiles(active_chars: List[str], localnpcs: Dict) -> List[di
                     'name': get_character_name(char_data),
                     'data': char_data.get('data', {}),
                     'entity_id': char_ref,
-                    'is_npc': False
+                    'is_npc': False,
+                    'updated_at': char_data.get('updated_at', 0)
                 })
             else:
                 print(f"[WARNING] Global character {char_ref} not found, skipping")
@@ -4170,9 +4581,7 @@ async def chat(request: PromptRequest):
     chat_data = None
     
     # Periodic cleanup of old edits (1% chance per chat request)
-    # This prevents memory leaks if edits are never consumed
-    if random.random() < 0.01:
-        cleanup_old_edits(max_age_seconds=300)
+    # NOTE: Recent edits cleanup removed - now using timestamp-based system
 
     # Load chat data if chat_id provided (needed for NPCs and metadata)
     if request.chat_id:
@@ -4206,12 +4615,43 @@ async def chat(request: PromptRequest):
                             'name': localnpcs[entity_id].get('name', char.get('name')),
                             'data': npc_data_normalized,
                             'entity_id': entity_id,
-                            'is_npc': True
+                            'is_npc': True,
+                            'updated_at': localnpcs[entity_id].get('updated_at', 0)
                         }
                         npcs_updated += 1
             
             if npcs_updated > 0:
                 print(f"[CONTEXT] Reloaded {npcs_updated} NPCs from metadata (mid-chat edits detected)")
+
+            # Also reload global characters that may have been edited (new chat or outdated cache)
+            global_chars_updated = 0
+            for i, char in enumerate(request.characters):
+                if not char.get("is_npc") and not char.get("npcId"):
+                    # Global character - check if DB has newer version
+                    filename = char.get("_filename") or char.get("entity_id")
+                    if filename:
+                        db_updated = db_get_character_updated_at(filename) or 0
+                        char_updated = char.get("updated_at", 0)
+                        # Reload if: 1) new chat (no chat_data), or 2) DB has newer version
+                        if not chat_data or db_updated > char_updated:
+                            fresh_char = db_get_character(filename)
+                            if fresh_char:
+                                request.characters[i] = {
+                                    'name': get_character_name(fresh_char),
+                                    'data': fresh_char.get('data', {}),
+                                    'entity_id': filename,
+                                    '_filename': filename,
+                                    'is_npc': False,
+                                    'updated_at': fresh_char.get('updated_at', 0)
+                                }
+                                global_chars_updated += 1
+                                if not chat_data:
+                                    print(f"[CONTEXT] Reloaded global character {filename} from DB (new chat)")
+                                else:
+                                    print(f"[CONTEXT] Reloaded global character {filename} from DB (edited since cache)")
+
+            if global_chars_updated > 0:
+                print(f"[CONTEXT] Reloaded {global_chars_updated} global characters from DB")
     else:
         # Resolve character references (global + NPCs)
         if chat_data:
@@ -4224,163 +4664,82 @@ async def chat(request: PromptRequest):
             request.characters = resolved_characters
 
 
-    
-    # === CAPSULE SYSTEM FOR MULTI-CHARACTER CHATS ===
-    # Capsules are now chat-scoped (stored in metadata.characterCapsules)
-    # Generated on-demand for multi-char chats, saved per-chat
-    
-    is_group_chat = len(request.characters) >= 2
-    
-    # Load existing capsules from chat metadata
-    chat_capsules = {}
-    if chat_data and "metadata" in chat_data:
-        chat_capsules = chat_data.get("metadata", {}).get("characterCapsules", {})
-        if chat_capsules:
-            print(f"[CAPSULE] Loaded {len(chat_capsules)} capsules from chat metadata")
-    
-    # Inject capsules into character objects
-    for char_obj in request.characters:
-        if char_obj.get("_filename") and char_obj["_filename"] in chat_capsules:
-            if "extensions" not in char_obj["data"]:
-                char_obj["data"]["extensions"] = {}
-            char_obj["data"]["extensions"]["multi_char_summary"] = chat_capsules[char_obj["_filename"]]
-        elif char_obj.get("entity_id") and char_obj["entity_id"] in chat_capsules:
-            if "extensions" not in char_obj["data"]:
-                char_obj["data"]["extensions"] = {}
-            char_obj["data"]["extensions"]["multi_char_summary"] = chat_capsules[char_obj["entity_id"]]
-    
+    # === CHARACTER FIRST TURNS ===
     # Load character first turn numbers from chat metadata
     character_first_turns = {}
+    character_full_card_turns = {}
     if chat_data and "metadata" in chat_data:
         metadata_raw = chat_data.get("metadata", {})
         metadata_obj = metadata_raw if isinstance(metadata_raw, dict) else {}
         character_first_turns = metadata_obj.get("characterFirstTurns", {})
+        character_full_card_turns = metadata_obj.get("characterFullCardTurns", {})
+
+    # === PHASE 2: CAST CHANGE DETECTION ===
+    # Extract local NPCs and previous metadata from chat_data
+    local_npcs = {}
+    previous_metadata = {}
+    if chat_data and "metadata" in chat_data:
+        metadata_raw = chat_data.get("metadata", {}) or {}
+        previous_metadata = metadata_raw
+        local_npcs = metadata_raw.get("localnpcs", {}) or {}
     
-    # Generate capsules for multi-char chats only
-    if is_group_chat:
-        chars_needing_capsules = []
-        for char_obj in request.characters:
-            data = char_obj.get("data", {})
-            extensions = data.get("extensions", {})
-            multi_char_summary = extensions.get("multi_char_summary", "")
-            
-            if not multi_char_summary or multi_char_summary.strip() == '':
-                chars_needing_capsules.append(char_obj)
-        
-        # Generate capsules for characters that need them
-        if chars_needing_capsules:
-            if request.chat_id:
-                chat = db_get_chat(request.chat_id)
-                if chat:
-                    metadata = chat.get("metadata", {}) or {}
-                    if "characterCapsules" not in metadata:
-                        metadata["characterCapsules"] = {}
-                    
-                    for char_obj in chars_needing_capsules:
-                        data = char_obj.get("data", {})
-                        name = data.get("name", "Unknown")
-                        description = data.get("description", "")
-                        personality = data.get("personality", "")
-                        depth_prompt = data.get("extensions", {}).get("depth_prompt", {}).get("prompt", "")
-                        gender = data.get("extensions", {}).get("gender", "")
-                        
-                        try:
-                            # Include both description and personality in capsule
-                            capsule_source = f"{description} {personality}".strip()
-                            capsule = await generate_capsule_for_character(name, capsule_source, depth_prompt, gender)
-                            
-                            # Update in memory
-                            if "extensions" not in data:
-                                data["extensions"] = {}
-                            data["extensions"]["multi_char_summary"] = capsule
-                            
-                            # Save to chat metadata
-                            capsule_key = char_obj.get("_filename") or char_obj.get("entity_id")
-                            if capsule_key:
-                                metadata["characterCapsules"][capsule_key] = capsule
-                                print(f"[CAPSULE] Generated and saved for {name}: {capsule[:80]}...")
-                            else:
-                                print(f"[CAPSULE] WARNING: No capsule key for {name}, not saved to metadata")
-                        except Exception as e:
-                            print(f"[CAPSULE] ERROR: Failed to generate capsule for {name}: {e}")
-                    
-                    # Save updated metadata to chat
-                    chat["metadata"] = metadata
-                    db_save_chat(request.chat_id, chat)
-                    print(f"[CAPSULE] Saved {len(chars_needing_capsules)} capsules to chat metadata")
-                else:
-                    print(f"[CAPSULE] WARNING: Chat {request.chat_id} not found, capsules not saved")
-            else:
-                print(f"[CAPSULE] WARNING: No chat_id, capsules not saved to metadata")
+    # Detect cast change
+    cast_changed, departed, arrived, cast_metadata_updates = detect_cast_change(
+        request.characters,  # Already resolved (global chars + NPCs)
+        local_npcs,          # NPCs from metadata
+        request.mode,
+        previous_metadata
+    )
     
+    # Build entity_to_name mapping for SCENE UPDATE block
+    entity_to_name = build_entity_name_mapping(request.characters, local_npcs)
+    
+    # Build SCENE UPDATE block if needed
+    scene_update_block = ""
+    if cast_changed:
+        scene_update_block = build_scene_update_block(departed, arrived, entity_to_name)
+        print(f"[CAST_CHANGE] Departed: {departed}, Arrived: {arrived}")
+
+    # Extract canon law for summarization context (Phase 4)
+    canon_law_entries = []
+    if request.world_info:
+        canon_law_entries = [
+            entry.get('content', '')
+            for entry in request.world_info.get('entries', {}).values()
+            if entry.get('is_canon_law')
+        ]
+
     # Check for summarization need
-    max_ctx = request.settings.get("max_context", 4096)
-    threshold = request.settings.get("summarize_threshold", 0.85)
+    max_ctx = request.settings.get("max_context", CONFIG['max_context'])
+    threshold = request.settings.get("summarize_threshold", CONFIG['summarize_threshold'])
     
     current_request = request
     new_summary = request.summary or ""
     
     # Initial token check
-    prompt = construct_prompt(current_request, character_first_turns, absolute_turn=absolute_turn)
+    prompt = construct_prompt(current_request, character_first_turns, absolute_turn=absolute_turn, scene_update_block=scene_update_block, character_full_card_turns=character_full_card_turns)
     tokens = await get_token_count(prompt)
     
-    # Summarization loop
-    if tokens > max_ctx * threshold and len(current_request.messages) > 10:
-        print(f"TRUNCATION TRIGGERED: {tokens} tokens exceeds {max_ctx * threshold}")
+    # Phase 4: Summarization now handled asynchronously after response
+    # - Cast-change: trigger_cast_change_summarization() (simple, one capsule)
+    # - Threshold: trigger_threshold_summarization() (scene grouping, multiple capsules)
+    # Both run as asyncio.create_task() - non-blocking, best-effort
 
-        # Extract Canon Law entries to echo into summary if needed
-        canon_echo = ""
-        if request.world_info:
-            canon_entries = [e.get("content", "") for e in request.world_info.get("entries", {}).values() if e.get("is_canon_law")]
-            if canon_entries:
-                canon_echo = "\n### Note: Active Canon Laws to maintain:\n" + "\n".join(canon_entries)
+    # === RELATIONSHIP ANALYSIS (Step 5 of relationship tracker) ===
+    # Trigger relationship analysis at summarization boundary
+    # Pass full character objects (not just names) for entity ID extraction
+    user_name = request.settings.get("user_name", "")
 
-        # Take oldest 10 messages to summarize
-        to_summarize = current_request.messages[:10]
-        remaining_messages = current_request.messages[10:]
-        
-        summary_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in to_summarize])
-        summarization_prompt = f"### System: Summarize the following conversation snippet into a very concise narrative for long-term memory. Focus on key plot points and character states.{canon_echo}\n\n### Conversation to summarize:\n{summary_text}\n\n### Concise Summary:"
-        
-        async with httpx.AsyncClient() as client:
-            try:
-                sum_res = await client.post(
-                    f"{CONFIG['kobold_url']}/api/v1/generate",
-                    json={
-                        "prompt": summarization_prompt,
-                        "max_length": 150,
-                        "temperature": 0.5,
-                        "stop_sequence": ["###", "\nUser:", "\nAssistant:"]
-                    },
-                    timeout=60.0
-                )
-                sum_data = sum_res.json()
-                added_summary = sum_data["results"][0]["text"].strip()
-                new_summary = (new_summary + "\n" + added_summary).strip()
-                
-                # Rebuild request with new summary and fewer messages
-                current_request.messages = remaining_messages
-                current_request.summary = new_summary
-                prompt = construct_prompt(current_request, character_first_turns, absolute_turn=absolute_turn)
-                tokens = await get_token_count(prompt)
-            except Exception as e:
-                print(f"Summarization failed: {e}")
-        
-        # === RELATIONSHIP ANALYSIS (Step 5 of relationship tracker) ===
-        # Trigger relationship analysis at summarization boundary
-        # Pass full character objects (not just names) for entity ID extraction
-        user_name = request.settings.get("user_name", "")
-
-        await analyze_and_update_relationships(
-            chat_id=current_request.chat_id,
-            messages=current_request.messages,
-            character_objs=request.characters,
-            user_name=user_name
-        )
+    await analyze_and_update_relationships(
+        chat_id=current_request.chat_id,
+        messages=current_request.messages,
+        character_objs=request.characters,
+        user_name=user_name
+    )
     
-    # === SAVE CHARACTER FIRST TURNS TO METADATA ===
-    # Save updated character first turn numbers to chat metadata
-    if request.chat_id and character_first_turns:
+    # === SAVE METADATA UPDATES TO CHAT ===
+    # Save updated character first turn numbers and cast tracking to chat metadata
+    if request.chat_id and (character_first_turns or character_full_card_turns or cast_metadata_updates):
         try:
             chat = db_get_chat(request.chat_id)
             if not chat:
@@ -4393,13 +4752,38 @@ async def chat(request: PromptRequest):
                 }
                 db_save_chat(request.chat_id, chat)
             
-            # Now update with characterFirstTurns
+            # Get or initialize metadata
             metadata = chat.get("metadata", {}) or {}
-            metadata["characterFirstTurns"] = character_first_turns
+            
+            # Phase 2: Save cast change tracking
+            if cast_metadata_updates:
+                metadata.update(cast_metadata_updates)
+
+            # Phase 4: Track cast change turns for scene boundary detection
+            if cast_changed and departed:
+                current_turn_num = absolute_turn
+
+                if "cast_change_turns" not in metadata:
+                    metadata["cast_change_turns"] = []
+
+                if current_turn_num not in metadata["cast_change_turns"]:
+                    metadata["cast_change_turns"].append(current_turn_num)
+                    metadata["cast_change_turns"].sort()
+
+            # Save character first turns and full card turns
+            if character_first_turns:
+                metadata["characterFirstTurns"] = character_first_turns
+            if character_full_card_turns:
+                metadata["characterFullCardTurns"] = character_full_card_turns
+            
+            # Batch save all metadata updates
             chat["metadata"] = metadata
             db_save_chat(request.chat_id, chat)
+            
+            if cast_metadata_updates:
+                print(f"[CAST_CHANGE] Saved metadata: previous_active_cast={metadata.get('previous_active_cast')}, previous_focus={metadata.get('previous_focus_character')}")
         except Exception as e:
-            print(f"[STICKY] ERROR: Failed to save character first turns: {e}")
+            print(f"[METADATA] ERROR: Failed to save metadata updates: {e}")
 
     print(f"Generated Prompt ({tokens} tokens):\n{prompt}")
     
@@ -4409,8 +4793,7 @@ async def chat(request: PromptRequest):
     mode = request.mode or "narrator"
 
     # Calculate stop sequences (mode-aware)
-    # Include reinforcement markers to prevent LLM from generating them in output
-    stops = ["User:", "\nUser", "###", "[REINFORCEMENT:", "[WORLD REINFORCEMENT:", "\n["]
+    stops = ["User:", "\nUser", "###", "\n["]
     
     is_group_chat = len(request.characters) >= 2
     
@@ -4503,7 +4886,29 @@ async def chat(request: PromptRequest):
                 "messages": [m.dict() for m in current_request.messages],
                 "summary": current_request.summary
             }
-            
+
+            # Phase 4: ASYNC SUMMARIZATION (after response sent, before return)
+            # Both triggers independent - can run same turn
+
+            # 1. Cast-change forced summarization
+            if cast_changed and departed:
+                asyncio.create_task(trigger_cast_change_summarization(
+                    chat_id=current_request.chat_id,
+                    departed_characters=departed,
+                    entity_to_name=entity_to_name,
+                    canon_law_entries=canon_law_entries
+                ))
+
+            # 2. Threshold-based summarization
+            max_context = request.settings.get('max_context', CONFIG['max_context'])
+            total_tokens = await get_token_count(prompt) + await get_token_count(data.get("_updated_state", {}).get("summary", ""))
+            if total_tokens >= (max_context * 0.80):
+                data["_summarization_triggered"] = True
+                asyncio.create_task(trigger_threshold_summarization(
+                    chat_id=current_request.chat_id,
+                    canon_law_entries=canon_law_entries
+                ))
+
             return data
         except Exception as e:
             duration = time.time() - start_time
@@ -4512,7 +4917,31 @@ async def chat(request: PromptRequest):
     else:
         # Direct call when performance mode is disabled
         try:
-            return await llm_operation()
+            response = await llm_operation()
+
+            # Phase 4: ASYNC SUMMARIZATION (after response sent, before return)
+            # Both triggers independent - can run same turn
+
+            # 1. Cast-change forced summarization
+            if cast_changed and departed:
+                asyncio.create_task(trigger_cast_change_summarization(
+                    chat_id=current_request.chat_id,
+                    departed_characters=departed,
+                    entity_to_name=entity_to_name,
+                    canon_law_entries=canon_law_entries
+                ))
+
+            # 2. Threshold-based summarization
+            max_context = request.settings.get('max_context', CONFIG['max_context'])
+            total_tokens = await get_token_count(prompt) + await get_token_count(response.get("results", [{}])[0].get("text", ""))
+            if total_tokens >= (max_context * 0.80):
+                response["_summarization_triggered"] = True
+                asyncio.create_task(trigger_threshold_summarization(
+                    chat_id=current_request.chat_id,
+                    canon_law_entries=canon_law_entries
+                ))
+
+            return response
         except Exception as e:
             return {"error": str(e)}
 
@@ -5899,6 +6328,16 @@ class GenerateDanbooruTagsRequest(BaseModel):
     gender: str  # 'female', 'male', 'other'
 
 
+class GenerateCapsuleRequest(BaseModel):
+    """Request model for generating character capsule summary."""
+    name: str
+    description: str
+    personality: str
+    scenario: str
+    mes_example: str
+    gender: str
+
+
 @app.post("/api/characters/{filename}/generate-danbooru-tags")
 async def generate_danbooru_tags_endpoint(filename: str, request: GenerateDanbooruTagsRequest):
     """
@@ -5923,6 +6362,38 @@ async def generate_danbooru_tags_endpoint(filename: str, request: GenerateDanboo
         
     except Exception as e:
         logger.error(f"Failed to generate Danbooru tags for character: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/characters/{filename}/generate-capsule")
+async def generate_capsule_endpoint(filename: str, request: GenerateCapsuleRequest):
+    """
+    Generate a capsule summary for a global character.
+    
+    Uses LLM to distill character card into 50-100 token summary
+    for efficient multi-character prompts.
+    
+    Returns capsule text to populate Capsule field in editor.
+    User can edit and save via character save button.
+    """
+    try:
+        capsule = await generate_capsule_for_character(
+            char_name=request.name,
+            description=request.description,
+            personality=request.personality,
+            scenario=request.scenario,
+            mes_example=request.mes_example,
+            gender=request.gender
+        )
+        
+        return {
+            "success": True,
+            "capsule": capsule
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate capsule for character {filename}: {e}")
         import traceback
         traceback.print_exc()
         return {"success": False, "error": str(e)}
@@ -5953,6 +6424,39 @@ async def generate_danbooru_tags_npc_endpoint(
         
     except Exception as e:
         logger.error(f"Failed to generate Danbooru tags for NPC: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/chats/{chat_id}/npcs/{npc_id}/generate-capsule")
+async def generate_capsule_npc_endpoint(
+    chat_id: str,
+    npc_id: str,
+    request: GenerateCapsuleRequest
+):
+    """
+    Generate a capsule summary for an NPC.
+    
+    Same logic as character endpoint, but for NPCs stored in chat metadata.
+    Returns capsule text to populate Capsule field in NPC editor.
+    """
+    try:
+        capsule = await generate_capsule_for_character(
+            char_name=request.name,
+            description=request.description,
+            personality=request.personality,
+            scenario=request.scenario,
+            mes_example=request.mes_example,
+            gender=request.gender
+        )
+        
+        return {
+            "success": True,
+            "capsule": capsule
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate capsule for NPC {npc_id}: {e}")
         import traceback
         traceback.print_exc()
         return {"success": False, "error": str(e)}
@@ -6613,7 +7117,25 @@ async def fork_chat(request: ForkRequest):
             branch_metadata["characterFirstTurns"] = new_turns
             print(f"[FORK] Remapped {len(old_turns)} characterFirstTurns entries")
         
-        # 8. Execute fork in single atomic transaction
+        # 8. CRITICAL: Remap metadata entity IDs for cast tracking (Phase 2)
+        # previous_active_cast is a list of entity IDs that may contain NPCs
+        old_active_cast = branch_metadata.get("previous_active_cast", [])
+        if old_active_cast:
+            new_active_cast = [
+                entity_mapping.get(entity_id, entity_id) 
+                for entity_id in old_active_cast
+            ]
+            branch_metadata["previous_active_cast"] = new_active_cast
+            print(f"[FORK] Remapped {len(old_active_cast)} previous_active_cast entries")
+        
+        # previous_focus_character is a single entity ID (or None)
+        old_focus = branch_metadata.get("previous_focus_character")
+        if old_focus:
+            new_focus = entity_mapping.get(old_focus, old_focus)
+        branch_metadata["previous_focus_character"] = new_focus
+        print(f"[FORK] Remapped previous_focus_character: {old_focus} -> {new_focus}")
+        
+        # 9. Execute fork in single atomic transaction
         branch_data = db_fork_chat_transaction(
             origin_chat_id=origin_chat_name,
             branch_chat_id=branch_chat_id,
@@ -6624,14 +7146,16 @@ async def fork_chat(request: ForkRequest):
             localnpcs=localnpcs
         )
         
-        # 9. Update branch metadata with fork-specific info
+        # 10. Update branch metadata with fork-specific info
         branch_data['metadata'].update({
             'origin_chat_id': origin_chat_name,
             'origin_message_id': fork_from_message_id,
             'branch_name': branch_name or f"Fork from message {fork_from_message_id}",
             'created_at': time.time(),
             'characterCapsules': branch_metadata.get("characterCapsules", {}),
-            'characterFirstTurns': branch_metadata.get("characterFirstTurns", {})
+            'characterFirstTurns': branch_metadata.get("characterFirstTurns", {}),
+            'previous_active_cast': branch_metadata.get("previous_active_cast", []),      # Phase 2
+            'previous_focus_character': branch_metadata.get("previous_focus_character")     # Phase 2
         })
         
         # 10. Save the final branch data
@@ -6849,24 +7373,18 @@ async def update_npc(chat_id: str, npc_id: str, request: Request):
                     "data": npc_data,
                     "is_active": True,
                     "promoted": False,
-                    "created_at": int(time.time())
+                    "created_at": int(time.time()),
+                    "updated_at": int(time.time())
                 }
 
             metadata["localnpcs"] = localnpcs
             chat["metadata"] = metadata
             db_save_chat(chat_id, chat)
             
-            # Detect changed fields to record recent edits
-            # Compare old NPC data with new data to identify what changed
-            existing_npc = db_get_npc_by_id(npc_id, chat_id)
-            old_data = existing_npc.get('data', {}) if existing_npc else {}
-            
-            for field, new_value in npc_data.items():
-                if old_data.get(field) != new_value:
-                    # Entity ID format: 'chat_id:entity_id'
-                    npc_entity_id = f"{chat_id}:{npc_id}"
-                    add_recent_edit('npc', npc_entity_id, field, new_value)
-                    print(f"[RECENT_EDIT] NPC {npc_id} field changed: {field}")
+            # Update NPC metadata timestamp when edited
+            if npc_id in localnpcs:
+                localnpcs[npc_id]["updated_at"] = int(time.time())
+                print(f"[NPC_UPDATE] NPC {npc_id} updated_at timestamp set")
             
             print(f"[NPC_UPDATE] Updated NPC {npc_id} in database and metadata")
             return {"success": True, "message": "NPC updated successfully"}
@@ -7295,10 +7813,7 @@ async def edit_world_entry(req: WorldEditRequest):
         # Clear caches to reflect the change
         WORLD_INFO_CACHE.clear()
         
-        # Record recent edit for immediate context injection
-        # Entity ID format: 'world_name:entry_uid'
-        entity_id = f"{req.world_name}:{req.entry_uid}"
-        add_recent_edit('world', entity_id, req.field, req.new_value)
+
         
         return {"success": True, "message": f"Entry '{req.entry_uid}' field '{req.field}' updated successfully"}
         
@@ -8356,6 +8871,36 @@ async def cleanup_old_summarized(request: dict = None):
             "message": f"Cleaned up {deleted_count} old summarized messages (older than {days} days)"
         }
     except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/chats/{chat_id}/summarize-selection")
+async def autosummarize_selection(chat_id: str, request: dict):
+    """Summarize user-selected text from summary window.
+    
+    Allows users to highlight specific sections of their summary and
+    get a condensed version, addressing bloated summary windows.
+    """
+    try:
+        text = request.get("text", "").strip()
+        if not text:
+            return {"success": False, "error": "No text provided"}
+        
+        if len(text) < 50:
+            return {"success": False, "error": "Text too short to summarize (minimum 50 characters)"}
+        
+        summarized = await summarize_text(text)
+        
+        if not summarized:
+            return {"success": False, "error": "Failed to generate summary"}
+        
+        return {
+            "success": True,
+            "summarized": summarized,
+            "original_length": len(text),
+            "new_length": len(summarized)
+        }
+    except Exception as e:
+        logger.error(f"Autosummarize failed for chat {chat_id}: {e}")
         return {"success": False, "error": str(e)}
 
 

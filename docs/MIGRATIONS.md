@@ -4,13 +4,52 @@ This document tracks all database schema changes for NeuralRP.
 
 ## Schema Versioning
 
- - **Current Schema Version**: 4
+ - **Current Schema Version**: 5
 - **Schema Version Table**: `schema_version` (id=1, version, updated_at)
 - **Auto-Migration**: Runs automatically on app startup via `app/database_setup.py`
 
 ---
 
 ## Migration History
+ 
+### Schema Version 5 (v1.11.0) - 2026-02-06
+ 
+**Migration ID**: `4 → 5`
+
+**Description**: Ensure Visual Canon Column Consistency
+
+**Problem Fixed**: Base schema for `chat_npcs` table was missing `visual_canon_id` and `visual_canon_tags` columns. These were only added via migration (Schema Version 2), creating a discrepancy between fresh database creation and upgraded databases.
+
+**Changes**:
+- Added `visual_canon_id` and `visual_canon_tags` columns to `_create_chat_npcs_table()` base schema
+- Migration 4 → 5 ensures these columns exist in existing databases (idempotent via `_add_column_if_not_exists()`)
+
+**SQL Changes**:
+```sql
+-- Ensured in base schema (now in CREATE TABLE IF NOT EXISTS)
+visual_canon_id INTEGER,
+visual_canon_tags TEXT
+
+-- Migration ensures existing databases have columns
+ALTER TABLE chat_npcs ADD COLUMN visual_canon_id IF NOT EXISTS;
+ALTER TABLE chat_npcs ADD COLUMN visual_canon_tags IF NOT EXISTS;
+```
+
+**Data Preservation**: No data loss (columns are nullable and already existed in upgraded databases)
+
+**Why This Change**:
+- Fresh databases created with migration-disabled environments would be missing visual canon support
+- Ensures consistency between base schema and migration-added columns
+- Fixes documentation mismatch in MIGRATIONS.md Core Tables section
+
+**Impact on Code**:
+- No code changes required (columns already expected and handled)
+- `db_get_character()` and `db_save_character()` already handle missing columns gracefully
+- Danbooru character assignment endpoints work correctly in all scenarios
+
+**Rollback**: Not applicable (schema correction, idempotent)
+
+---
 
 ### Schema Version 4 (v1.10.1) - 2026-02-03
 
@@ -552,6 +591,7 @@ The `chats.metadata` JSON field stores chat-specific data:
 
 | Schema Version | Release Version | Date | Description |
 |---------------|----------------|------|-------------|
+| 5 | v1.11.0 | 2026-02-06 | Ensure Visual Canon Column Consistency |
 | 4 | v1.10.1 | 2026-02-03 | Remove Learning System |
 | 3 | v1.10.1 | 2026-02-03 | NPC Key Consolidation |
 | 2 | v1.10.0 | 2026-02-01 | Danbooru Character Casting |

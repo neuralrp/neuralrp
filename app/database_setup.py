@@ -30,7 +30,7 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Schema version - increment when making schema changes
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
@@ -196,6 +196,20 @@ def _apply_migrations(c, from_version: int, to_version: int):
         _drop_table_if_exists(c, "danbooru_tag_favorites")
 
         print("[MIGRATION] v1.10.1 remove learning system complete")
+
+    # Migration 4 → 5 (v1.11.0: Ensure Visual Canon Columns)
+    if from_version < 5:
+        print("[MIGRATION] Applying v1.11.0 visual canon column consistency...")
+
+        # Ensure visual canon columns exist in characters table (idempotent)
+        _add_column_if_not_exists(c, "characters", "visual_canon_id", "INTEGER")
+        _add_column_if_not_exists(c, "characters", "visual_canon_tags", "TEXT")
+
+        # Ensure visual canon columns exist in chat_npcs table (idempotent)
+        _add_column_if_not_exists(c, "chat_npcs", "visual_canon_id", "INTEGER")
+        _add_column_if_not_exists(c, "chat_npcs", "visual_canon_tags", "TEXT")
+
+        print("[MIGRATION] v1.11.0 visual canon column consistency complete")
   
 def _add_column_if_not_exists(c, table: str, column: str, dtype: str):
     """Add a column to a table if it doesn't already exist."""
@@ -397,6 +411,8 @@ def _create_chat_npcs_table(c):
             promoted BOOLEAN DEFAULT 0,
             promoted_at INTEGER,
             global_filename TEXT,
+            visual_canon_id INTEGER,
+            visual_canon_tags TEXT,
             FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
             UNIQUE(chat_id, entity_id),
             UNIQUE(chat_id, name)

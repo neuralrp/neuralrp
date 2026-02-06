@@ -2,9 +2,9 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine, designed specifically to keep LLMs from falling off a cliff once the context window gets too long, while keeping image generation a top priority.**
+**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine, designed specifically to keep dialog from becoming slop by aggressively managing the context window, while keeping image generation best in class.**
 
-**Simple out of the box. Just drop your cards in the folders, there isn't a million different things to configure. Just go.**
+**Simple out of the box. Just drop your SillyTavern cards in the folders, there isn't a million different things to configure. Just go.**
 
 **Runs well on 8-16GB  GPU's, no $4,000 hardware required**
 
@@ -12,7 +12,7 @@
 
 **Next step: Open [Quickstart Guide](docs/QUICKSTART.md) for setup, recommended LLM models, and example characters and worlds**
 
-**Status**: Actively developed, v1.10.x is still under testing. Expect bugs. Tell me about any you find in Discussions!
+**Status**: Actively developed, v1.11.0 is still under testing. Expect bugs. Tell me about any you find in Discussions!
 ---
 
 ## Table of Contents
@@ -36,47 +36,46 @@
 
 ---
 
-## v1.10.4: Relationship Positioning, Branching Reliability, and Context Fixes
+## v1.11.0: Scene-First Architecture
 
-1. **Relationship Context Positioning** - Moved to end of prompt (after Canon Law, before Generation Lead-In) for maximum LLM attention before generation
+This new release represents a large architectural and philosophical shift for NeuralRP. Through extensive testing, I have found that smaller LLMs (I roleplay with a 12b LLM) simply cannot keep characters straight, no matter what you prompt, when lots of dialog is present. Characters just merge together. 
 
-2. **Snapshot Variation Mode** - Implemented alternative phrase generation through example removal for more variety in generated images
+To keep this from happening, I have combined consistent, small chunks of character reinforcement and a "spike" of reinforcement for new characters, along with smart auto-summarization based on scene change, to ensure the LLM both recognizes the change, and doesn't "merge" the new and old characters together.
 
-3. **Relationship System Fixes** - Fixed critical bugs causing crashes and tracking failures:
+The result: a "scene-first" focus. When a new character or NPC enters, there's a reason for that. You want that different energy, someone who will contribute something new or unique. This design maximizes that, while keeping in minid the limitations of small, locally-runnable LLMs.
 
-- Error logging for database write failures
-- Per-chat turn counter prevents cooldown sharing between concurrent chats
-- User entity ID standardized to `user_default`
-- Chat switch detection automatically resets tracking state
-- Fixed ChatMessage property access (Pydantic models → direct attributes)
-- Fixed semantic filtering (dimension score extraction mismatch)
-- Fixed keyword polarity regex (word boundary matching)
-- Fixed entity ID vs name inconsistency (added `get_entity_id()` helper)
-- Fixed template range lookup (score clamping 0-100, early exit)
+What's New
+1. **Continuous Character Presence (SCENE CAST)**
+- Every turn shows who's in the scene with their key traits and speech style
+- Replaces "reinforce every 5 turns" with constant lightweight grounding
+- Single character: description + personality summary
+- Multi-character: pre-generated capsules for each active character
 
-4. **Branching System Reliability** - Transaction-based refactor for reliable chat forking:
+2. **Strategic Full Card Injection**
+- Full character cards appear at reset points: first appearance, sticky window (turns 1-3), and after long absence (20+ messages)
+- New characters establish voice immediately with rich context
+- Returning characters get a "memory refresh" to prevent drift
 
-- Atomic transactions with automatic rollback on failure
-- Preserved interaction counts from origin chat
-- Fixed metadata entity ID remapping (`characterCapsules`, `characterFirstTurns`)
-- Added missing NPC fields (`visual_canon_tags`, promotion fields)
-- Enhanced error handling with cleanup on failed forks
+3. **Smarter Auto-Summarization**
+- Cast-change: Compresses old content when characters leave (~200 token capsule per scene)
+- Threshold: Groups old messages into scenes when context hits 80% (less aggressive than before)
+- Both run in the background after you get your response (non-blocking)
 
-5. **Additional Fixes** - Resolved various bugs across the system:
+4. **Tighter History Window + 8k Baseline**
+- Keeps last 6 exchanges (12 messages) verbatim instead of 10
+- max_context default increased from 4096 to 8192 (tested and designed for this window)
+- summarize_threshold raised to 0.80 (use more of the window before compressing)
+- Tuned for modern 7B-14B models (Mistral, Qwen, Llama 3)
 
-- **PList Generation**: Robust format detection and output for character fields and danbooru tag generation
-- **Tag Filtering**: Fixed character/world tag filtering by removing stale capsule column reference
-- **Turn Counting**: Fixed turn-based logic during summarization by capturing turn count at request start
-- **Character/NPC Re-appearance**: Fixed injection logic for characters returning after long absence
-- **NPC Bleeding**: Fixed metadata isolation between forked and original chats
+Benefits: Characters maintain consistent voices through long conversations. Better token efficiency means more room for world info and detailed responses. Auto-summarization keeps performance smooth without manual intervention.
+
+Breaking Changes: reinforce_freq setting removed (SCENE CAST replaces it). Existing chats work immediately; old summaries preserved.
 
 ---
 
-**Note on Extended Chat**: v1.10.4 includes substantial improvements, but I'm actively working on fixing bugs related to auto-summarization and character/NPC card insertion in long-form chat. These improvements will be coming in v1.10.5. I wanted to release v1.10.4 now as it's becoming quite dense, but extended chat optimization is a priority for the next release.
-
 ## Why It’s Different
 
-1. **Context hygiene engine** — With 7b-14b LLM's, every token you put into the context window matters, and everything about this app cares about that. Character cards present in full on the first 3 turns, then token-controlled portions appear on customizable fixed intervals. World lore appears only when semantically relevant unless marked as "canon law", which injects periodically. 70–80% of your context stays as live dialogue, even with 3+ characters and deep worlds.
+1. **Context hygiene engine** — Character cards appear in full at strategic reset points (first appearance, turns 1-3 sticky window, after long absence), then lightweight SCENE CAST reminders every turn keep voices consistent. World lore appears only when semantically relevant unless marked as "canon law", which reinforces periodically. Recent dialogue (last 6 exchanges) stays detailed and verbatim; older content compresses into scene summaries. ~50–60% of your 8k context stays as recent conversation and character grounding, with plenty of headroom for world info and long responses.
 
 2. **Emergent cast with visual canon** — Quickly create NPCs on the fly that are isolated to one chat, have full parity with characters, can be promoted, and stay branch‑safe. Gender selection keeps both text and visuals targeted, and one-click Danbooru tag assignment based on character description solves the problem of visual drift, so you can stay immersed in the actual roleplay.
 
@@ -96,23 +95,27 @@ What I found was this: I could never get the underlying control I needed because
 
 Hence, NeuralRP was born.
 
-It's engineered from the ground up with context window in mind. No full character card dump every turn. Uses SQLite backend which syncs intelligently with SillyTavern cards, semantically finds and injects what matters, when it matters, no matter how deep your world is.
+It's engineered from the ground up with context window in mind. How do you solve the context window problem? By keeping it as small as possibe, in the smartest way possible. Intelligent character card usage and aggressive auto-summaries to keep characters from turning into poorage. Uses SQLite and SQLite-vec backend which is a smart, fast home for truth rather than endless JSONs. Syncs intelligently with SillyTavern cards and semantically finds and injects what matters, when it matters, no matter how deep your world is.
 
-I've built up the SD integration to match. Rather than being a bolt-on extension, its been carefully developed to natively fit into the flow of NeuralRP with a deep feature set, and as automated or manual as you want it to be (or ignore it).
+I've built up the SD integration to match. Rather than being a bolt-on extension, its been carefully developed to natively fit into the flow of NeuralRP with a deep feature set, scripted danbooru-optimized prompts, and as automated or manual as you want it to be (or ignore it).
 
 The fact is, there are certain limitations with 7b-14b LLMs that you simply can't get past. But this app maximizes what those LLMs offer for roleplay.
 
 ---
 
-## Core Philosophy: Conversation First
+## Core Philosophy: Scene-First
 
-70-80% of your context budget should be dialogue, not metadata. Characters, world info, and relationships exist to support conversation, not dominate the prompt.
+NeuralRP v1.11.0 uses scene-first architecture for maximum character consistency across long conversations.
 
-- **Inject on first 3 turns** — Full character cards (single) or capsules (multi-char) for early-turn consistency
-- **Just-in-time grounding** — World lore appears when semantically relevant. "World Canon" option allows you to manually enforce rules and lore on a periodic basis.
-- **Directional relationships** — Alice→Bob ≠ Bob→Alice, tracked automatically
-- **Scalability by design** — 1 character = ~4-6% of context. 3 characters = ~20-30%. After sticky window, ~80% for dialogue.
-- **Narrator Mode** - "Just chat", no world or character cards needed. Let it all develop naturally, elevating NPC's and worlds with AI-powered tools within the app. Or, easily use your pre-built deep worlds and characters from v2 cards.
+- **SCENE CAST every turn** — All active characters shown with their capsules every turn (replaces periodic reinforcement)
+- **6-exchange history window (RP-optimized)** — Last 6 exchanges shown verbatim, older content summarized into scene capsules
+- **Hybrid full card system** — Sticky full cards on turns 1-3, capsules on turns 4+, reset points for returning characters
+- **Context-aware retrieval** — World lore appears when semantically relevant. Canon law reinforced every 3 turns.
+- **Directional relationships** — Alice→Bob ≠ Bob→Alice, tracked automatically, injected when meaningful
+- **Scalability by design** — SCENE CAST (400-600 tokens) + 6 exchanges (900-1500 tokens) + sticky full cards (500-2000, turns 1-3). Supports 5+ character group chats.
+
+**Why Scene-First?**
+Regular character reinforcement along with smart summarization beats more dialog in context. SCENE CAST ensures consistent voice across 50+ turn conversations while the 6-exchange window prevents attention decay. Sticky full cards (first 3 turns + reset points) provide strong early reinforcement without constant repetition.
 
 ---
 
@@ -166,12 +169,12 @@ Five emotional dimensions tracked between all entities (trust, bond, conflict, p
 
 ### Intelligent Summarization
 
-Continue conversations beyond context limits. When context approaches 85%:
+Continue conversations beyond context limits. When context approaches 80%:
 
-- Oldest turns traded for summaries
+- All but 6 most recent turns traded for summaries
 - Relationship states preserved
 - Story continuity maintained
-- Summarization window to view and customize summaries
+- Summarization window to view and customize summaries (or auto-summarize your summaries!)
 
 Relationship state is one of the most difficult things to maintain when summaries happen. The relationship system brings continuity without having to update character cards manually.
 
@@ -183,7 +186,7 @@ Fork any message to create alternate storylines. Characters, NPCs, world info, a
 
 ## Image Generation with AUTOMATIC1111
 
-Native integration, not an afterthought:
+Native integration, with the goal to be best in class:
 
 ### 1. Performance‑Aware Presets
 
@@ -206,6 +209,7 @@ Automatic selectable step/resolution reduction when context is large (>12K token
 
 - **Generated from Context** – Generate images from chat context automatically; AI analyzes the last 20 messages, providing location, action, activity, dress, and facial expression, which is then directly matched to an SD Generation-optimized prompt. 
 - **How is it Different?** - It doesn't just ask the LLM for a complete prompt and shove it into A1111 like others do. It takes a specific framework optimized for Anime-based LLM generation models, using Danbooru tags that those models are specifically trained on, to create consistent images. The LLM is just delivering keywords - action, location, activity, dress, and facial expression. And no "leakage" into the context window, one of the things that would ruin my RP chats with other frontends you have probably used.
+- **You are IN THE SHOT** - Define yourself as male/female/other, and fill out your own tags in settings. You're in the snapshot, with context derived from your tags and the chat text. 
 
 ### 5. Browse and Save Your Images
 - **Images Folder** - separate images folder where every generation is saved, even if you delete it in the chat. 
@@ -252,9 +256,10 @@ All data in SQLite (neuralrp.db) with automatic JSON export for SillyTavern comp
 
 ## Known Limitations
 
+- Requires 8k+ context models. NeuralRP's scene-first architecture won't fit in 4k context windows. Modern 7B-14B RP-tuned models (Mistral, Qwen, Llama 3, etc.) all ship with 8k+ by default.
 - No cloud extensibility, all local
 - Requires AUTOMATIC1111 for image generation, not compatible with ComfyUI and others at this time (run with --API).
-- Requires OpenAI-compatible backend with text to text LLM running locally (KoboldCcp strongly recommended). 
+- Requires OpenAI-compatible backend with text to text LLM running locally (KoboldCcp strongly recommended).
 - Tested with KoboldCcp with a quantized 12B LLM model tuned for RP, and with A1111 running an Illustrious SD model.
 - All testing done with a NVidia 3060 12GB vRAM GPU
 - Running 2 LLMs with an 8GB vRAM GPU is untested, will likely lead to sub-optimal results
@@ -296,20 +301,21 @@ Configure LLM and image generation endpoints in Settings panel.
 
 ## Danbooru Tag Generator (Optional)
 
-To enable one-click Danbooru character visual matching, run the fetch script to download character data from Danbooru API:
+To enable one-click Danbooru character visual matching, run fetch script to download character data from Danbooru API:
 
 ```bash
 # Edit app/fetch_danbooru_characters.py with your Danbooru API key, then:
 python app/fetch_danbooru_characters.py
 ```
 
-This generates `app/data/danbooru/book1.xlsx` from Danbooru's public API (~15-30 minutes for 1394 characters). See **[Quickstart Guide](docs/QUICKSTART.md)** for detailed setup instructions including API key acquisition.
+This generates `app/data/danbooru/book1.xlsx` from Danbooru's public API (~15-30 minutes for 1394 characters). See **[User Guide](docs/USER_GUIDE.md)** for detailed setup instructions including API key acquisition.
 
 ---
 
 ## Documentation
 
-- **[Quickstart Guide](docs/QUICKSTART.md)** — Get up and running fast
+- **[Quickstart Guide](docs/QUICKSTART.md)** — Get up and running fast (installation + first-time setup + basic usage)
+- **[User Guide](docs/USER_GUIDE.md)** — Complete feature manual (all features, settings, and capabilities)
 - **[Technical Documentation](docs/TECHNICAL.md)** — Deep dive into architecture and implementation
 - **[Changelog](CHANGELOG.md)** — Version history
 

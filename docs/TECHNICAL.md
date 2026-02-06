@@ -7,35 +7,37 @@ This document explains how NeuralRP's advanced features work under the hood, des
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
-2. [SQLite Database](#sqlite-database)
-3. [Database Setup System](#database-setup-system)
-4. [Context Assembly](#context-assembly)
-5. [World Info Engine](#world-info-engine)
-6. [Semantic Search](#semantic-search)
-7. [Semantic Relationship Tracker](#semantic-relationship-tracker)
-8. [Entity ID System](#entity-id-system)
-9. [Chat-Scoped NPC System](#chat-scoped-npc-system)
-9.5. [Character Card Field Mappings](#character-card-field-mappings)
-10. [Message Search System](#message-search-system)
-11. [Performance Mode](#performance-mode)
-12. [Branching System (v1.7.0, Enhanced v1.10.4)](#branching-system)
+2. [Configuration Settings](#configuration-settings)
+3. [SQLite Database](#sqlite-database)
+4. [Database Setup System](#database-setup-system)
+5. [Context Assembly](#context-assembly)
+6. [World Info Engine](#world-info-engine)
+7. [Semantic Search](#semantic-search)
+8. [Semantic Relationship Tracker](#semantic-relationship-tracker)
+9. [Entity ID System](#entity-id-system)
+10. [Chat-Scoped NPC System](#chat-scoped-npc-system)
+10.5. [Character Card Field Mappings](#character-card-field-mappings)
+11. [Message Search System](#message-search-system)
+12. [Performance Mode](#performance-mode)
+13. [Branching System (v1.7.0, Enhanced v1.10.4)](#branching-system)
     - [NPC Entity ID Remapping](#npc-entity-id-remapping-v170-enhanced-v1104)
     - [Fork Isolation and Metadata Protection](#fork-isolation-and-metadata-protection-v1104)
-13. [Memory & Summarization](#memory--summarization)
-14. [Soft Delete System](#soft-delete-system)
-15. [Autosave System](#autosave-system)
-16. [Image Generation](#image-generation)
-17. [Connection Monitoring](#connection-monitoring)
-18. [Change History Data Recovery](#change-history-data-recovery)
-19. [Undo/Redo System](#undo-redo-system)
-20. [Character Name Consistency](#character-name-consistency)
-20.5. [Automatic Capsule Generation](#automatic-capsule-generation)
-21. [Tag Management System](#tag-management-system)
-22. [Favorites Viewer](#favorites-viewer)
-23. [Snapshot Feature](#snapshot-feature)
-24. [Gender System](#gender-system)
-25. [Danbooru Tag Generator](#danbooru-tag-generator)
-26. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
+14. [Memory & Summarization](#memory--summarization)
+    - [Scene Capsule Summarization](#scene-capsule-summarization-phase-4-v1110)
+    - [SCENE UPDATE Blocks](#scene-update-blocks-v1110)
+15. [Soft Delete System](#soft-delete-system)
+16. [Autosave System](#autosave-system)
+17. [Image Generation](#image-generation)
+18. [Connection Monitoring](#connection-monitoring)
+19. [Change History Data Recovery](#change-history-data-recovery)
+20. [Undo/Redo System](#undo-redo-system)
+21. [Character Name Consistency](#character-name-consistency)
+22. [Tag Management System](#tag-management-system)
+23. [Favorites Viewer](#favorites-viewer)
+24. [Snapshot Feature](#snapshot-feature)
+25. [Gender System](#gender-system)
+26. [Danbooru Tag Generator](#danbooru-tag-generator)
+27. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
     - [Context Hygiene Philosophy](#context-hygiene-philosophy)
 
 ---
@@ -85,6 +87,118 @@ The entire system is designed to maximize narrative richness within finite token
 - Why reinforcement intervals exist (balance consistency vs tokens)
 - Why first appearance detection matters (prevent bloat)
 
+### Scene-First Architecture (v1.11.0+)
+
+**Overview:**
+Starting with v1.11.0, NeuralRP uses a scene-first architecture where all active characters are shown every turn via a SCENE CAST block. This replaces the periodic reinforcement system for better character consistency.
+
+**Key Changes:**
+1. **SCENE CAST Block**: Every turn includes a block showing all active characters with their capsules
+2. **History Window**: Only the last 6 exchanges are shown verbatim; older content is summarized
+3. **Fallback Capsules**: Single-character chats use fallback capsules (description + personality excerpts)
+4. **Pre-Generated Capsules**: Multi-character chats use LLM-generated capsules (50-100 tokens each)
+5. **Sticky Full Cards**: Characters get full cards on first appearance and stay for 2 more turns (sticky window)
+
+**Why Scene-First?**
+- Regular character reinforcement beats more dialog in context
+- SCENE CAST ensures consistent voice across 50+ turn conversations
+- 6-exchange history prevents attention decay while maintaining recency (RP-optimized token budget)
+- Higher baseline token cost (~400-600 tokens/turn) enables better character consistency
+- Sticky full cards (first appearance + 2 more turns) ensure strong early reinforcement
+
+**Character Capsules:**
+- Multi-char chats: Pre-generated LLM summaries (stored in `data.extensions.multi_char_summary`)
+- Single-char chats: Fallback capsules built from description + personality (no LLM generation)
+- NPCs: Same system as global characters
+
+**Token Budget (v1.11.0+):**
+```
+Component              Tokens       Frequency
+System + Mode          300-400      Every turn
+Scene capsules         300-500      If history exists
+User Description        50-100        Every turn (v1.11.0+)
+World knowledge         200-400        Semantic match
+SCENE UPDATE           50-100         On cast change only
+SCENE CAST             400-600        Every turn
+Recent dialogue (6 ex)  900-1500       Every turn
+Canon law              100-200        Every 3 turns
+Relationships           100-200        If meaningful
+Lead-in                50             Every turn
+Total                  2450-4050
+Generation headroom     3950-5550
+```
+
+Comfortable fit with 8k minimum context.
+
+**Capsule Regeneration System (v1.11.0+):**
+
+**Timestamp-Based Automatic Regeneration:**
+- **Purpose**: Automatically regenerate capsules when character/NPC data is updated
+- **Mechanism**: Compares entity `updated_at` timestamp vs capsule generation timestamp
+- **Trigger**: `entity_last_updated > capsule_timestamp` 
+- **Scope**: Works for ALL chats (single-character and multi-character)
+
+**Implementation Details:**
+
+**Global Characters:**
+- Character edits via `/api/characters` endpoint update database `updated_at` timestamp
+- `db_get_character()` returns character with `updated_at` field included
+- Capsule regeneration compares `char.updated_at > chat_capsule_timestamps[entity_id]`
+- If true: regenerates capsule and saves new timestamp to metadata
+
+**NPCs:**
+- NPC edits via `/api/chats/{chat_id}/npcs/{npc_id}` endpoint update metadata timestamp
+- NPCs include `updated_at` field in chat metadata
+- Capsule regeneration compares `npc.updated_at > chat_capsule_timestamps[entity_id]`
+- If true: regenerates capsule and saves new timestamp to metadata
+
+**Benefits:**
+- **Persistent**: Works across server restarts (timestamps stored in database/metadata)
+- **Reliable**: No dependency on in-memory state
+- **Simple**: Single comparison logic vs complex edit tracking
+- **Efficient**: Only regenerates when data actually changes
+
+**Metadata Structure:**
+```json
+{
+  "characterCapsules": {
+    "alice.json": "Alice is a brave adventurer...",
+    "npc_123": "Mysterious merchant..."
+  },
+  "characterCapsuleTimestamps": {
+    "alice.json": 1738838400,
+    "npc_123": 1738838500
+  }
+}
+```
+
+**Removed Systems (v1.11.0+):**
+- **RECENT_EDITS system**: In-memory edit tracking removed
+- **Recent Updates section**: One-time edit notifications removed from prompts
+- **add_recent_edit()**: Function no longer used
+- **get_and_clear_recent_edits()**: Function no longer used
+
+**Rationale for Removal:**
+- Timestamp-based system is simpler and more reliable
+- No in-memory state to lose on server restart
+- No complex coordination between edit recording and consumption
+- Capsules regenerate automatically without user-visible notifications
+
+**Behavior When Character/NPC is Edited:**
+1. User edits character/NPC → Save endpoint writes to database/metadata
+2. `updated_at` timestamp set to current time
+3. Next chat turn: System loads character/NPC with new timestamp
+4. Capsule regeneration detects `updated_at > capsule_timestamp`
+5. New capsule generated and timestamp saved
+6. Updated capsule appears in SCENE CAST
+
+**Why This is Better Than Previous System:**
+- **Previous**: Complex in-memory tracking, one-time notifications, manual coordination
+- **Current**: Simple timestamp comparison, automatic regeneration, persistent state
+
+For a deep dive into context hygiene tradeoffs and reasoning, see [Context Hygiene Philosophy](#context-hygiene-philosophy) in the Design Decisions section.
+
+
 For a deep dive into context hygiene tradeoffs and reasoning, see [Context Hygiene Philosophy](#context-hygiene-philosophy) in the Design Decisions section.
 
 ### Project Structure
@@ -118,6 +232,109 @@ Resource Manager (queues operations)
 ├─→ Relationship Analysis → Semantic embeddings → Relationship update
 └─→ Semantic Search → sqlite-vec → Ranked results
 ```
+
+### Configuration Settings
+
+NeuralRP uses a centralized `CONFIG` dictionary in `main.py` for global settings. These defaults can be overridden per chat via the settings UI.
+
+**Global Configuration (main.py):**
+
+```python
+CONFIG = {
+    "kobold_url": "http://127.0.0.1:5001",
+    "sd_url": "http://127.0.0.1:7861",
+    "system_prompt": "Write a highly detailed, creative, and immersive response. Stay in character at all times.",
+    "performance_mode_enabled": True,
+    "max_context": 8192,           # v1.11.0+
+    "summarize_threshold": 0.80        # v1.11.0+
+}
+```
+
+**Configuration Settings:**
+
+| Setting | Default | Range | Description |
+|----------|---------|--------|-------------|
+| `max_context` | 8192 | 1024-32768 | Maximum token context window for LLM generation |
+| `summarize_threshold` | 0.80 | 0.50-1.00 | Context percentage triggering threshold summarization (v1.11.0+) |
+| `world_info_reinforce_freq` | 3 | 1-100 | Turns between canon law reinforcement |
+| `kobold_url` | http://127.0.0.1:5001 | URL | KoboldCpp or OpenAI-compatible endpoint |
+| `sd_url` | http://127.0.0.1:7861 | URL | AUTOMATIC1111 WebUI endpoint |
+| `system_prompt` | (defined) | string | Global system prompt for LLM |
+| `performance_mode_enabled` | True | boolean | Enable automatic performance mode switching |
+
+**v1.11.0+ New Settings:**
+
+**`max_context` (8192):**
+- **Purpose**: Defines maximum token context window for LLM generation
+- **Usage**: Used by summarization triggers, token counting, context budget calculations
+- **Per-Chat Override**: Can be customized in chat settings UI
+- **Typical Values**:
+  - 4096: Older models (LLaMA 2 7B, etc.)
+  - 8192: Modern models (LLaMA 3 8B, Mistral, etc.)
+  - 16384: Large context models (Command R, Qwen, etc.)
+
+**`summarize_threshold` (0.80):**
+- **Purpose**: Context percentage that triggers threshold summarization
+- **Usage**: Checked by `trigger_threshold_summarization()` after each generation
+- **Behavior**:
+  - When `token_count / max_context >= summarize_threshold`, old messages are summarized
+  - Lower values (0.50): More frequent summarization, less context
+  - Higher values (0.95): Less frequent summarization, more context but risk overflow
+- **Recommended**: 0.70-0.85 for balanced performance
+- **Per-Chat Override**: Can be customized in chat settings UI
+
+**Setting Application Order:**
+
+1. **Global Default**: `CONFIG` dictionary values used as defaults
+2. **Chat Settings**: Per-chat settings override global defaults (if set)
+3. **Request Settings**: Frontend may pass additional settings in API requests
+4. **Final Value**: Used in context assembly, summarization, generation
+
+**Example Usage in Code:**
+
+```python
+# Get context limit (per-chat override or global default)
+max_context = request.settings.get('max_context', CONFIG['max_context'])
+
+# Get summarization threshold (per-chat override or global default)
+threshold = request.settings.get('summarize_threshold', CONFIG['summarize_threshold'])
+
+# Check if summarization needed
+if token_count / max_context >= threshold:
+    await trigger_threshold_summarization(chat_id)
+```
+
+**Configuration Persistence:**
+
+Global settings are hard-coded in `main.py` and apply across all chats:
+
+| Setting Type | Stored | Changed By | Persistence |
+|--------------|---------|-------------|---------------|
+| Global CONFIG | Code only | Developer (edit main.py) | Forever (code change) |
+| Chat Settings | Chat metadata | User (settings UI) | Per chat (in database) |
+
+**Adding New Global Settings:**
+
+To add a new global setting:
+
+1. **Add to CONFIG dictionary:**
+   ```python
+   CONFIG = {
+       # ... existing settings ...
+       "new_setting": default_value
+   }
+   ```
+
+2. **Document purpose and usage in this section**
+
+3. **Update UI if user-configurable:**
+   - Add setting field to settings modal
+   - Save to chat.metadata when changed
+
+4. **Use in code with fallback:**
+   ```python
+   value = request.settings.get('new_setting', CONFIG['new_setting'])
+   ```
 
 ---
 
@@ -205,14 +422,10 @@ NeuralRP provides immediate synchronization of character, NPC, and world info ed
 
 **World Info Editing:**
 - World info keys now properly trigger entries with all keys in `key` array processed (v1.7.3)
-- Character, NPC, and world info card edits appear in "Recent Updates" on the next chat turn (v1.7.3)
+- Character, NPC, and world info edits trigger automatic capsule regeneration on next chat turn (v1.11.0+)
 - **Enhanced v1.8.0**: Supports smart sync with entry-level conflict resolution
   - Manual edits to JSON files sync intelligently (preserve user additions from UI)
   - API endpoint `/api/reimport/worldinfo?smart_sync=true` for intelligent merge
-
-**Edit Notifications:**
-- Character, NPC, and world info card edits now appear in "Recent Updates" section on next chat turn
-- Provides visibility into what changed without navigating away from conversation
 
 ### Smart Sync System (v1.8.0)
 
@@ -493,25 +706,23 @@ flowchart TD
     CheckCharacters --> |Yes| CheckChatMode{Chat Mode?}
     
     CheckChatMode --> |Single Char| SingleInjection[Single Character Injection]
-    SingleInjection --> CheckSticky1{Turn 1,2,3 Sticky Window?}
-    CheckSticky1 --> |Yes| SingleFullCard[Full Card: 1000 tokens]
-    CheckSticky1 --> |No| CheckReinforce1
-    
+    SingleInjection --> CheckSticky1{Reset Point?}
+    CheckSticky1 --> |Yes (First/Return/Sticky)| SingleFullCard[Full Card: 1000-1500 tokens]
+    CheckSticky1 --> |No| SceneCast
+
     CheckChatMode --> |Multi Char| MultiInjection[Multi-Character Injection]
-    MultiInjection --> CheckSticky2{Turn 1,2,3 Sticky Window?}
-    CheckSticky2 --> |Yes| MultiCapsules[Capsules: 100 tokens each]
-    CheckSticky2 --> |No| CheckReinforce1
-    
+    MultiInjection --> CheckSticky2{Reset Point?}
+    CheckSticky2 --> |Yes (First/Return/Sticky)| MultiFullCards[Full Cards: 1000-1500 each]
+    CheckSticky2 --> |No| SceneCast
+
     CheckCharacters --> |No| AddHistory
+
+    SingleFullCard --> SceneCast
+    MultiFullCards --> SceneCast
     
-    SingleFullCard --> CheckReinforce1
-    MultiCapsules --> CheckReinforce1
+    SceneCast[SCENE CAST: All Active Characters (Every Turn)]
     
-    CheckReinforce1{Reinforcement Turn?}
-    CheckReinforce1 --> |Yes current_turn % reinforce_freq == 0| Reinforce[Reinforce: Description + Personality]
-    CheckReinforce1 --> |No| AddHistory
-    
-    Reinforce --> AddHistory[Add Chat History to Prompt]
+    SceneCast --> AddHistory[Add Chat History to Prompt]
     
     AddHistory --> CanonReinforce{Canon Law Reinforcement?}
     CanonReinforce --> |Turn 1,2 OR every N turns| CanonPinned[Pinned Canon Law at End]
@@ -534,8 +745,13 @@ flowchart TD
 **Key Concepts for Auditing:**
 
 - **Turn Calculation**: Count of user messages (1-indexed: Turn 1 = first user message)
-- **Sticky Window**: First 3 turns (1, 2, 3) get full card/capsule injection
-- **Reinforcement**: Every N turns (default 5) → Description + Personality only
+- **Sticky Full Cards**: First 3 turns (1, 2, 3) get full card injection (not capsules)
+  - Turn 1: First appearance → Full card
+  - Turns 2-3: Sticky window → Full card
+  - Turns 4+: SCENE CAST capsules only
+- **Reset Points**: Full cards also trigger on:
+  - First appearance in chat
+  - Returning after long absence (20+ messages not in recent history)
 - **Canon Law**: Always shown, reinforced every 3 turns at prompt end
 - **Relationship Context**: Emotional states injected at very end (before Lead-In) for maximum attention
 - **Entity ID Extraction** (v1.10.4): Use `get_entity_id()` for consistent relationship lookups
@@ -543,10 +759,15 @@ flowchart TD
   - Quoted keys (`"Event Name"`): Exact phrase match only
   - Unquoted keys (`dragon`): Semantic similarity + flexible keyword match
 - **Character Modes**:
-  - Single char: Full card (1000 tokens) on sticky turns
-  - Multi-char: Capsules (100 tokens each) on sticky turns
+  - Reset points (first appearance/return): Full card (1000-1500 tokens)
+  - Sticky window (turns 2-3): Full card (1000-1500 tokens)
+  - Regular turns (4+): SCENE CAST capsules (50-150 tokens each)
+ 
+### 8-Turn Reinforcement Cycle (DEPRECATED - see Hybrid System above)
 
-### 8-Turn Reinforcement Cycle
+**⚠️ REMOVED in v1.11.0:**
+The periodic reinforcement system described below has been replaced by the hybrid SCENE CAST + sticky full card system.
+See [Hybrid SCENE CAST + Sticky Full Card System (v1.11.0+)](#hybrid-scene-cast--sticky-full-card-system-v1110) above for current implementation.
 
 ```mermaid
 flowchart LR
@@ -629,11 +850,10 @@ flowchart LR
 
 **Legend:**
 - 🟢 **Green**: Sticky window (turns 1, 2, 3) - Full card/capsule injection
-- 🟡 **Gold**: Reinforcement turn (every N turns) - Description + Personality only
+- 🟡 **Gold**: SCENE CAST (every turn) - All active characters with capsules
 - 🔵 **Blue**: Canon law reinforced (turns 1, 2, then every 3rd turn)
-
+ 
 **Configuration Settings:**
-- `reinforce_freq`: Default 5 (turns between character reinforcement)
 - `world_info_reinforce_freq`: Default 3 (turns between canon law reinforcement)
 
 ### Layer Structure
@@ -642,9 +862,12 @@ flowchart LR
    - Global system prompt (tone, formatting rules)
    - Mode-specific instructions (Narrator vs Focus)
 
-2. **User Persona** (optional)
-   - Short player/user description
+2. **User Description** (v1.11.0+)
+   - User name shown as "Name: [user_name]" (if provided)
+   - User persona shown as "Description: [user_persona]" (if provided)
+   - **Injected EVERY turn** (not just first turn) for consistent relationship building
    - Placed early to influence perspective
+   - Enables LLM to track user identity and personality across conversations
 
 3. **World Info** (updated in v1.7.3)
      - Canon Law entries first (always included)
@@ -657,50 +880,45 @@ flowchart LR
 
 4. **Character Definitions** (updated in v1.7.3)
 
-**Context Injection Strategy - Why Different Approaches for Single vs Multi-Character:**
+**Context Injection Strategy - Hybrid SCENE CAST + Full Card System:**
 
-NeuralRP uses fundamentally different character injection strategies for single-character vs multi-character chats, driven by context hygiene and token efficiency considerations:
+NeuralRP uses a hybrid approach combining full cards and capsules, driven by context hygiene and token efficiency considerations:
 
-**Single Character Chats: Full Card on Turns 1, 2, 3 (Sticky Window)**
-- **Behavior**: Complete character card (description + personality + scenario + mes_example) injected on first 3 turns (sticky window)
-- **Format**: `### Character Profile: {name}\n{description}\n{personality}\n{scenario}\nExample dialogue:\n{mes_example}`
-- **Reinforcement**: Description + personality reinforced every N turns (unified with multi-char)
-- **Sticky Window**: First 3 turns (1, 2, 3) get full card injection for better early-conversation consistency
+**Sticky Full Card System (All Character Types)**
+- **Behavior**: Complete character card (description + personality + scenario + mes_example) injected at reset points
+- **Reset Points**: Full cards appear when:
+  - First appearance in chat (turn 1)
+  - Returning after long absence (20+ messages not in recent history)
+  - Sticky window (turns 2-3 after first appearance or return)
+- **Format**: `### Character: {name}\n{description}\n{personality}\n{scenario}\nExample dialogue:\n{mes_example}`
+- **Sticky Window Duration**: 2 additional turns (total 3 turns with full card)
 - **Reasoning**:
-  - **Early-Turn Drift Prevention**: Full cards (500-2000 tokens) on turns 2-3 reduce drift vs reinforcement-only
+  - **Early-Turn Drift Prevention**: Full cards (500-2000 tokens) on turns 1-3 provide strong reinforcement
   - **Dialogue Examples Preserved**: Scenario + mes_example provide voice fingerprints for first few turns
-  - **Token Tradeoff**: +133% tokens (1500 → 3500 over 10 turns) for significantly better early consistency
-  - **Context Hygiene**: Sticky window limited to 3 turns, then periodic reinforcement resumes
-
-**Multi-Character Chats: Capsules on First 3 Turns, Then Periodically**
-- **Behavior**: Capsule summaries (50-200 tokens) injected on character's first 3 turns in chat (sticky window)
-- **Format**: `### [{name}]: {capsule summary with dialog examples}`
-- **Reinforcement**: Description + personality for ALL characters (unified with single-char, v1.8.1+)
-- **Sticky Window**: First 3 turns (1, 2, 3) get capsule injection for better early-conversation consistency
-- **Reasoning**:
-  - **Token Budget**: Multiple full cards (2000-6000+ tokens total) would consume entire context window
-  - **Voice Differentiation**: Capsules include dialog examples showing character speech patterns
-  - **Grounding**: Capsules provide "this is how X speaks" examples for voice differentiation
-  - **Context Hygiene**: In group chats, each character gets minimal but distinctive footprint
-  - **Scalability**: Adding 3rd, 4th, 5th character remains sustainable (vs full card scaling)
-  - **Early-Turn Consistency**: Sticky window ensures dialogue examples available in first few turns
-  - **Unified Reinforcement** (v1.8.1+): Description + personality for all characters (simplified logic)
+  - **No Duplicates**: Full-card characters excluded from SCENE CAST to prevent redundant information
+  - **Token Efficiency**: After sticky window, capsules (50-150 tokens) maintain voice without full card overhead
+  - **Return Handling**: Characters returning after absence get fresh full cards to re-establish presence
 
 **Focus Mode:**
 - **Behavior**: Selected character emphasized with same capsule logic applying to all active characters
 - **Reasoning**: Even when focused on one character, others remain "present" in scene with minimal overhead
 
-**First Appearance Detection (Critical for Context Hygiene):**
-- **Mechanism**: `character_has_speaker()` tracks if character has spoken in message history
-- **Behavior**: Full card (single) or capsule (multi) injected on first 3 turns (sticky window), then periodically via reinforcement
+**Hybrid Injection System (Critical for Context Hygiene):**
+- **Mechanism**: `character_first_turns` tracks first appearance, `character_full_card_turns` tracks last full card injection
+- **Reset Point Detection**:
+  - First appearance: `first_turn == absolute_turn`
+  - Returning after absence: Not in last 20 messages + `first_turn < absolute_turn`
+  - Sticky window: `absolute_turn - full_card_turn <= 2`
 - **First Turn Tracking**: `character_first_turns` metadata stores first turn number per character
-- **Context Hygiene**: Prevents redundant injections (same character card repeated every turn = wasted tokens)
-- **Dynamic Addition**: Characters/NPCs added mid-chat automatically trigger injection (no message = no appearance yet)
+- **Full Card Turn Tracking**: `character_full_card_turns` metadata stores when each character last received full card
+- **Context Hygiene**: Prevents redundant injections (full card OR capsule, never both)
+- **Dynamic Addition**: Characters/NPCs added mid-chat automatically trigger full card injection
 - **Reasoning**:
-  - **Avoid Bloat**: Character A enters turn 5, shouldn't inject full description again turn 6-50
-  - **Sticky Window**: New character gets full card/capsule on turns 5, 6, 7 (first 3 turns since entry)
-   - **Consistent State**: Character behavior doesn't change, no need to repeat full definition after sticky window
+  - **Avoid Bloat**: Character A enters turn 5, gets full card turns 5-7, then capsule only
+  - **Sticky Window**: Full card persists for 2 additional turns (total 3 turns with full card)
+   - **Consistent State**: After sticky window, capsules maintain voice without full card overhead
    - **Token Optimization**: Reserve tokens for conversation flow, not re-defining characters
+   - **Return Handling**: Characters returning after absence trigger fresh full card + sticky window
 
 **Re-appearance Detection After Long Absence (v1.10.4):**
 - **Problem**: Characters who appeared early in chat, left for many turns (summarized out), then returned were not getting fresh treatment
@@ -739,18 +957,14 @@ NeuralRP uses fundamentally different character injection strategies for single-
   - **No Proactive Bloat**: Undefined characters don't consume tokens until needed
   - **LLM Attention**: New character gets immediate spotlight in context
 
- 5. **Conversation History**
-    - Recent messages verbatim
-    - Older content as summary (if summarization triggered)
-
-6. **Recent Updates** (v1.7.3+)
-    - One-time notification of character, NPC, and world info edits
-    - Appears on ONE turn after edit, then disappears
-    - Completely separate from reinforcement intervals
-
-7. **Generation Lead-In**
-    - Final formatting instruction
-    - User's latest message
+   5. **Conversation History**
+      - Recent messages verbatim
+      - Older content as summary (if summarization triggered)
+      - SCENE UPDATE block on cast changes (v1.11.0+)
+  
+   6. **Generation Lead-In**
+     - Final formatting instruction
+     - User's latest message
 
 8. **Canon Law** (pinned for recency bias)
     - World rules reinforced at prompt end
@@ -800,35 +1014,292 @@ Even after initial character/world injection, LLMs naturally "forget" or "drift"
 
 ---
 
-**Character Reinforcement: Unified Strategy for All Chats (v1.8.1+)**
+**Character Reinforcement (v1.11.0+): SCENE CAST System**
 
-**Unified Reinforcement: Description + Personality for ALL Characters**
-- **Default**: Every 5 turns (configurable via `reinforce_freq` setting, range: 1-100)
-- **Turn Calculation**: 1-indexed (turn 1 = first user message, turn 2 = second user message, etc.)
-- **What's Reinforced**: Description + personality for ALL characters (single and multi-char)
-- **Format**: `[REINFORCEMENT: [Alice's Body= Tall, athletic...] [Alice's Personality= "Brave"...] | [Bob's Body=...] [Bob's Personality=...]]`
-- **Behavior**: Reinforces all active characters simultaneously (not individually)
-- **Turn Calculation Method**: `current_turn = sum(1 for msg in request.messages if msg.role == "user")` captured at request start (before summarization truncation)
-- **Critical**: Turn count is captured BEFORE summarization to ensure it survives message truncation and provides accurate turn-based logic
-- **Trigger Condition**: `current_turn > 0 AND current_turn % reinforce_freq == 0`
+**⚠️ DEPRECATED (v1.10.4 and earlier):**
+- Old periodic reinforcement system using [REINFORCEMENT: markers] has been removed
+- The `reinforce_freq` setting is no longer used
+- See "SCENE CAST" section below for new architecture
 
-**Context Hygiene Reasoning for Unified Reinforcement:**
-- **Simplified Logic**: Same reinforcement content for single and multi-char modes reduces complexity by 90%
-- **Consistent Grounding**: Description + personality provides complete behavioral context for all characters
-- **Token Tradeoff**: +36% token overhead vs old system, but significantly reduced code complexity
-- **Code Maintainability**: Single unified logic path vs multiple per-character filtering systems
-- **Edit Override REMOVED**: Edited characters follow normal reinforcement cycle (no immediate full card injection)
+**Current System (v1.11.0+):**
+SCENE CAST provides character context every turn instead of periodic reinforcement.
+See "Scene-First Architecture" section for details.
 
-**Why Unified Instead of PList vs Capsules?**
+---
 
-| Factor | Old System (PList vs Capsules) | New System (Unified) |
-|--------|-------------------------------|----------------------|
-| **Reinforcement Content** | PList (single) / Capsules (multi) | Description + personality (all) |
-| **Code Complexity** | Multiple code paths, per-character filtering | Single unified logic path |
-| **Edit Handling** | Full card injection on edit | Normal reinforcement cycle |
-| **Token Overhead** | ~1,100 (10 turns, single char) | ~1,500 (10 turns, single char) |
-| **Maintenance** | Complex, error-prone | Simple, straightforward |
-| **Complexity Reduction** | Baseline | -90% |
+**Hybrid SCENE CAST + Sticky Full Card System (v1.11.0+):**
+
+**Overview:**
+Characters receive full cards at reset points (first appearance, returning after absence) and maintain sticky window for 2 additional turns. After sticky window expires, only SCENE CAST capsules are shown. This prevents duplicate character info while ensuring strong early reinforcement.
+
+**Reset Point Detection:**
+
+Full cards are injected when:
+1. **First appearance**: Character appears in chat for the first time (`first_turn == absolute_turn`)
+2. **Returning after absence**: Character absent for 20+ messages then reappears (checked via `character_has_appeared_recently()`)
+3. **Sticky window**: Within 2 turns after full card injection (`absolute_turn - full_card_turn <= 2`)
+
+**Implementation Details:**
+
+**Metadata Tracking:**
+```python
+# In chat.metadata
+{
+  "characterFirstTurns": {
+    "alice.json": 1,          # First turn character appeared
+    "bob.json": 20              # Bob entered mid-chat
+  },
+  "characterFullCardTurns": {
+    "alice.json": 1,          # Alice got full card turn 1 (sticky window)
+    "bob.json": 20             # Bob got full card turn 20 (sticky window)
+  }
+}
+```
+
+**Detection Logic:**
+```python
+# Check if character needs full card this turn
+first_turn = character_first_turns.get(char_ref)
+is_first_appearance = (first_turn == absolute_turn)
+
+has_appeared_recently = character_has_appeared_recently(request.messages[-20:], char_name)
+is_returning = (first_turn < absolute_turn and not has_appeared_recently)
+
+full_card_turn = character_full_card_turns.get(char_ref)
+is_in_sticky_window = (
+    full_card_turn is not None and
+    absolute_turn - full_card_turn <= 2
+)
+
+# Full card if: first appearance OR returning OR in sticky window
+if is_first_appearance or is_returning or is_in_sticky_window:
+    chars_needing_full_card.append(char_ref)
+```
+
+**SCENE CAST Integration:**
+- Characters receiving full cards are **excluded** from SCENE CAST to prevent duplicates
+- Only capsules shown for characters NOT in `chars_needing_full_card`
+- Ensures: Full card OR capsule, never both
+
+**Behavior by Turn:**
+
+| Turn | Alice (first appearance) | Bob (turn 20 arrival) | Charlie (turn 50, returns 70) |
+|------|------------------------|------------------------|--------------------------------|
+| 1 | Full card | N/A (not active) | N/A (not active) |
+| 2 | Full card (sticky) | N/A | N/A |
+| 3 | Full card (sticky) | N/A | N/A |
+| 4+ | Capsule (SCENE CAST) | N/A | N/A |
+| 20 | Capsule | Full card | Capsule |
+| 21 | Capsule | Full card (sticky) | Capsule |
+| 22 | Capsule | Full card (sticky) | Capsule |
+| 23+ | Capsule | Capsule | Capsule |
+| 50 | Capsule | Capsule | Full card (returning) |
+| 51 | Capsule | Capsule | Full card (sticky) |
+| 52 | Capsule | Capsule | Full card (sticky) |
+| 53+ | Capsule | Capsule | Capsule |
+| 70 | Capsule | Capsule | Capsule |
+| 71 | Capsule | Capsule | Full card (returning) |
+| 72 | Capsule | Capsule | Full card (sticky) |
+| 73 | Capsule | Capsule | Full card (sticky) |
+| 74+ | Capsule | Capsule | Capsule |
+
+**Token Impact:**
+
+| Scenario | Old System | New Hybrid | Savings |
+|----------|-------------|-------------|----------|
+| Turn 1 (Alice first) | Full card (1500) + SCENE CAST (400) = 1900 | Full card (1500) only = 1500 | 400 tokens (no duplicate) |
+| Turns 2-3 (Alice) | Full card (1500) + SCENE CAST (400) = 1900 | Full card (1500) only = 1500 | 400 tokens (no duplicate) |
+| Turns 4+ (Alice) | SCENE CAST (400) | SCENE CAST (400) | Same |
+| Turn 20 (Bob joins) | Full card (1500) + SCENE CAST (600) = 2100 | Full card Bob (1500) + SCENE CAST Alice (400) = 1900 | 200 tokens (no duplicate Bob) |
+| Turn 70 (Charlie returns) | Capsule (200) + SCENE CAST (600) = 800 | Full card Charlie (1500) + SCENE CAST (600) = 2100 | -300 tokens (better reinforcement) |
+
+**Key Benefits:**
+1. **No Duplicates**: Full card OR capsule, never both
+2. **Strong Early Reinforcement**: Full cards on turns 1-3 establish voice
+3. **Efficient Long-Term**: Capsules after turn 3 maintain voice with minimal tokens
+4. **Smart Returns**: Reappearing characters get fresh full card + sticky window
+5. **Simple Logic**: Easy to understand, debug, and maintain
+
+**RP Optimization:**
+The 6-exchange verbatim window (12 messages) is specifically tuned for RP:
+- RP messages average ~250 tokens (descriptions, actions, dialogue, inner thoughts)
+- 10 exchanges = ~5,000 tokens (79% of 8k context) - triggers constant summarization
+- 6 exchanges = ~3,000 tokens (54% of 8k context) - healthy headroom
+- Result: More tokens available for complex scenes, world info, long responses
+
+---
+
+### SCENE UPDATE Blocks (v1.11.0+)
+
+**Overview:**
+SCENE UPDATE blocks are emitted when the active cast of characters changes during a conversation. They provide explicit notification to the LLM about who has entered or left the scene, ensuring accurate character portrayal in multi-character scenarios.
+
+**When SCENE UPDATE is Emitted:**
+
+SCENE UPDATE is triggered when the **active set** of characters changes:
+
+| Change Type | Triggers SCENE UPDATE | Example |
+|-------------|----------------------|---------|
+| Character joins | ✅ Yes | Alice is added to active characters mid-chat |
+| Character leaves | ✅ Yes | Bob is deactivated or removed from scene |
+| Focus change | ❌ No | Switching from Alice to Bob in Focus mode |
+| NPC created | ✅ Yes | New NPC added to conversation |
+| Character reappears | ✅ Yes | Character returning after absence (reset point) |
+
+**Important Distinction: Focus Changes Don't Count**
+- **Cast change**: Actual character added/removed from active set → SCENE UPDATE emitted
+- **Focus change**: Same cast, different character emphasized → NO SCENE UPDATE
+- **Rationale**: SCENE CAST already shows all active characters, focus change doesn't affect who's present
+
+**SCENE UPDATE Format:**
+
+```
+SCENE UPDATE
+- Alice has left the scene.
+- Bob has entered the scene.
+- Adjust your portrayal to reflect only the currently active characters listed in SCENE CAST below.
+```
+
+**Implementation Details:**
+
+**Cast Change Detection:**
+
+The `detect_cast_change()` function compares current and previous active sets:
+
+```python
+# Build current active set (entity IDs)
+current_set = set()
+for char in current_characters:
+    if char.get('is_active', True):
+        current_set.add(char.get('_filename'))
+for npc_id, npc in current_npcs.items():
+    if npc.get('is_active', True):
+        current_set.add(npc.get('entity_id') or npc_id)
+
+# Get previous set from metadata
+previous_set = set(previous_metadata.get('previous_active_cast', []))
+
+# Cast change = active set changed (focus change alone doesn't count)
+cast_changed = (current_set != previous_set)
+
+# Calculate departed and arrived
+departed = previous_set - current_set
+arrived = current_set - previous_set
+```
+
+**SCENE UPDATE Block Generation:**
+
+The `build_scene_update_block()` function constructs the notification:
+
+```python
+def build_scene_update_block(departed, arrived, entity_to_name):
+    """Build SCENE UPDATE block when cast changes."""
+    if not departed and not arrived:
+        return ""
+    
+    lines = ["SCENE UPDATE"]
+    
+    for entity_id in departed:
+        name = entity_to_name.get(entity_id, entity_id)
+        lines.append(f"- {name} has left the scene.")
+    
+    for entity_id in arrived:
+        name = entity_to_name.get(entity_id, entity_id)
+        lines.append(f"- {name} has entered the scene.")
+    
+    lines.append("- Adjust your portrayal to reflect only the currently active characters listed in SCENE CAST below.")
+    
+    return "\n".join(lines)
+```
+
+**Metadata Tracking:**
+
+Cast state is tracked in chat metadata:
+
+```python
+chat.metadata = {
+    "previous_active_cast": ["alice.json", "bob.json"],
+    "previous_focus_character": "alice.json"
+}
+```
+
+**Cast Change Turn Tracking:**
+
+Turns where cast changes are recorded for scene capsule summarization:
+
+```python
+chat.metadata = {
+    "cast_change_turns": [20, 45, 78]  # Turns where cast changed
+}
+```
+
+**Behavior Examples:**
+
+**Example 1: Character Joins Mid-Chat**
+- Turn 1-10: Alice and Bob in scene (active cast: {alice.json, bob.json})
+- Turn 11: User adds Charlie to active characters
+- Turn 11 SCENE UPDATE:
+  ```
+  SCENE UPDATE
+  - Charlie has entered the scene.
+  - Adjust your portrayal to reflect only the currently active characters listed in SCENE CAST below.
+  ```
+- Turn 11+ SCENE CAST: Shows Alice, Bob, Charlie capsules
+
+**Example 2: Character Leaves Scene**
+- Turn 1-20: Alice, Bob, Charlie in scene
+- Turn 21: User deactivates Alice
+- Turn 21 SCENE UPDATE:
+  ```
+  SCENE UPDATE
+  - Alice has left the scene.
+  - Adjust your portrayal to reflect only the currently active characters listed in SCENE CAST below.
+  ```
+- Turn 21+ SCENE CAST: Shows Bob, Charlie capsules (Alice excluded)
+
+**Example 3: Focus Change (NO SCENE UPDATE)**
+- Turn 1-10: Focus on Alice (active cast: {alice.json, bob.json})
+- Turn 11: User switches focus to Bob
+- Turn 11: NO SCENE UPDATE emitted (cast unchanged)
+- Turn 11 SCENE CAST: Still shows Alice and Bob capsules
+
+**Why SCENE UPDATE Matters:**
+
+1. **Explicit State Transitions**: LLM receives clear notification when scene composition changes
+2. **Accurate Portrayal**: Reduces hallucinations (e.g., Alice responding after leaving)
+3. **Context Consistency**: Ensures LLM knows exactly who should and shouldn't appear
+4. **Scene-Aware Summarization**: Cast change turns tracked for scene capsule boundaries
+
+**Token Cost:**
+
+| Scenario | Tokens | Frequency |
+|----------|---------|-----------|
+| SCENE UPDATE | 50-100 | On cast change only |
+
+**Placement in Context Assembly:**
+
+SCENE UPDATE appears in the conversation history section, right before SCENE CAST:
+
+```
+[Previous messages...]
+
+SCENE UPDATE
+- Alice has left the scene.
+- Bob has entered the scene.
+- Adjust your portrayal to reflect only the currently active characters listed in SCENE CAST below.
+
+SCENE CAST
+Alice: [capsule]
+Bob: [capsule]
+
+[Recent messages...]
+```
+
+**Integration with Scene Capsule Summarization:**
+
+Cast change turns are tracked in `metadata.cast_change_turns` and used as scene boundaries for scene capsule summarization (see [Scene Capsule Summarization](#scene-capsule-summarization-phase-4-v1110) below).
+
+---
 
 ---
 
@@ -844,9 +1315,9 @@ Even after initial character/world injection, LLMs naturally "forget" or "drift"
 
 **Context Hygiene Reasoning for World Reinforcement:**
 - **Hard Constraints**: Canon laws are rules that MUST NOT be violated (physics, magic system limits)
-- **Priority**: More critical than character reinforcement—breaking canon law breaks story logic
-- **Frequency**: Higher than character reinforcement (3 vs 5 turns default)
-  - Reason: World rules easier to forget than character personality
+- **Priority**: More critical than general character context—breaking canon law breaks story logic
+- **Frequency**: Periodic reinforcement (every 3 turns by default)
+   - Reason: World rules easier to forget than character personality
   - Example: "No flying" rule vs "Alice is shy"—world rule violated if forgotten even once
 - **No Bloat Risk**: Canon law typically 50-200 tokens (compact ruleset)
   - Unlike full character cards, canon law designed for brevity
@@ -937,12 +1408,12 @@ Think of reinforcement like cleaning a house:
 - **Frequency Tuning**: Too frequent = wasted effort, too infrequent = mess accumulates
 
 **User Control:**
-- `reinforce_freq`: 1-100 (1 = every turn, 100 = rarely)
-- `world_info_reinforce_freq`: 1-100 (separate control for canon law)
+- `world_info_reinforce_freq`: 1-100 (canon law reinforcement frequency)
+- **SCENE CAST**: Automatically shown every turn with all active characters (no user control needed)
 - **Recommended Defaults**:
-  - Most users: 5 turns character, 3 turns world (balanced)
-  - Short chats (<20 turns): Set to 10 (less reinforcement needed)
-  - Long chats (>100 turns): Set to 3 (more reinforcement needed)
+  - Canon law: 3 turns (balanced for most worlds)
+  - Short chats (<20 turns): Set world_reinforce_freq to 10 (less reinforcement needed)
+  - Long chats (>100 turns): Set world_reinforce_freq to 3 (more reinforcement needed)
 
 **Key Changes in v1.7.1:**
 - Reinforcement logic moved outside message iteration loop
@@ -962,6 +1433,14 @@ Think of reinforcement like cleaning a house:
 - Removed edited_characters parameter from PromptRequest model
 - Removed editedCharactersThisTurn tracking from frontend
 - Updated documentation to reflect simplified logic
+
+**Key Changes in v1.11.0 (Scene-First Architecture):**
+- Removed periodic character reinforcement system
+- SCENE CAST shown every turn with all active characters
+- Character consistency maintained through regular reinforcement (every turn vs periodic)
+- Deprecated `reinforce_freq` setting
+- Sticky window (first 3 turns) maintained for full card injection
+- Improved context hygiene with 6-exchange history window (RP-optimized)
 
 **Key Changes in v1.8.2 (Sticky First 3 Turns):**
 - Added sticky window logic: character cards/capsules injected on turns 1, 2, 3
@@ -1015,56 +1494,90 @@ needs_injection = (
 
 **Behavior:**
 
-| Turn | Injection Type | Content | Tokens | Persistence |
-|------|---------------|----------|---------|-------------|
-| **1** | First appearance | Full card (single) / Capsule (multi) | 1000 / 100 | `character_first_turns[ref] = 1` |
-| **2** | Sticky window | Full card (single) / Capsule (multi) | 1000 / 100 | Stored in metadata |
-| **3** | Sticky window | Full card (single) / Capsule (multi) | 1000 / 100 | Stored in metadata |
-| **4-5** | None | No injection | 0 | N/A |
-| **6** | Reinforcement | Description + personality | 500 | N/A |
+ | Turn | Injection Type | Content | Tokens | Persistence |
+ |------|---------------|----------|---------|-------------|
+ | **1** | Reset point (first appearance) | Full card | 1000-1500 | `character_first_turns[ref] = 1`<br/>`character_full_card_turns[ref] = 1` |
+ | **2** | Sticky window | Full card | 1000-1500 | `character_full_card_turns[ref] = 1`<br/>(within 2 turns of first) |
+ | **3** | Sticky window | Full card | 1000-1500 | `character_full_card_turns[ref] = 1`<br/>(within 2 turns of first) |
+ | **4-20+** | SCENE CAST | Capsules (all chars) | 50-150 per char | N/A |
+ | **Return (after 20+ msg absence)** | Reset point | Full card | 1000-1500 | `character_first_turns[ref] = return_turn`<br/>`character_full_card_turns[ref] = return_turn` |
 
-**Token Budget Impact (10 turns, reinforce_freq=5):**
+**Token Budget Impact (SCENE CAST every turn):**
 
-| Mode | Without Sticky Window | With Sticky Window | Increase |
-|-------|---------------------|-------------------|-----------|
-| **Single character** | 1,500 tokens | 3,500 tokens | +133% (+2000) |
-| **Multi-character (2 chars)** | 1,100 tokens | 1,300 tokens | +18% (+200) |
+| Mode | SCENE CAST | Token Cost |
+|-------|-----------|------------|
+| **Single character** | Fallback capsule (desc + pers) | ~100 tokens |
+| **Multi-character (2 chars)** | Two capsules | ~200 tokens |
+| **Multi-character (5 chars)** | Five capsules | ~500 tokens |
 
-**Why Sticky Window vs Just More Frequent Reinforcement?**
+**Why Hybrid SCENE CAST + Sticky Full Cards vs Old Reinforcement?**
 
-| Approach | Token Cost | Early Consistency | Code Complexity |
-|----------|-------------|------------------|----------------|
-| **Reduce reinforce_freq to 2** | 2,500 tokens (5 reinforcements) | Good (+500 tokens) | Minimal (setting change) |
-| **Sticky window (turns 1-3)** | 3,500 tokens (3 sticky + 1 reinforcement) | Excellent (full context) | Low (+30 lines code) |
-| **Both (sticky + reinforce_freq=2)** | 4,500 tokens | Excellent | Low |
+ | Approach | Token Cost (Turns 1-3) | Token Cost (Turns 4+) | Consistency | Code Complexity |
+ |----------|------------------------|---------------------|-------------|----------------|
+ | **Periodic reinforcement (old)** | 1,500 tokens | 1,500 tokens | Good (degrades over time) | Moderate (timing logic) |
+ | **Hybrid (current)** | 3,000-4,500 tokens (full cards) | 400-600 tokens (SCENE CAST) | Excellent (full cards + capsules) | Low (simple detection) |
 
-**Rationale for Sticky Window Approach:**
+**Rationale for Hybrid Approach:**
 
-1. **Voice Fingerprint Preservation**: Full cards include `scenario` and `mes_example` (dialogue examples) that provide "voice fingerprints" for the LLM
-   - Without sticky window: Only description + personality on turns 2-5 (no dialogue examples)
-   - With sticky window: Full context including dialogue examples on turns 2-3
+1. **Attention Decay**: Modern LLMs (8k+ context) pay less attention to content from turns 1-10 than turns 80-90
+   - Sticky full cards: Strong reinforcement on turns 1-3 when attention is highest
+   - SCENE CAST: Consistent character presence prevents drift on turns 4+
 
-2. **Early-Conversation Quality**: First few turns establish character voice and relationship dynamics
-   - Drift in early turns has disproportionate impact on overall conversation quality
-   - LLMs that "learn wrong voice" in early turns are harder to correct later
+2. **Character Voice Consistency**: Full cards + capsules beat more dialog in context
+   - Sticky window (turns 1-3): Full cards with dialogue examples for strong voice establishment
+   - SCENE CAST (turns 4+): Capsules (50-100 tokens each) maintain voice fingerprints
+   - 6-exchange history window prevents attention decay while maintaining recency
 
-3. **Token Efficiency vs Benefits**:
-   - +133% tokens for single char (1500 → 3500) is acceptable given quality improvement
-   - +18% tokens for multi-char (1100 → 1300) is negligible
+3. **Token Budget Efficiency**:
+   - Sticky window: ~3,000-4,500 tokens (full cards) for strong early reinforcement
+   - Turns 4+: ~400-600 tokens (SCENE CAST capsules) for sustained consistency
+   - 6 exchanges (12 messages) vs 10 exchanges (20 messages): Saves ~1500-2000 tokens per turn
+   - RP-optimized window: Long descriptive messages require tighter token management
 
-4. **Simple Implementation**: ~30 lines of code, uses existing metadata pattern (same as capsules)
-   - No frontend changes needed
-   - Automatic persistence to chat.metadata
-   - Works for both characters and NPCs
+4. **Simple Implementation**: Single injection point every turn
+    - No timing logic or turn calculations needed
+    - Works seamlessly with 6-exchange history window
+    - Enables 5-6 character group chats
+    - RP-optimized token budget for long descriptive messages
 
 **Edge Cases:**
 
-| Scenario | Behavior | Rationale |
-|----------|-----------|-----------|
-| **Character added mid-chat (turn 50)** | Sticky window on turns 50, 51, 52 | New character needs early consistency too |
-| **Character toggled off then on** | New sticky window (first turn reset) | Treated as fresh appearance |
-| **Chat resumed from saved session** | Sticky window preserved (first_turns loaded from metadata) | Persistence ensures consistent behavior |
-| **Reinforcement turn (6) during sticky window** | Reinforcement skipped (chars_injected_this_turn not empty) | Avoids duplication |
+ | Scenario | Behavior | Rationale |
+ |----------|-----------|-----------|
+ | **Character added mid-chat (turn 50)** | Full card on turns 50, 51, 52 | New character needs early consistency too |
+ | **Character toggled off then on** | Full card (reset point) | Treated as fresh appearance |
+| **Character returns after 20+ msg absence** | Full card (reset point) | Re-establish presence after long absence |
+| **Chat resumed from saved session** | Full cards preserved (first_turns + full_card_turns loaded from metadata) | Persistence ensures consistent behavior |
+
+**New Chat Persistence Fix (Session 10, v1.8.2):**
+
+**Problem: characterFirstTurns Not Saved for New Chats**
+
+When starting a fresh chat:
+1. Frontend generates temporary chat ID (e.g., `new_chat_42e8fd52...`)
+2. Backend processes first message, calculates `character_first_turns` and `character_full_card_turns`
+3. Both stored in backend memory
+4. User sends second message → Both still in memory ✓
+5. User closes tab → Backend memory lost ✗
+6. User reopens chat → Fresh `character_first_turns` and `character_full_card_turns` created, logic broken ✗
+
+**Fix: Two-Part Fix**
+
+```python
+# Part 1: Create chat record if doesn't exist (main.py:4158-4167)
+if request.chat_id and (character_first_turns or character_full_card_turns):
+    chat = db_get_chat(request.chat_id)
+    if not chat:
+        # Create minimal record first
+        chat = {"messages": [], "metadata": {}, "summary": ""}
+        db_save_chat(request.chat_id, chat)
+    # Now save both metadata fields
+    metadata = chat.get("metadata", {})
+    metadata["characterFirstTurns"] = character_first_turns
+    metadata["characterFullCardTurns"] = character_full_card_turns
+    chat["metadata"] = metadata
+    db_save_chat(request.chat_id, chat)
+```
 
 **New Chat Persistence Fix (Session 10, v1.8.2):**
 
@@ -1159,11 +1672,13 @@ In v1.8.1, the edit override system was removed. Edited characters now follow th
 | `edited_characters` parameter tracked | No edit tracking needed |
 | Separate injection logic for edits | Unified logic for all injections |
 
-**Rationale for Removal:**
-- Simplified code (-90% complexity)
-- Unified logic for all character injections
-- Token tradeoff: +36% reinforcement tokens, but significantly reduced maintenance burden
-- Edited characters appear on next reinforcement turn (up to `reinforce_freq` turns delay)
+**Rationale for Scene-First Architecture (v1.11.0):**
+- Regular character reinforcement beats more dialog in context
+- SCENE CAST ensures consistent voice across 50+ turn conversations
+- 6-exchange history window (RP-optimized) prevents attention decay while maintaining recency
+- Sticky full cards (turns 1-3 + reset points) provide strong early reinforcement
+- Higher baseline token cost (~400-600 tokens/turn) enables better character consistency
+- Edited characters appear with updated capsules on next turn
 
 ### Chat Modes
 
@@ -2899,14 +3414,11 @@ All character cards (both global characters and local NPCs) use the following JS
     "character_version": "",
     "character_book": null,
     "extensions": {
-      "depth_prompt": {
-        "prompt": "Additional context instructions",
-        "depth": 4
-      },
       "talkativeness": 100,
       "danbooru_tag": "",
       "label_description": "",
-      "multi_char_summary": "Capsule summary for multi-character chats"
+      "multi_char_summary": "Capsule summary for multi-character chats",
+      "gender": ""
     }
   }
 }
@@ -2916,21 +3428,19 @@ All character cards (both global characters and local NPCs) use the following JS
 
 The "Generate Character Card from Chat" UI (`app/index.html` cardGen interface) maps UI fields to SillyTavern V2 JSON fields as follows:
 
-| UI Field | JSON Field | Description |
-|-----------|-------------|-------------|
-| **Physical Body (PList)** | `description` | Physical description with char_name prefix (e.g., "Alice is tall, athletic, with blue eyes") |
-| **Example Dialogue** | `mes_example` | Dialogue exchanges with `<START>` markers for LLM guidance |
-| **Personality** | `personality` | Comma-separated personality traits |
-| **Scenario** | `scenario` | One-sentence opening situation |
-| **First Message** | `first_mes` | Character's opening greeting |
-| **Genre** | `creator_notes` | Genre metadata (e.g., "[Genre: Fantasy]") |
-| **depth_prompt.prompt** | `extensions.depth_prompt.prompt` | Empty string (genre moved to creator_notes) |
+ | UI Field | JSON Field | Description |
+ |-----------|-------------|-------------|
+ | **Physical Body (PList)** | `description` | Physical description with char_name prefix (e.g., "Alice is tall, athletic, with blue eyes") |
+ | **Example Dialogue** | `mes_example` | Dialogue exchanges with `<START>` markers for LLM guidance |
+ | **Personality** | `personality` | Comma-separated personality traits |
+ | **Scenario** | `scenario` | One-sentence opening situation |
+ | **First Message** | `first_mes` | Character's opening greeting |
+ | **Genre** | `creator_notes` | Genre metadata (e.g., "[Genre: Fantasy]") |
 
 **Key Implementation Details:**
 
 - **Line 4849**: `description: this.cardGen.fields.body || ""` - Maps Physical Body field directly
 - **Line 4853**: `mes_example: this.cardGen.fields.dialogue || ""` - Maps Example Dialogue field (with `<START>` markers)
-- **Line 4863**: `depth_prompt: {prompt: "", depth: 4}` - Empty string (genre only in creator_notes)
 - **Line 4859**: `creator_notes: character_note` - Contains genre metadata like "[Genre: Fantasy]"
 
 **Why These Mappings?**
@@ -2939,29 +3449,26 @@ The "Generate Character Card from Chat" UI (`app/index.html` cardGen interface) 
 |--------|---------|
 | `description` = Physical Body | Provides grounding for appearance in single-character reinforcement |
 | `mes_example` = Dialogue | Gives LLM voice examples showing how character speaks (critical for multi-character chats) |
-| `depth_prompt.prompt` = empty | Prevents bloat; genre moved to creator_notes for reference only |
 | `creator_notes` = Genre | Preserves metadata without polluting context |
 
 ### Field Mappings: NPC Creation → JSON
 
 NPCs created via `POST /api/card-gen/generate-field` with `save_as='local_npc'` map LLM-generated content to SillyTavern V2 JSON fields identically to global characters:
 
-| LLM-Generated Field | JSON Field | Source |
-|---------------------|-------------|---------|
-| **PHYSICAL_TRAITS** | `description` | LLM generates physical traits, formatted as "{char_name} is trait1, trait2, trait3" |
-| **DIALOGUE_EXAMPLES** | `mes_example` | LLM generates 2-3 dialogue exchanges with `<START>` markers |
-| **PERSONALITY_TRAITS** | `personality` | Comma-separated traits converted to string |
-| **SCENARIO** | `scenario` | Opening scenario for first meeting |
-| **FIRST_MESSAGE** | `first_mes` | Character's greeting with actions and speech |
-| **GENRE** | `creator_notes` | Genre metadata (e.g., "[Genre: SciFi]") |
-| **depth_prompt.prompt** | `extensions.depth_prompt.prompt` | Empty string (genre moved to creator_notes) |
+ | LLM-Generated Field | JSON Field | Source |
+ |---------------------|-------------|---------|
+ | **PHYSICAL_TRAITS** | `description` | LLM generates physical traits, formatted as "{char_name} is trait1, trait2, trait3" |
+ | **DIALOGUE_EXAMPLES** | `mes_example` | LLM generates 2-3 dialogue exchanges with `<START>` markers |
+ | **PERSONALITY_TRAITS** | `personality` | Comma-separated traits converted to string |
+ | **SCENARIO** | `scenario` | Opening scenario for first meeting |
+ | **FIRST_MESSAGE** | `first_mes` | Character's greeting with actions and speech |
+ | **GENRE** | `creator_notes` | Genre metadata (e.g., "[Genre: SciFi]") |
 
 **Key Implementation Details (main.py:2545-2706):**
 
 - **Line 2555-2570**: LLM prompt generates `PHYSICAL_TRAITS`, `PERSONALITY_TRAITS`, `SCENARIO`, `FIRST_MESSAGE`, `DIALOGUE_EXAMPLES`, and `GENRE` sections
 - **Line 2655-2658**: `body_desc = f"{char_name} is {', '.join(physical_traits)}."` - Formats physical traits for `description` field
 - **Line 2670**: `mes_example: dialogue_examples` - Maps dialogue to `mes_example` field (not `description` field as in v1.7.x)
-- **Line 2681**: `depth_prompt: {prompt: "", depth: 4}` - Empty string (genre only in creator_notes)
 - **Line 2680**: `creator_notes` with genre - Contains "[Genre: {genre}]" metadata
 
 **Why These Mappings?**
@@ -2970,21 +3477,20 @@ NPCs created via `POST /api/card-gen/generate-field` with `save_as='local_npc'` 
 |--------|---------|
 | `description` = Physical Traits | Ensures NPC description includes grounding info (appearance) for single-character reinforcement |
 | `mes_example` = Dialogue | Provides voice examples for multi-character chats, critical for distinguishing NPC voices |
-| `depth_prompt.prompt` = empty | Prevents context bloat; genre metadata moved to creator_notes for reference |
 | Fallback for DIALOGUE_EXAMPLES | If LLM fails to generate dialogue, NPC gets default template with char_name substitution |
 
 ### Consistency Between Characters and NPCs
 
 Both character types use identical field mappings, ensuring consistent behavior in:
 
-| System Component | Character Behavior | NPC Behavior |
-|------------------|-------------------|----------------|
-| **Initial Injection (Turn 1)** | Full card (description + personality + mes_example + scenario) | Full card (description + personality + mes_example + scenario) |
-| **First Appearance Detection** | `character_has_speaker()` prevents redundant injections | `character_has_speaker()` prevents redundant injections |
-| **Single-Character Reinforcement** | PList (depth_prompt) + description every N turns | PList (depth_prompt) + description every N turns |
-| **Multi-Character Reinforcement** | Capsule (multi_char_summary) every N turns | Capsule (multi_char_summary) every N turns |
-| **Context Assembly** | Treated identically via `load_character_profiles()` | Treated identically via `load_character_profiles()` |
-| **Relationship Tracking** | Entity IDs used for both types | Entity IDs used for both types |
+ | System Component | Character Behavior | NPC Behavior |
+ |------------------|-------------------|----------------|
+ | **Initial Injection (Turn 1)** | Full card (description + personality + mes_example + scenario) | Full card (description + personality + mes_example + scenario) |
+ | **First Appearance Detection** | `character_has_speaker()` prevents redundant injections | `character_has_speaker()` prevents redundant injections |
+ | **Single-Character Reinforcement** | SCENE CAST every turn (v1.11.0+) | SCENE CAST every turn (v1.11.0+) |
+ | **Multi-Character Reinforcement** | Capsule (multi_char_summary) every turn | Capsule (multi_char_summary) every turn |
+ | **Context Assembly** | Treated identically via `load_character_profiles()` | Treated identically via `load_character_profiles()` |
+ | **Relationship Tracking** | Entity IDs used for both types | Entity IDs used for both types |
 
 **Key Consistency Principle:**
 
@@ -2998,18 +3504,17 @@ This means:
 
 ### Field Mapping Changes in v1.8.0
 
-| Field | Before v1.8.0 | After v1.8.0 | Reason |
-|-------|----------------|----------------|--------|
-| `description` | `FULL_DESCRIPTION` (narrative) | `PHYSICAL_TRAITS` (appearance) | Prioritizes grounding for reinforcement |
-| `mes_example` | Empty string | `DIALOGUE_EXAMPLES` (with `<START>`) | Provides voice examples for multi-char chats |
-| `depth_prompt.prompt` | Genre metadata | Empty string | Reduces context bloat |
-| `creator_notes` | Genre only | Genre only | Genre metadata for reference (unchanged) |
+ | Field | Before v1.8.0 | After v1.8.0 | Reason |
+ |-------|----------------|----------------|--------|
+ | `description` | `FULL_DESCRIPTION` (narrative) | `PHYSICAL_TRAITS` (appearance) | Prioritizes grounding for reinforcement |
+ | `mes_example` | Empty string | `DIALOGUE_EXAMPLES` (with `<START>`) | Provides voice examples for multi-char chats |
+ | `creator_notes` | Genre only | Genre only | Genre metadata for reference (unchanged) |
 
 **Impact on Context Hygiene:**
 
 - **Reduced redundancy**: `description` field now contains appearance (used in reinforcement) instead of narrative (already known from initial injection)
 - **Improved multi-char voice**: `mes_example` field now contains dialogue examples, enabling LLM to distinguish NPC voices in group chats
-- **Cleaner reinforcement**: `depth_prompt.prompt` is empty, reducing token overhead while maintaining behavioral guidance
+- **SCENE CAST architecture** (v1.11.0+): Characters reinforced every turn via SCENE CAST instead of periodic reinforcement cycles
 
 ### API Endpoints
 
@@ -3983,14 +4488,432 @@ This keeps the mental model simple: each branch is its own story.
 When conversation context grows too large, NeuralRP automatically summarizes older messages to stay within the model's context window.
 
 **Trigger Conditions**:
-- Total tokens > 85% of model's max context
+- Total tokens > 80% of model's max context (configurable via `summarize_threshold`, default 0.80)
 - Message count > 10 (minimum for summarization)
+- Cast change: Character departs scene (triggers scene capsule)
 
 **Process**:
 1. Take oldest 10 messages
 2. Send to LLM for summary generation (150 tokens max)
 3. Prepend new summary to existing summary field
 4. Mark messages as `summarized=1` (soft delete, v1.6.0)
+
+**Scene Capsule Summarization (Phase 4, v1.11.0+):**
+
+**Overview:**
+Scene capsule summarization is an advanced async post-response summarization system that groups old messages into scene-based capsules. This provides better narrative context than flat summaries by respecting scene boundaries and cast changes.
+
+**Key Differences from Traditional Summarization:**
+
+| Aspect | Traditional (v1.10.4-) | Scene Capsule (v1.11.0+) |
+|---------|---------------------------|----------------------------|
+| **Trigger** | Threshold only (context > 80%) | Threshold + Cast Change |
+| **Grouping** | Flat batches (10 messages) | Scene-aware (by cast changes) |
+| **Capsule Size** | 150 tokens | 200 tokens |
+| **Execution** | Synchronous (blocks generation) | Async (post-response, non-blocking) |
+| **Boundaries** | Fixed (10 messages) | Dynamic (cast changes + 15 exchanges) |
+| **Scene Tracking** | None | Explicit scene boundaries tracked |
+
+**Two Trigger Types:**
+
+**1. Cast-Change Trigger:**
+- **When**: Character departs scene (detected by `detect_cast_change()`)
+- **What**: All old messages (since last cast change) summarized into one capsule
+- **Why**: Complete scene captured before cast changes, preserving narrative arc
+
+**2. Threshold Trigger:**
+- **When**: Context exceeds 80% threshold (`summarize_threshold` config)
+- **What**: Old messages grouped into scenes and summarized separately
+- **Scene Boundaries**: At cast changes OR every 15 exchanges
+- **Why**: Progressive summarization respects natural scene breaks
+
+**Scene Boundary Detection:**
+
+The `group_messages_into_scenes()` function creates scene boundaries:
+
+```python
+def group_messages_into_scenes(
+    messages: List[ChatMessage],
+    cast_change_turns: List[int],
+    max_exchanges_per_scene: int = 15
+) -> List[Tuple[int, int, List[ChatMessage]]]:
+    """
+    Groups old messages into scenes based on cast changes.
+    
+    Scene boundaries at:
+    1. Cast change turns (from cast_change_turns)
+    2. Every 15 exchanges (max_exchanges_per_scene)
+    """
+    scenes = []
+    current_scene = []
+    current_scene_start = 0
+    turn_counter = 0
+    exchange_count = 0
+    
+    for msg in messages:
+        current_scene.append(msg)
+        
+        if msg.role == 'user':
+            turn_counter += 1
+            exchange_count += 1
+            
+            # Check if this is a cast boundary
+            is_cast_boundary = turn_counter in cast_change_turns
+            
+            # Check if we've hit max exchanges per scene
+            is_exchange_boundary = exchange_count >= max_exchanges_per_scene
+            
+            if is_cast_boundary or is_exchange_boundary:
+                scenes.append((current_scene_start, turn_counter, current_scene))
+                current_scene = []
+                current_scene_start = turn_counter + 1
+                exchange_count = 0
+    
+    # Add remaining messages as final scene
+    if current_scene:
+        scenes.append((current_scene_start, turn_counter, current_scene))
+    
+    return scenes
+```
+
+**Example Scene Grouping:**
+
+```
+Turn 1-15: Alice, Bob conversation (Scene 1)
+Turn 16: Bob departs
+Turn 17-31: Alice solo (Scene 2)
+Turn 32: Charlie joins
+Turn 33-47: Alice, Charlie (Scene 3)
+Turn 48: Context > 80% (threshold trigger)
+
+Grouped Scenes:
+- Scene 1 (Turns 1-15): Alice + Bob [15 exchanges, cast change boundary]
+- Scene 2 (Turns 16-31): Alice solo [15 exchanges, cast change boundary]
+- Scene 3 (Turns 32-47): Alice + Charlie [15 exchanges, max exchanges boundary]
+```
+
+**Scene Capsule Generation:**
+
+The `generate_scene_capsule()` function creates 200-token scene summaries:
+
+```python
+async def generate_scene_capsule(
+    messages: List[ChatMessage],
+    start_turn: int,
+    end_turn: int,
+    departed_note: str = "",
+    canon_law_entries: List[str] = None
+) -> str:
+    """
+    Generate scene capsule from messages.
+    
+    Requirements:
+    - Neutral, factual, past-tense prose
+    - Key events and plot developments
+    - Relationship changes between characters
+    - World information discovered
+    - Character entries/exits
+    """
+    
+    conversation_text = format_conversation_text(messages)
+    
+    departed_section = ""
+    if departed_note:
+        departed_section = f"{departed_note}\n\n"
+    
+    canon_section = ""
+    if canon_law_entries:
+        canon_section = f"Canon Law Echo:\n{canon_law_entries}\n\n"
+    
+    prompt = f"""### System: Summarize the following conversation into a scene capsule.
+
+Requirements:
+- Use neutral, factual, past-tense prose
+- Include key events and plot developments
+- Note relationship changes between characters
+- Record any world information discovered
+- Explicitly mention when characters enter or exit
+
+Do NOT:
+- Mimic character voices or speech patterns
+- Include direct dialogue quotes
+- Add stylistic flourishes
+
+{departed_section}{canon_section}### Conversation (Turns {start_turn}-{end_turn}):
+{conversation_text}
+
+### Scene Capsule:
+Scene (Turns {start_turn}-{end_turn}):"""
+
+    result = await call_llm_helper(system_prompt, prompt, 200)
+    return result.strip()
+```
+
+**Async Post-Response Execution:**
+
+Both triggers run asynchronously after LLM generation completes:
+
+```python
+async def trigger_cast_change_summarization(
+    chat_id: str,
+    departed_characters: Set[str],
+    entity_to_name: Dict[str, str],
+    canon_law_entries: List[str] = None
+):
+    """Summarize old messages when character departs (async, non-blocking)."""
+    try:
+        chat = db_get_chat(chat_id)
+        messages = chat.get('messages', [])
+        
+        # Find oldest unsummarized messages
+        old = [m for m in messages if m.get('summarized', 0) == 0]
+        
+        if not old:
+            return
+        
+        start_turn = calculate_turn_for_message(messages, old[0].id)
+        end_turn = calculate_turn_for_message(messages, len(messages) - 1)
+        
+        departed_names = [entity_to_name.get(e, e) for e in departed_characters]
+        departed_note = f"Note: {', '.join(departed_names)} exited during this scene. Mention their departure."
+        
+        scene_capsule = await generate_scene_capsule(
+            old, start_turn, end_turn,
+            departed_note=departed_note,
+            canon_law_entries=canon_law_entries
+        )
+        
+        if not scene_capsule:
+            logger.warning(f"Cast-change summarization: failed for chat {chat_id}")
+            return
+        
+        existing_summary = chat.get('summary', '')
+        new_summary = (existing_summary + "\n\n" + scene_capsule).strip()
+        chat['summary'] = new_summary
+        db_save_chat(chat_id, chat)
+        
+        logger.info(f"Cast-change summarization completed for chat {chat_id}")
+        
+    except Exception as e:
+        logger.error(f"Cast-change summarization failed for chat {chat_id}: {e}")
+        logger.exception(e)
+
+
+async def trigger_threshold_summarization(
+    chat_id: str,
+    canon_law_entries: List[str] = None
+):
+    """Summarize old messages when context exceeds 70% threshold (async, non-blocking)."""
+    try:
+        chat = db_get_chat(chat_id)
+        messages = chat.get('messages', [])
+        
+        # Get current token count
+        prompt = construct_prompt(...)
+        token_count = await get_token_count(prompt)
+        max_ctx = request.settings.get('max_context', CONFIG['max_context'])
+        
+        if token_count / max_ctx < 0.70:
+            return
+        
+        # Find oldest unsummarized messages
+        old = [m for m in messages if m.get('summarized', 0) == 0]
+        
+        if not old:
+            return
+        
+        metadata = chat.get('metadata', {})
+        cast_change_turns = metadata.get('cast_change_turns', [])
+        
+        # Group messages into scenes
+        scenes = group_messages_into_scenes(old, cast_change_turns, max_exchanges_per_scene=15)
+        
+        if not scenes:
+            logger.warning(f"Threshold summarization: no scenes for chat {chat_id}")
+            return
+        
+        # Generate capsules for each scene
+        capsules = []
+        for start, end, scene_msgs in scenes:
+            capsule = await generate_scene_capsule(
+                scene_msgs, start, end,
+                departed_note="",
+                canon_law_entries=canon_law_entries
+            )
+            if capsule:
+                capsules.append(capsule)
+        
+        # Combine and save
+        if capsules:
+            existing_summary = chat.get('summary', '')
+            new_summary = (existing_summary + "\n\n" + "\n\n".join(capsules)).strip()
+            chat['summary'] = new_summary
+            db_save_chat(chat_id, chat)
+            
+            logger.info(f"Threshold summarization completed for chat {chat_id} ({len(scenes)} scenes)")
+        
+    except Exception as e:
+        logger.error(f"Threshold summarization failed for chat {chat_id}: {e}")
+        logger.exception(e)
+```
+
+**Cast Change Turn Tracking:**
+
+Turns where cast changes are recorded in metadata:
+
+```python
+# In /api/chat endpoint, after cast change detection
+if cast_changed:
+    metadata = chat.get('metadata', {})
+    if "cast_change_turns" not in metadata:
+        metadata["cast_change_turns"] = []
+    if current_turn_num not in metadata["cast_change_turns"]:
+        metadata["cast_change_turns"].append(current_turn_num)
+        metadata["cast_change_turns"].sort()
+        chat['metadata'] = metadata
+        db_save_chat(chat_id, chat)
+```
+
+**Best-Effort Failure Handling:**
+
+Both triggers use best-effort error handling:
+- **Logging**: Errors logged with full exception details
+- **Silent Failure**: No user notification, LLM generation proceeds normally
+- **Retry**: Failed summarization can be retried on next cast change or threshold
+- **Graceful Degradation**: Summary field may be missing some capsules, but conversation continues
+
+**Why Async (Post-Response)?:**
+
+| Approach | Pros | Cons | Verdict |
+|----------|-------|-------|---------|
+| **Sync (before generation)** | Ensures capsules ready | Blocks LLM generation, poor UX | ❌ |
+| **Async (post-response)** | Non-blocking, better UX | Capsules may lag 1 turn | ✅ Chosen |
+
+**Rationale**: Users wait for LLM response anyway. Summarization in background doesn't add perceived latency.
+
+**Scene Capsule Format:**
+
+```
+Scene (Turns 1-15): Alice and Bob met at the village square. Alice expressed concern about the missing artifact, while Bob suggested investigating the ancient ruins nearby. They agreed to set out at dawn. Both showed hesitation about entering the ruins due to rumors of dangerous creatures.
+
+Scene (Turns 16-31): Alice traveled alone through the forest, noting the unusual silence and lack of wildlife. She discovered an old trail marker pointing toward the ruins. Upon arriving, she observed strange symbols on the entrance stones that matched descriptions in the village elder's journal.
+
+Scene (Turns 32-47): Alice and Charlie reunited at the ruins entrance. Charlie revealed he had been tracking her and wanted to join the expedition. Alice was initially suspicious but accepted his help after he demonstrated knowledge of the symbols. Together they deciphered the entrance puzzle and gained access to the inner chamber.
+```
+
+**Benefits Over Flat Summaries:**
+
+1. **Narrative Coherence**: Scene boundaries preserve natural story arcs
+2. **Cast Context**: Scene capsules note character entries/exits explicitly
+3. **Better Recall**: Scene-level organization easier for LLM to reference
+4. **Cast Awareness**: Departed character mentions in capsules
+5. **Canon Law Echo**: Active canon law included in summarization prompt
+6. **Progressive Detail**: 200 tokens per scene vs 150 for flat summary
+
+**Token Budget Impact:**
+
+| Scenario | Traditional | Scene Capsule | Difference |
+|----------|-------------|----------------|-------------|
+| 10 messages, no cast change | 150 tokens | 200 tokens (1 scene) | +50 tokens |
+| 30 messages, 2 cast changes | 150 tokens | 600 tokens (3 scenes) | +450 tokens |
+| 45 messages, 3 cast changes | 300 tokens (2 batches) | 800 tokens (4 scenes) | +500 tokens |
+
+**Tradeoff Analysis:**
+- **Cost**: +50-500 tokens per summarization event
+- **Benefit**: Better narrative context, scene-aware grouping, cast tracking
+- **Verdict**: Worth it for complex multi-character scenes
+
+**Configuration:**
+
+| Setting | Default | Range | Purpose |
+|---------|---------|--------|---------|
+| `summarize_threshold` | 0.80 | 0.50-1.00 | Context percentage triggering threshold summarization |
+| `max_exchanges_per_scene` | 15 | 5-50 | Maximum exchanges before forcing scene boundary |
+
+**Metadata Structure:**
+
+```python
+chat.metadata = {
+    "cast_change_turns": [15, 32, 78],  # Turns where cast changed
+    "characterFirstTurns": {...},
+    "characterCapsules": {...}
+}
+```
+
+**Canon Law Echo:**
+
+When generating scene capsules, active canon law entries are included in the summarization prompt:
+
+```
+Canon Law Echo:
+- Magic system prohibits time travel (Law #3)
+- Ancient ruins protected by guardian spirits (Law #7)
+
+### Conversation (Turns 1-15):
+[conversation text...]
+
+### Scene Capsule:
+Scene (Turns 1-15): Alice and Bob met at the village square...
+```
+
+This ensures world rules are preserved in scene summaries.
+
+**Integration with Other Systems:**
+
+**With SCENE UPDATE Blocks:**
+- SCENE UPDATE emitted when cast changes
+- Cast change turn recorded in `metadata.cast_change_turns`
+- Scene capsule summarization uses cast change turns as scene boundaries
+
+**With Hybrid SCENE CAST System:**
+- Scene capsules preserve cast transitions (Alice enters, Bob leaves)
+- SCENE UPDATE blocks maintain accurate cast representation
+- Scene-aware summarization respects natural scene breaks
+
+**With Soft Delete System:**
+- Messages marked `summarized=1` after scene capsule generation
+- Preserved in database for search and relationship tracking
+- Excluded from active conversation context
+
+**Example Workflow:**
+
+**Scenario: Multi-Character Chat with Cast Changes**
+
+1. **Turn 1-15**: Alice, Bob conversation
+   - SCENE CAST: Alice capsule, Bob capsule
+   - No SCENE UPDATE (cast unchanged)
+
+2. **Turn 16**: Bob deactivated
+   - Cast change detected (Bob leaves)
+   - Turn 16 recorded in `metadata.cast_change_turns`
+   - SCENE UPDATE emitted: "Bob has left the scene."
+   - SCENE CAST: Alice capsule only (Bob excluded)
+   - **Async trigger**: Cast-change summarization starts in background
+   - Scene capsule generated for turns 1-15
+
+3. **Turn 17**: User responds (async summary completes)
+   - Summary field updated with "Scene (Turns 1-15): Alice and Bob met..."
+   - Conversation continues normally
+
+4. **Turn 32**: Charlie added to scene
+   - Cast change detected (Charlie joins)
+   - Turn 32 recorded in `metadata.cast_change_turns`
+   - SCENE UPDATE emitted: "Charlie has entered the scene."
+   - SCENE CAST: Alice capsule, Charlie capsule
+   - **Async trigger**: Cast-change summarization starts in background
+   - Scene capsule generated for turns 16-31 (Alice solo)
+
+5. **Turn 48**: Context exceeds 80% threshold
+   - **Async trigger**: Threshold summarization starts in background
+   - Old messages grouped into scenes using `cast_change_turns`
+   - Scene capsules generated for turns 32-47 (Alice + Charlie)
+   - Multiple scenes created if >15 exchanges per scene
+
+6. **Turn 49**: User responds (async summary completes)
+   - Summary field updated with multiple scene capsules
+   - Conversation continues normally
+
+---
 
 **Canon Law Echo**:
 When summarizing, active canon law entries are included in the summarization prompt, ensuring world rules aren't lost in the summary.
@@ -4010,12 +4933,76 @@ The Summaries tab provides a dedicated interface for viewing and editing chat su
 - **Empty State**: When no summary exists, displays a "Ready for your story context" placeholder with a bookmark icon
 - **Navigation Button**: Teal-colored bookmark icon in the main header (next to the Favorites tab) for quick access
 - **Real-Time Persistence**: Summary updates are saved instantly to the SQLite database when edited
+- **Autosummarize Button**: Highlight text and click to condense using LLM (v1.11.1+)
+  - **Helper Messages**: Context-aware guidance ("Highlight text and click Autosummarize to condense" when text exists)
+  - **Loading State**: Spinner icon during summarization, button disabled when no text
+  - **Reduction Feedback**: Success notification shows percentage reduced (e.g., "Reduced by 60% (500 → 200 chars)")
+  - **Auto-Save**: Changes automatically saved after successful summarization
 
 **About Summaries Panel** (sticky footer):
 
-- **Auto-generated**: "Auto-generated when your chat exceeds context limit" - Summaries are created automatically at the 85% context threshold
-- **Fully Editable**: "Fully editable - write your own to jump into any point in a story" - Users can manually override auto-generated summaries
+- **Auto-generated**: "Auto-generated when your chat exceeds context limit" - Summaries are created automatically at 85% context threshold
+- **Fully Editable**: Users can manually override auto-generated summaries
 - **Auto-Saved**: "Auto-saved - your edits are saved instantly" - No manual save required
+- **Autosummarize (v1.11.1+)**: "Summarize Summaries: highlight text and click 'autosummarize'" - Select specific sections to summarize with LLM
+
+**Autosummarize Feature (v1.11.1+):**
+
+Users can condense selected text from the summary panel using the LLM:
+
+- **How It Works**:
+  1. Highlight text in the summary textarea (minimum 50 characters)
+  2. Click the "Autosummarize" button (wand icon)
+  3. LLM generates condensed version of selected text
+  4. Original selection replaced with summarized version
+  5. Shows reduction percentage (e.g., "Reduced by 60% (500 → 200 chars)")
+  6. Auto-saves updated summary after successful summarization
+
+- **Use Cases**:
+  - Condense overly verbose summary sections
+  - Reduce token usage while preserving key information
+  - Clean up bloated summary windows
+  - Focus on essential plot points
+
+- **Requirements**:
+  - Active chat session required
+  - Minimum 50 characters of selected text
+  - LLM backend must be available (KoboldCpp connected)
+
+- **Technical Implementation**:
+  ```javascript
+  // Frontend: Highlight and summarize
+  async autosummarizeSelection() {
+      const textarea = document.getElementById('summary-textarea');
+      const selectedText = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd);
+      
+      if (selectedText.length < 50) {
+          this.showNotification('Selection too short (minimum 50 characters)', 'warning');
+          return;
+      }
+      
+      const res = await axios.post(`/api/chats/${this.currentChatId}/summarize-selection`, {
+          text: selectedText
+      });
+      
+      if (res.data.success) {
+          this.summary = beforeText + res.data.summarized + afterText;
+          this.autosaveChat();
+      }
+  }
+  
+  // Backend: Summarize using LLM
+  @app.post("/api/chats/{chat_id}/summarize-selection")
+  async def autosummarize_selection(chat_id: str, request: dict):
+      text = request.get("text", "").strip()
+      summarized = await summarize_text(text)
+      return {
+          "success": True,
+          "summarized": summarized,
+          "original_length": len(text),
+          "new_length": len(summarized)
+      }
+  ```
 
 **UI Location:**
 
@@ -4050,6 +5037,94 @@ saveSummaryChange() {
         this.showNotification('Summary saved', 'success');
     }
 }
+
+// Autosummarize selection (v1.11.1+)
+async autosummarizeSelection() {
+    const textarea = document.getElementById('summary-textarea');
+    const selectedText = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd);
+    
+    // Validation: minimum 50 chars, active chat required
+    if (!selectedText || selectedText.length < 50 || !this.currentChatId) {
+        this.showNotification('Please highlight text to summarize', 'warning');
+        return;
+    }
+    
+    this.isAutosummarizing = true;
+    
+    // API call
+    const res = await axios.post(
+        `/api/chats/${this.currentChatId}/summarize-selection`,
+        { text: selectedText }
+    );
+    
+    if (res.data.success) {
+        const { summarized, original_length, new_length } = res.data;
+        const reduction = Math.round((1 - new_length / original_length) * 100);
+        
+        // Replace selection with summarized version
+        const beforeText = textarea.value.substring(0, textarea.selectionStart);
+        const afterText = textarea.value.substring(textarea.selectionEnd);
+        this.summary = beforeText + summarized + afterText;
+        
+        // Save and notify
+        this.autosaveChat();
+        this.showNotification(`Summarized! Reduced by ${reduction}% (${original_length} → ${new_length} chars)`, 'success');
+    }
+    
+    this.isAutosummarizing = false;
+}
+```
+
+**Backend Implementation (v1.11.1+):**
+
+```python
+# Helper function for text summarization
+async def summarize_text(text: str) -> str:
+    """Summarize provided text into a concise version."""
+    system = "You are an expert at distilling information into concise summaries."
+    
+    prompt = f"""Summarize the following text into a more concise version while preserving all key information.
+
+Requirements:
+- Reduce length by 50-70%
+- Keep important plot points, character actions, and world details
+- Maintain neutral, factual tone
+- Do NOT add new information
+- Remove redundancy and filler
+
+Text to summarize:
+{text}
+
+Output only the summarized text, nothing else."""
+    
+    result = await call_llm_helper(system, prompt, 300)
+    return result.strip()
+
+# API endpoint for autosummarize
+@app.post("/api/chats/{chat_id}/summarize-selection")
+async def autosummarize_selection(chat_id: str, request: dict):
+    """Summarize user-selected text from summary window.
+    
+    Allows users to highlight specific sections of their summary and
+    get a condensed version, addressing bloated summary windows.
+    """
+    text = request.get("text", "").strip()
+    
+    # Validation
+    if not text:
+        return {"success": False, "error": "No text provided"}
+    if len(text) < 50:
+        return {"success": False, "error": "Text too short to summarize (minimum 50 characters)"}
+    
+    # Generate summary
+    summarized = await summarize_text(text)
+    
+    return {
+        "success": True,
+        "summarized": summarized,
+        "original_length": len(text),
+        "new_length": len(summarized)
+    }
 ```
 
 **User Workflow:**
@@ -4676,12 +5751,12 @@ Generate complete character cards with all fields simultaneously:
 1. User provides character description (text selection or manual input)
 2. LLM generates full character card with:
    - Name (with collision resolution)
-   - Description
-   - Personality array
-   - Body array
-   - Scenario
-   - First message
-   - Extensions (depth_prompt, talkativeness, etc.)
+    - Description
+    - Personality array
+    - Body array
+    - Scenario
+    - First message
+    - Extensions (talkativeness, gender, danbooru_tag, multi_char_summary, etc.)
 3. System stores NPC in chat metadata with unique entity ID
 4. NPC is added to `activeCharacters` and `local_npcs`
 
@@ -4910,7 +5985,7 @@ write_json_file(char_data, filename)      # Secondary
 | Full card generation | 2s-5s | ~500 tokens |
 | World entry generation | 1s-3s | ~400 tokens |
 
-**Note**: Capsule auto-generation occurs during multi-character chat start (typically 500ms-1s, ~200 tokens per character) but is not a user-initiated operation.
+**Note**: Capsule auto-generation occurs on every chat turn when character/NPC data is newer than existing capsule (typically 500ms-1s, ~200 tokens per character). This is automatic based on timestamp comparison and not a user-initiated operation.
 
 **Context Savings**:
 - Single character: Full card (~500-1000 tokens)
@@ -4991,9 +6066,12 @@ write_json_file(char_data, filename)      # Secondary
 - Try manual mode instead of chat mode
 
 **Capsules Not Generated**
-- Verify 2+ characters are active
 - Check character has description field
-- Console logs: `AUTO-GENERATING capsule for {name}`
+- Verify character `updated_at` timestamp is set (check database)
+- For NPCs: Verify `updated_at` timestamp exists in chat metadata
+- Console logs: `[CAPSULE] Generated and saved for {name}`
+- Capsules regenerate only when `entity_updated_at > capsule_timestamp`
+- Edit character/NPC data to trigger regeneration on next turn
 
 **World Entries Not Saving**
 - Verify PList format is valid (starts with `[`, ends with `]`)
@@ -5416,8 +6494,8 @@ Capsule Lifecycle (v1.8.2):
 2. Load existing capsules from chat.metadata.characterCapsules
    ↓
 3. For characters without capsules:
-   ├─ Generate capsule (description + personality)
-   ├─ Inject into character object
+    ├─ Generate capsule (gender, description, personality, scenario, mes_example)
+    ├─ Inject into character object
    └─ Save to chat.metadata.characterCapsules
    ↓
 4. Next multi-char chat:
@@ -5488,12 +6566,12 @@ if is_group_chat:
                     name = data.get("name", "Unknown")
                     description = data.get("description", "")
                     personality = data.get("personality", "")
-                    depth_prompt = data.get("extensions", {}).get("depth_prompt", {}).get("prompt", "")
-                    
+                    scenario = data.get("scenario", "")
+                    mes_example = data.get("mes_example", "")
+                    gender = data.get("extensions", {}).get("gender", "")
+
                     try:
-                        # Include both description and personality in capsule
-                        capsule_source = f"{description} {personality}".strip()
-                        capsule = await generate_capsule_for_character(name, capsule_source, depth_prompt)
+                        capsule = await generate_capsule_for_character(name, description, personality, scenario, mes_example, gender)
                         
                         # Update in memory
                         if "extensions" not in data:
@@ -5514,28 +6592,112 @@ if is_group_chat:
                 print(f"[CAPSULE] Saved {len(chars_needing_capsules)} capsules to chat metadata")
 ```
 
+### Capsule Generation Function
+
+**Function signature (main.py:3725):**
+```python
+async def generate_capsule_for_character(
+    char_name: str,
+    description: str,
+    personality: str,
+    scenario: str,
+    mes_example: str,
+    gender: str = ""
+) -> str
+```
+
+**Inputs:**
+- `char_name`: Character's name
+- `gender`: Character's gender (from `extensions.gender`)
+- `description`: Character description text
+- `personality`: Personality traits and behaviors
+- `scenario`: Opening scenario or context (interpreted as worldview/yearning, not fixed location)
+- `mes_example`: Example dialogue with `<START>` markers
+
+**Output:** One-paragraph capsule summary (~50-100 tokens) containing:
+- Name and gender
+- Role (character archetype or typical role)
+- Key personality traits
+- Speech style
+- Example quote
+
+**Scenario Interpretation:** The capsule prompt explicitly instructs the LLM to distill the `scenario` field into character motivations, yearnings, or typical situations - NOT specific locations or events. For example, "young sorcerer awakening at her mother's house, yearning for adventure" becomes "young sorcerer yearning for adventure" (removing the specific location).
+
+**Auto-Generated Capsules on Import (v1.11.0+):**
+
+Characters now automatically generate capsules during import from JSON files:
+
+```python
+# In import_characters_json_files_async() (main.py:2210-2228)
+if db_save_character(char_data, f):
+    # Auto-generate capsule for newly imported character
+    try:
+        capsule = await generate_capsule_for_character(
+            char_name=char_data.get('name', ''),
+            description=char_data.get('description', ''),
+            personality=char_data.get('personality', ''),
+            scenario=char_data.get('scenario', ''),
+            mes_example=char_data.get('mes_example', ''),
+            gender=char_data.get('extensions', {}).get('gender', '')
+        )
+        # Update character data with generated capsule
+        if 'extensions' not in char_data:
+            char_data['extensions'] = {}
+        char_data['extensions']['multi_char_summary'] = capsule
+        # Re-save with capsule
+        db_save_character(char_data, f)
+        print(f"  [CAPSULE] Auto-generated capsule for {f}")
+    except Exception as e:
+        print(f"  [CAPSULE] Failed to generate capsule for {f}: {e}")
+```
+
+**Behavior:**
+- **Trigger**: When character JSON file is imported (either on startup or via reimport endpoint)
+- **Process**: Generate LLM capsule, update character data, re-save to database
+- **Storage**: Capsule stored in `data.extensions.multi_char_summary` field
+- **Fallback**: If capsule generation fails, import proceeds without capsule (can be regenerated later)
+
+**Benefits:**
+1. **Instant Availability**: Characters have capsules ready for multi-character chats
+2. **No Manual Trigger**: Users don't need to manually generate capsules
+3. **Consistency**: All imported characters follow same capsule generation process
+4. **Freshness**: Capsules reflect current character data at import time
+
+**Error Handling:**
+- Capsule generation failures logged but don't block import
+- Character still saved to database
+- Capsule can be regenerated later via chat-scoped system
+
+**Prompt sent to LLM:**
+```
+Convert this character card into a capsule summary for efficient multi-character prompts.
+Use this exact format (one paragraph, no line breaks):
+Name: [Name]. Gender: [gender if specified]. Role: [1 sentence character archetype or typical role]. Key traits: [3-5 comma-separated personality traits]. Speech style: [short/long, formal/casual, any verbal tics]. Example line: "[One characteristic quote from descriptions]"
+
+IMPORTANT: The scenario field describes the character's lived experience, worldview, or yearning - NOT their current fixed location or event. Distill the scenario into character motivations, yearnings, or typical situations they encounter. Do NOT include specific places (like "at her mother's house") in the Role field.
+
+Full Card:
+[full character card content]
+
+Output only capsule summary line, nothing else.
+```
+
 **3. Fallback Behavior (Context Assembly)**
 
 ```python
 # Fallback when capsule missing in multi-char (main.py:2606-2623)
 elif is_group_chat and not multi_char_summary:
-    # Group chat but character has no capsule - use description + personality as fallback
+    # Group chat but character has no capsule - use fallback (gender, description, personality, scenario, mes_example)
     label = "[NPC]" if is_npc else "[Character]"
-    print(f"[CONTEXT] {label} {name} using fallback (description + personality)")
-    
-    fallback_content = ""
-    if description:
-        fallback_content += description
-    if personality:
-        if fallback_content:
-            fallback_content += " "
-        fallback_content += personality
-    
+    print(f"[CONTEXT] {label} {name} using fallback (gender, description, personality, scenario, mes_example)")
+
+    fallback_content = build_fallback_capsule(name, data)
+
     if fallback_content:
         full_prompt += f"### [{name}]: {fallback_content}\n"
         chars_injected_this_turn.add(name)
     else:
-        print(f"[CONTEXT] Warning: {name} has no description or personality, skipping injection")
+        print(f"[CONTEXT] Warning: {name} has no capsule data, skipping injection")
 ```
 
 ### Storage Structure
@@ -5628,6 +6790,141 @@ This handles three cases:
    - No JSON file writes
    - Automatic cleanup on chat deletion
 
+### Helper Functions Added in v1.11.0+
+
+**Overview:**
+Several new helper functions were added in v1.11.0 to support scene-first architecture, SCENE UPDATE blocks, and scene capsule summarization.
+
+**New Helper Functions:**
+
+| Function | Purpose | Location |
+|----------|---------|----------|
+| `group_messages_into_scenes()` | Groups messages into scene-aware capsules | main.py:670-714 |
+| `generate_scene_capsule()` | LLM-based scene capsule generation | main.py:717-782 |
+| `trigger_cast_change_summarization()` | Async cast-change summarization | main.py:785-834 |
+| `trigger_threshold_summarization()` | Async threshold summarization | main.py:837-893 |
+| `build_scene_update_block()` | Generates SCENE UPDATE block | main.py:908-934 |
+| `detect_cast_change()` | Detects cast changes (excluding focus) | main.py:837-877 |
+| `build_entity_name_mapping()` | Maps entity IDs to names | main.py:884-905 |
+| `calculate_turn_for_message()` | Calculates turn number for message | main.py:655-668 |
+| `get_npc_timestamp()` | Gets NPC last update timestamp | main.py:936-944 |
+
+**Function Details:**
+
+**`group_messages_into_scenes()`**
+```python
+def group_messages_into_scenes(
+    messages: List[ChatMessage],
+    cast_change_turns: List[int],
+    max_exchanges_per_scene: int = 15
+) -> List[Tuple[int, int, List[ChatMessage]]]
+```
+- Groups messages into scenes based on cast changes or exchange count
+- Scene boundaries at cast changes OR every 15 exchanges
+- Returns list of tuples: (start_turn, end_turn, scene_messages)
+
+**`generate_scene_capsule()`**
+```python
+async def generate_scene_capsule(
+    messages: List[ChatMessage],
+    start_turn: int,
+    end_turn: int,
+    departed_note: str = "",
+    canon_law_entries: List[str] = None
+) -> str
+```
+- Generates 200-token scene capsule from messages
+- Includes canon law echo for world rule preservation
+- Notes character entries/exits in departed_note
+
+**`trigger_cast_change_summarization()`**
+```python
+async def trigger_cast_change_summarization(
+    chat_id: str,
+    departed_characters: Set[str],
+    entity_to_name: Dict[str, str],
+    canon_law_entries: List[str] = None
+)
+```
+- Summarizes old messages when character departs (async, non-blocking)
+- One capsule for all old messages since last cast change
+- Best-effort failure handling (silent logging)
+
+**`trigger_threshold_summarization()`**
+```python
+async def trigger_threshold_summarization(
+    chat_id: str,
+    canon_law_entries: List[str] = None
+)
+```
+- Summarizes old messages when context exceeds 70% threshold (async, non-blocking)
+- Groups messages into scenes using cast_change_turns
+- Generates separate capsule for each scene
+
+**`build_scene_update_block()`**
+```python
+def build_scene_update_block(
+    departed: Set[str],
+    arrived: Set[str],
+    entity_to_name: Dict[str, str]
+) -> str
+```
+- Builds SCENE UPDATE block when cast changes
+- Lists which characters left/entered
+- Adds instruction to adjust portrayal for current SCENE CAST
+
+**`detect_cast_change()`**
+```python
+def detect_cast_change(
+    current_characters: List[Dict],
+    current_npcs: Dict,
+    mode: str,
+    previous_metadata: Dict
+) -> Tuple[bool, Set[str], Set[str], Dict]
+```
+- Compares current and previous active sets
+- Cast change = active set changed (focus change alone doesn't count)
+- Returns: (changed, departed, arrived, updated_metadata)
+
+**`build_entity_name_mapping()`**
+```python
+def build_entity_name_mapping(
+    characters: List[Dict],
+    npcs: Dict
+) -> Dict[str, str]
+```
+- Builds mapping from entity_id to display name
+- Used by build_scene_update_block() to convert entity IDs to readable names
+- Returns: {entity_id: display_name, ...}
+
+**`calculate_turn_for_message()`**
+```python
+def calculate_turn_for_message(
+    messages: List[ChatMessage],
+    target_index: int
+) -> int
+```
+- Calculates which turn a message belongs to (1-indexed)
+- Turn = count of user messages up to and including this message
+- Used for scene capsule turn tracking
+
+**`get_npc_timestamp()`**
+```python
+def get_npc_timestamp(entity_id: str, chat_id: str) -> int
+```
+- Gets NPC's last update timestamp from chat metadata
+- Returns NPC `updated_at` field or 0 if not found
+- Used for capsule regeneration timestamp comparison
+
+**Integration Points:**
+
+- **Context Assembly**: `detect_cast_change()` and `build_scene_update_block()` used in `construct_prompt()`
+- **Summarization**: `trigger_cast_change_summarization()` and `trigger_threshold_summarization()` called after LLM response
+- **Scene Capsules**: `group_messages_into_scenes()` and `generate_scene_capsule()` work together for scene-aware summarization
+- **Timestamp Tracking**: `get_npc_timestamp()` supports capsule regeneration system
+
+---
+
 ### Testing Scenarios
 
 **Capsule Loading:**
@@ -5675,9 +6972,9 @@ This handles three cases:
 The chat-scoped capsule system integrates with:
 
 1. **Context Assembly**: Uses capsules for multi-character group chats
-2. **Reinforcement System**: Reinforces description + personality every N turns
+2. **Reinforcement System**: Reinforces gender, description, personality, scenario, mes_example via capsules every turn
 3. **Chat Metadata**: Stores capsules in `characterCapsules` field
-4. **Fallback Injection**: Uses description + personality when capsule missing
+4. **Fallback Injection**: Uses gender, description, personality, scenario, mes_example when capsule missing
 5. **LLM API**: Capsule generation via `generate_capsule_for_character()`
 
 ---
@@ -9110,18 +10407,19 @@ Think of context as a **4000-word essay** you're writing live:
 
 - **NeuralRP's approach**:
   - Turn 1: Introduce all characters/world (thesis statement)
-  - Turn 5, 10, 15...: Remind key characteristics (reinforcement)
-  - Ongoing: Conversation flow (new content)
-  - Token budget: ~80% conversation, ~20% reinforcement
+   - Turns 1-3: Full cards (strong reinforcement)
+   - Turns 4+: SCENE CAST capsules (continuous voice)
+   - Ongoing: Conversation flow (new content)
+   - Token budget: ~60% conversation, ~15% SCENE CAST, ~10% full cards (turns 1-3 only) |
 
 **Tradeoffs Made:**
 
-| Decision | What We Sacrifice | What We Gain | Verdict |
-|----------|-------------------|----------------|----------|
-| **Single char: Full card on turns 1,2,3, unified reinforcement** | Higher token usage (+133% sticky, +36% unified) | Better early consistency, 90% less code complexity | ✅ Worth it (v1.8.1+) |
-| **Multi-char: Capsules not full cards** | Full character details not always available | Enables 5+ character chats, voice differentiation | ✅ Critical |
-| **Reinforcement every 5 turns** | Some drift between turns | Token budget sustainable, long chats possible | ✅ Balanced |
-| **Semantic world info** | Potential false positives | Natural language queries, discovery enabled | ✅ Net positive |
+ | Decision | What We Sacrifice | What We Gain | Verdict |
+ |----------|-------------------|----------------|----------|
+ | **Hybrid: Sticky full cards (turns 1-3) + SCENE CAST (turns 4+)** | Higher early-turn token usage (~3000-4500) | Better early consistency, no drift, excellent long-term voice | ✅ Worth it (v1.11.0+) |
+ | **6-exchange history window (not 10)** | Less verbatim context in prompt | Better token budget (54% vs 79%), less frequent summarization | ✅ Critical for RP |
+ | **Multi-char: Capsules not full cards after sticky window** | Full character details not always available | Enables 5+ character chats, voice differentiation | ✅ Critical |
+ | **Semantic world info** | Potential false positives | Natural language queries, discovery enabled | ✅ Net positive |
 
 **Context Hygiene as User Experience:**
 

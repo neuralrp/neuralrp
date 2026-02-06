@@ -5,6 +5,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.11.0] - 2026-02-06
+
+### Changed
+- **Hybrid SCENE CAST + Sticky Full Cards System**: Characters now receive full cards on first appearance, when returning after long absence, or during their first 3 turns in chat. This balances strong early reinforcement with long-term character consistency while reducing token overhead. This represents a philosophical shift from "dialog-centric" to "character-centric + summaries" that respects how LLMs actually pay attention to information. Regular character capsules every turn, combined with strategic full-card injections at critical moments, yield better character consistency than simply adding more dialog to the context.
+- **History Window**: Condensed dialog with it hits the context threshold to the 6 latest turns through auto-summary, rather than the oldest 10 turns in chat window.  This RP-optimized window prevents attention decay and character-merging while keeping conversations focused on recent context.
+- **Summaries Panel with Autosummarize**: New "Autosummarize" button lets you condense selected text from your summary, helping manage bloated summaries without losing key details.
+
+### Added
+- **Scene Capsule Summarization**: When conversations get long, the system now summarizes by scene—grouping messages based on which characters were active—rather than flat chronological blocks. This preserves plot flow and character dynamics better.
+- **SCENE UPDATE Blocks**: When characters enter or leave your scene, you'll see a clear notification showing who arrived or departed, helping the AI adjust portrayal to the current cast. Upon entering, an aggressive auto-summarization occurs, allowing the new character the opportunity to define themselves, rather than merge with existing characters in the context window.
+- **Returning Character Reinforcement**: If a character hasn't appeared for 20+ messages and then returns, they get their full card injected again to re-establish their voice.
+ - **Auto-generated Character Capsules**: Imported characters automatically generate condensed personality capsules for multi-character chats, saving time and ensuring consistent voices.
+ 
+ ### Technical
+ - Database: Schema version 5 migration ensures `chat_npcs` table includes `visual_canon_id` and `visual_canon_tags` columns in base schema (migration-safe, idempotent)
+ 
+ ***
+
 ## [1.10.4] - 2026-02-05
 
 ### Changed

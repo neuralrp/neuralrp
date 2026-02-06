@@ -551,14 +551,35 @@
                 <template x-if="showSidebar === 'summaries'">
                     <div class="space-y-4">
                         <div class="space-y-2">
-                            <h3 class="text-[10px] font-black uppercase tracking-widest text-teal-500">Current Summary</h3>
+                            <div class="flex justify-between items-center">
+                                <h3 class="text-[10px] font-black uppercase tracking-widest text-teal-500">Current Summary</h3>
+                                <button @click="autosummarizeSelection()"
+                                    :disabled="isAutosummarizing || !summary"
+                                    class="px-3 py-1.5 text-[9px] font-black uppercase tracking-widest transition-all border rounded flex items-center gap-1.5"
+                                    :class="isAutosummarizing 
+                                        ? 'bg-slate-700 border-slate-600 text-slate-500 cursor-not-allowed' 
+                                        : 'bg-teal-600 border-teal-500 text-white hover:bg-teal-500'"
+                                >
+                                    <i class="fa-solid" 
+                                        :class="isAutosummarizing ? 'fa-circle-notch fa-spin' : 'fa-wand-magic-sparkles'"></i>
+                                    <span x-text="isAutosummarizing ? 'Summarizing...' : 'Autosummarize'"></span>
+                                </button>
+                            </div>
                             <textarea x-model="summary" @change="saveSummaryChange()"
+                                id="summary-textarea"
                                 class="w-full bg-slate-950/50 border border-slate-700 rounded-lg p-3 text-xs flex-1 min-h-[400px] text-slate-300 outline-none focus:ring-1 focus:ring-teal-500/30"
                                 placeholder="Describe current story context..."></textarea>
 
                             <div x-show="!summary" x-cloak class="text-center py-4 space-y-2 opacity-50">
                                 <i class="fa-solid fa-book-bookmark text-2xl text-teal-500/20"></i>
                                 <div class="text-[10px] text-slate-600">Ready for your story context</div>
+                            </div>
+
+                            <div x-show="summary" x-cloak class="text-center py-3 px-2 bg-slate-900/50 rounded-lg border border-slate-800">
+                                <div class="flex items-center justify-center gap-2 text-[9px] text-slate-500">
+                                    <i class="fa-solid fa-lightbulb text-teal-500/50"></i>
+                                    <span>Summarize Summaries: highlight text and click "autosummarize"</span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -802,6 +823,32 @@
                                     <textarea x-model="editingChar.data.mes_example"
                                         class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-32 outline-none focus:ring-1 focus:ring-blue-500/50 font-mono"
                                         placeholder="Example dialogue showing character's voice..."></textarea>
+                                </div>
+
+                                <!-- Capsule -->
+                                <div class="space-y-1.5 mt-3">
+                                    <div class="flex justify-between items-center">
+                                        <label class="text-[9px] text-slate-500 uppercase font-black tracking-widest">
+                                            Capsule (Multi-Char Summary)
+                                        </label>
+                                        <button 
+                                            @click="generateCapsule()"
+                                            :disabled="isGeneratingCapsule"
+                                            class="text-[8px] text-cyan-400 hover:text-cyan-300 font-bold uppercase transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            <span x-show="!isGeneratingCapsule">
+                                                <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Gen
+                                            </span>
+                                            <span x-show="isGeneratingCapsule">
+                                                <i class="fa-solid fa-circle-notch fa-spin mr-1"></i>Gen
+                                            </span>
+                                        </button>
+                                    </div>
+                                    <textarea 
+                                        x-model="editingChar.data.extensions.multi_char_summary"
+                                        class="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs h-16 outline-none focus:ring-1 focus:ring-cyan-500/50 resize-none"
+                                        placeholder="Generated capsule summary for multi-character prompts. Click 'Gen' to auto-generate."
+                                    ></textarea>
                                 </div>
 
                                 <!-- Fixed Save/Cancel Buttons -->
@@ -1347,12 +1394,6 @@
                                     </template>
                                 </div>
 
-                                <div class="space-y-1">
-                                    <label class="text-[10px] text-slate-450 uppercase font-bold">Reinforce Character
-                                        Info Every X Turns</label>
-                                    <input type="number" x-model.number="settings.reinforce_freq"
-                                        class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
-                                </div>
                                 <div class="space-y-1">
                                     <label class="text-[10px] text-slate-450 uppercase font-bold">Reinforce World Canon
                                         Every X Turns</label>
@@ -2099,7 +2140,7 @@
                 <div class="flex justify-between items-center px-4">
                     <div class="text-[9px] font-black tracking-widest uppercase text-slate-500 flex items-center gap-2">
                         <span
-                            :class="tokenCount > settings.max_context * 0.85 ? 'text-orange-500' : 'text-slate-500'">Context:
+                            :class="tokenCount > settings.max_context * 0.80 ? 'text-orange-500' : 'text-slate-500'">Context:
                             <span x-text="tokenCount">0</span> / <span x-text="settings.max_context">4096</span></span>
                         <template x-if="isCountingTokens">
                             <i class="fa-solid fa-circle-notch fa-spin text-blue-500"></i>
@@ -3160,14 +3201,13 @@
                 user_gender: '',
                 user_danbooru_tag: '',
                 include_user_in_snapshots: false,
-                reinforce_freq: 5,
                 world_info_reinforce_freq: 3,
                 world_info_enabled: true,
                 max_world_info_entries: 10,
                 temperature: 0.7,
                 max_length: 250,
                 max_context: 4096,
-                summarize_threshold: 0.85,
+                summarize_threshold: 0.80,  // v1.11.0: Changed from 0.85 for scene-first architecture
                 performance_mode_enabled: true
             },
 
@@ -3195,6 +3235,12 @@
 
             // Danbooru Tag Generator (v1.10.0)
             isGeneratingDanbooruTags: false,
+
+            // Capsule Generator (v1.11.0)
+            isGeneratingCapsule: false,
+
+            // Summary Autosummarize
+            isAutosummarizing: false,
 
             // Card Generation
             showCardGen: false,
@@ -3526,6 +3572,11 @@
                     } catch (e) {
                         console.error('Failed to load settings', e);
                     }
+                }
+
+                if (this.settings.summarize_threshold === 0.70) {
+                    this.settings.summarize_threshold = 0.80;
+                    this.saveSettings();
                 }
             },
 
@@ -4113,6 +4164,63 @@
                 }
             },
 
+            async autosummarizeSelection() {
+                const textarea = document.getElementById('summary-textarea');
+                if (!textarea) {
+                    this.showNotification('Could not find summary textarea', 'error');
+                    return;
+                }
+
+                const selectedText = textarea.value.substring(textarea.selectionStart, textarea.selectionEnd);
+
+                if (!selectedText || selectedText.trim().length === 0) {
+                    this.showNotification('Please highlight text to summarize', 'warning');
+                    return;
+                }
+
+                if (selectedText.length < 50) {
+                    this.showNotification('Selection too short (minimum 50 characters)', 'warning');
+                    return;
+                }
+
+                if (!this.currentChatId) {
+                    this.showNotification('No active chat - please save or load a chat first', 'error');
+                    return;
+                }
+
+                this.isAutosummarizing = true;
+
+                try {
+                    const res = await axios.post(
+                        `/api/chats/${this.currentChatId}/summarize-selection`,
+                        { text: selectedText }
+                    );
+
+                    if (res.data.success) {
+                        const summarized = res.data.summarized;
+                        const originalLength = res.data.original_length;
+                        const newLength = res.data.new_length;
+
+                        const beforeText = textarea.value.substring(0, textarea.selectionStart);
+                        const afterText = textarea.value.substring(textarea.selectionEnd);
+
+                        this.summary = beforeText + summarized + afterText;
+
+                        const reduction = Math.round((1 - newLength / originalLength) * 100);
+                        this.showNotification(`Summarized! Reduced by ${reduction}% (${originalLength} → ${newLength} chars)`, 'success');
+
+                        this.autosaveChat();
+                    } else {
+                        this.showNotification(res.data.error || 'Failed to summarize', 'error');
+                    }
+                } catch (e) {
+                    console.error('Autosummarize failed:', e);
+                    this.showNotification('Failed to summarize: ' + (e.response?.data?.error || e.message), 'error');
+                } finally {
+                    this.isAutosummarizing = false;
+                }
+            },
+
             // ========== CHAT MANAGEMENT ==========
             async saveNewChat() {
                 const name = prompt("Name this chat session:");
@@ -4436,6 +4544,9 @@
                 if (!charData.personality) charData.personality = '';
                 if (!charData.scenario) charData.scenario = '';
                 if (!charData.tags) charData.tags = [];
+                if (!charData.extensions.multi_char_summary) {
+                    charData.extensions.multi_char_summary = '';
+                }
 
                 // Ensure name is set
                 if (!charData.name) charData.name = npc.name || 'Unknown NPC';
@@ -4444,7 +4555,7 @@
                     data: charData,
                     isNPC: true,
                     npcId: npc.entityid,
-                    _chatId: this.currentChatId
+                    chatId: this.currentChatId
                 };
                 
                 this.showSidebar = 'characters';
@@ -4801,6 +4912,75 @@
                 }
             },
 
+            async generateCapsule() {
+                if (!this.editingChar) return;
+                
+                this.isGeneratingCapsule = true;
+                
+                try {
+                    const isNPC = this.editingChar.isNPC === true || typeof this.editingChar.npcId === "string";
+                    const charData = this.editingChar.data;
+                    
+                    let res;
+                    
+                    if (isNPC) {
+                        const chatId = this.editingChar.chatId || this.currentChatId;
+                        const npcId = this.editingChar.npcId;
+                        
+                        if (!chatId) {
+                            this.showNotification('Cannot generate capsule: No chat context found', 'error');
+                            return;
+                        }
+                        
+                        res = await axios.post(
+                            `/api/chats/${chatId}/npcs/${npcId}/generate-capsule`,
+                            {
+                                name: charData.name,
+                                description: charData.description || '',
+                                personality: charData.personality || '',
+                                scenario: charData.scenario || '',
+                                mes_example: charData.mes_example || '',
+                                gender: charData.extensions?.gender || ''
+                            }
+                        );
+                    } else {
+                        const filename = this.editingChar._filename;
+                        
+                        if (!filename) {
+                            this.showNotification('Cannot generate capsule: No character filename', 'error');
+                            return;
+                        }
+                        
+                        res = await axios.post(
+                            `/api/characters/${filename}/generate-capsule`,
+                            {
+                                name: charData.name,
+                                description: charData.description || '',
+                                personality: charData.personality || '',
+                                scenario: charData.scenario || '',
+                                mes_example: charData.mes_example || '',
+                                gender: charData.extensions?.gender || ''
+                            }
+                        );
+                    }
+                    
+                    if (res.data.success) {
+                        if (!this.editingChar.data.extensions) {
+                            this.editingChar.data.extensions = {};
+                        }
+                        this.editingChar.data.extensions.multi_char_summary = res.data.capsule;
+                        this.showNotification('Capsule generated successfully!', 'success');
+                    } else {
+                        this.showNotification(res.data.error || 'Failed to generate capsule', 'error');
+                    }
+                } catch (e) {
+                    console.error('Failed to generate capsule:', e);
+                    this.showNotification('Failed to generate capsule', 'error');
+                } finally {
+                    this.isGeneratingCapsule = false;
+                }
+            },
+
             // ========== MESSAGING ==========
             async resolveMode(userMessage) {
                 if (!this.canGenerateText()) {
@@ -4874,7 +5054,7 @@
                         summary: this.summary,
                         characters: this.activeCharactersWithData(),
                         world_info: this.settings.world_info_enabled ? this.activeWI : null,
-                        settings: this.settings,
+                        settings: { ...this.settings, user_name: this.settings.userName },
                         mode: mode,
                         chat_id: this.currentChatId
                     });
@@ -4884,6 +5064,10 @@
                             this.messages = res.data._updated_state.messages;
                         }
                         this.summary = res.data._updated_state.summary;
+                    }
+
+                    if (res.data._summarization_triggered) {
+                        this.showNotification('Auto-summarization in progress...', 'info');
                     }
 
                     // Always use chat_id returned from backend (whether new or existing)
@@ -4948,7 +5132,7 @@
                         summary: this.summary,
                         characters: this.activeCharactersWithData(),
                         world_info: this.settings.world_info_enabled ? this.activeWI : null,
-                        settings: this.settings,
+                        settings: { ...this.settings, user_name: this.settings.userName },
                         mode: mode,
                         chat_id: this.currentChatId
                     });
@@ -4957,7 +5141,11 @@
                         if (res.data._updated_state.summary !== this.summary) {
                             this.messages = res.data._updated_state.messages;
                         }
-                        this.summary = res.data._updated_state.summary;
+                    this.summary = res.data._updated_state.summary;
+                    }
+
+                    if (res.data._summarization_triggered) {
+                        this.showNotification('Auto-summarization in progress...', 'info');
                     }
 
                     // Always use chat_id returned from backend (whether new or existing)
