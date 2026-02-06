@@ -12,7 +12,7 @@
 
 **Next step: Open [Quickstart Guide](docs/QUICKSTART.md) for setup, recommended LLM models, and example characters and worlds**
 
-**Status**: Actively developed, v1.11.0 is still under testing. Expect bugs. Tell me about any you find in Discussions!
+**Status**: Actively developed, v1.11.0 released. Report bugs in Discussions!
 ---
 
 ## Table of Contents
@@ -42,7 +42,7 @@ This new release represents a large architectural and philosophical shift for Ne
 
 To keep this from happening, I have combined consistent, small chunks of character reinforcement and a "spike" of reinforcement for new characters, along with smart auto-summarization based on scene change, to ensure the LLM both recognizes the change, and doesn't "merge" the new and old characters together.
 
-The result: a "scene-first" focus. When a new character or NPC enters, there's a reason for that. You want that different energy, someone who will contribute something new or unique. This design maximizes that, while keeping in minid the limitations of small, locally-runnable LLMs.
+The result: a "scene-first" focus. When a new character or NPC enters, there's a reason for that. You want that different energy, someone who will contribute something new or unique. This design maximizes that, while keeping in mind the limitations of small, locally-runnable LLMs.
 
 What's New
 1. **Continuous Character Presence (SCENE CAST)**
@@ -79,7 +79,7 @@ Breaking Changes: reinforce_freq setting removed (SCENE CAST replaces it). Exist
 
 2. **Emergent cast with visual canon** — Quickly create NPCs on the fly that are isolated to one chat, have full parity with characters, can be promoted, and stay branch‑safe. Gender selection keeps both text and visuals targeted, and one-click Danbooru tag assignment based on character description solves the problem of visual drift, so you can stay immersed in the actual roleplay.
 
-3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: inpainting, both manual and automatic generation via the "snapshot" feature, and per‑image metadata, carefully designed to not "leak" into the context window. A "Favorites" menu allows you to jump right to where the image appeared in it's original chat, so you can see the context. All designed to fit into the flow of roleplay, as unintrusively as possible.
+3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: inpainting, both manual and automatic generation via the "snapshot" feature, and per‑image metadata, carefully designed to not "leak" into the context window. A "Favorites" menu allows you to jump right to where the image appeared in its original chat, so you can see the context. All designed to fit into the flow of roleplay, as unintrusively as possible.
 
 ---
 
@@ -95,9 +95,9 @@ What I found was this: I could never get the underlying control I needed because
 
 Hence, NeuralRP was born.
 
-It's engineered from the ground up with context window in mind. How do you solve the context window problem? By keeping it as small as possibe, in the smartest way possible. Intelligent character card usage and aggressive auto-summaries to keep characters from turning into poorage. Uses SQLite and SQLite-vec backend which is a smart, fast home for truth rather than endless JSONs. Syncs intelligently with SillyTavern cards and semantically finds and injects what matters, when it matters, no matter how deep your world is.
+It's engineered from the ground up with context window in mind. How do you solve the context window problem? By keeping it as small as possible, in the smartest way possible. Intelligent character card usage and aggressive auto-summaries to keep characters from turning into poorage. Uses SQLite and SQLite-vec backend which is a smart, fast home for truth rather than endless JSONs. Syncs intelligently with SillyTavern cards and semantically finds and injects what matters, when it matters, no matter how deep your world is.
 
-I've built up the SD integration to match. Rather than being a bolt-on extension, its been carefully developed to natively fit into the flow of NeuralRP with a deep feature set, scripted danbooru-optimized prompts, and as automated or manual as you want it to be (or ignore it).
+I've built up the SD integration to match. Rather than being a bolt-on extension, it's been carefully developed to natively fit into the flow of NeuralRP with a deep feature set, scripted danbooru-optimized prompts, and as automated or manual as you want it to be (or ignore it).
 
 The fact is, there are certain limitations with 7b-14b LLMs that you simply can't get past. But this app maximizes what those LLMs offer for roleplay.
 
@@ -154,7 +154,7 @@ World lore injects automatically when semantically relevant to the conversation:
 
 - **Semantic Search Engine** — sqlite-vec with all-mpnet-base-2 for meaning-based matching
 - **Quoted keys** — Exact phrase match for specific terms (e.g., "Great Crash Landing")
-- **Unquoted keys** — Semantic matching for concepts (e.g., dragon → dragons, draconic). YOu can think of quoted keys as exact bookmarks, unquoted as fuzzy search.
+- **Unquoted keys** — Semantic matching for concepts (e.g., dragon → dragons, draconic). You can think of quoted keys as exact bookmarks, unquoted as fuzzy search.
 - **Canon law** — Enforce your core world rules on a customizable turn basis
 
 ### Relationship Tracking
@@ -202,7 +202,7 @@ Automatic selectable step/resolution reduction when context is large (>12K token
 
 ### 3. Manual-Mode Generation
 
-- **Pop-out Window** - Easily accesssable pop out window, prompt stays in browser memory so you don't have to retype every time, re-size generation on the fly.
+- **Pop-out Window** - Easily accessible pop out window, prompt stays in browser memory so you don't have to retype every time, re-size generation on the fly.
 - **Character tag substitution** – Assign Danbooru tags to characters once, reference with `[CharacterName]` in prompts for consistent appearance without memorizing tag lists.
 
 ### 4. Snapshots
@@ -237,7 +237,7 @@ Tag management for character and world cards:
 - **Change history** — 30-day retention with browse/restore functionality
 - **Soft delete** — Messages archived instead of deleted, searchable across history
 - **Export for training** — Export to Alpaca/ShareGPT/ChatML formats for Unsloth
-- **Built on SQLite + SQLite-vec** - Unified data system makes it easy to "bolt on" features, tune and mod this to you heart's content. Everything is in a single file (neuralrp.db), easy to back up or inspect.
+- **Built on SQLite + SQLite-vec** - Unified data system makes it easy to "bolt on" features, tune and mod this to your heart's content. Everything is in a single file (neuralrp.db), easy to back up or inspect.
 - **Migration system** — Seamless upgrades (v2 → v3 schemas) without data loss.
 
 ---
@@ -259,8 +259,8 @@ All data in SQLite (neuralrp.db) with automatic JSON export for SillyTavern comp
 - Requires 8k+ context models. NeuralRP's scene-first architecture won't fit in 4k context windows. Modern 7B-14B RP-tuned models (Mistral, Qwen, Llama 3, etc.) all ship with 8k+ by default.
 - No cloud extensibility, all local
 - Requires AUTOMATIC1111 for image generation, not compatible with ComfyUI and others at this time (run with --API).
-- Requires OpenAI-compatible backend with text to text LLM running locally (KoboldCcp strongly recommended).
-- Tested with KoboldCcp with a quantized 12B LLM model tuned for RP, and with A1111 running an Illustrious SD model.
+- Requires OpenAI-compatible backend with text to text LLM running locally (KoboldCpp strongly recommended).
+- Tested with KoboldCpp with a quantized 12B LLM model tuned for RP, and with A1111 running an Illustrious SD model.
 - All testing done with a NVidia 3060 12GB vRAM GPU
 - Running 2 LLMs with an 8GB vRAM GPU is untested, will likely lead to sub-optimal results
 - Danbooru tagging is optimized for SD models like Pony and Illustrious, which are trained for that input. Other SD models are untested
@@ -268,7 +268,7 @@ All data in SQLite (neuralrp.db) with automatic JSON export for SillyTavern comp
 ## Hardware Requirements
 
 **Recommended:**
-- 12GB+ VRAM GPU (for running both LLM's at the same time)
+- 12GB+ VRAM GPU (for running both LLMs at the same time)
 - Python 3.8+
 - KoboldCpp (LLM inference)
 - AUTOMATIC1111 WebUI (image generation)
