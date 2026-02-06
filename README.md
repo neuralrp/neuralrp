@@ -57,19 +57,17 @@ What's New
 - Returning characters get a "memory refresh" to prevent drift
 
 3. **Smarter Auto-Summarization**
-- Cast-change: Compresses old content when characters leave (~200 token capsule per scene)
-- Threshold: Groups old messages into scenes when context hits 80% (less aggressive than before)
+- Cast-change: Compresses old content when new characters enter, giving them a fresh voice. No voice-merging! 
+- Threshold: Groups old messages into scenes when context hits 80%, with characters/NPC's leaving being a threshold.
 - Both run in the background after you get your response (non-blocking)
 
 4. **Tighter History Window + 8k Baseline**
 - Keeps last 6 exchanges (12 messages) verbatim instead of 10
 - max_context default increased from 4096 to 8192 (tested and designed for this window)
 - summarize_threshold raised to 0.80 (use more of the window before compressing)
-- Tuned for modern 7B-14B models (Mistral, Qwen, Llama 3)
+- Tuned for modern 7B-14B models (Nemo, Qwen 2.5, Llama 3 base)
 
 Benefits: Characters maintain consistent voices through long conversations. Better token efficiency means more room for world info and detailed responses. Auto-summarization keeps performance smooth without manual intervention.
-
-Breaking Changes: reinforce_freq setting removed (SCENE CAST replaces it). Existing chats work immediately; old summaries preserved.
 
 ---
 
@@ -79,7 +77,7 @@ Breaking Changes: reinforce_freq setting removed (SCENE CAST replaces it). Exist
 
 2. **Emergent cast with visual canon** — Quickly create NPCs on the fly that are isolated to one chat, have full parity with characters, can be promoted, and stay branch‑safe. Gender selection keeps both text and visuals targeted, and one-click Danbooru tag assignment based on character description solves the problem of visual drift, so you can stay immersed in the actual roleplay.
 
-3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: inpainting, both manual and automatic generation via the "snapshot" feature, and per‑image metadata, carefully designed to not "leak" into the context window. A "Favorites" menu allows you to jump right to where the image appeared in its original chat, so you can see the context. All designed to fit into the flow of roleplay, as unintrusively as possible.
+3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: inpainting, both manual and automatic generation via the "snapshot" feature, and automatic danbooru tag assignment based on physical features, carefully designed to not "leak" into the context window. A "Favorites" menu allows you to jump right to where the image appeared in its original chat, so you can see the context. All designed to fit into the flow of roleplay, as unintrusively as possible.
 
 ---
 
