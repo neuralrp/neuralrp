@@ -12,7 +12,7 @@
 
 **Next step: Open [Quickstart Guide](docs/QUICKSTART.md) for setup, recommended LLM models, and example characters and worlds**
 
-**Status**: Actively developed, v1.10.x is still under testing. Expect bugs. Tell me about any you find in Discussions!
+**Status**: After extensive testing, there's a big philosophical direction change for next update, v1.11.0, around how dialog is treated vs auto-summarization and reinforcement. It's all about keeping long-form chats from turning to mush. Stay tuned, it will come soon.
 ---
 
 ## Table of Contents
