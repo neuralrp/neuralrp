@@ -2,11 +2,11 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine, designed specifically to keep dialog from becoming slop by aggressively managing the context window, while keeping image generation best in class.**
+**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine that keeps long, multi-character stories from turning into slop by structuring the conversation into clear scenes and aggressively summarizing old chatter, while delivering best-in-class, character-consistent Stable Diffusion images**
 
 **Simple out of the box. Just drop your SillyTavern cards in the folders, there isn't a million different things to configure. Just go.**
 
-**Runs well on 8-16GB  GPU's, no $4,000 hardware required**
+**Designed on a 12 GB vRAM GPU running both a text and visual LLM at the same time. No $4,000 hardware required**
 
 **No cloud subscriptions, no inference costs**
 
