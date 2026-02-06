@@ -72,7 +72,7 @@
 
 ---
 
-**Note on Extended Chat**: v1.10.4 includes substantial improvements, but I'm actively working on fixing bugs related to auto-summarization and character/NPC card insertion in long-form chat. These improvements will be coming in v1.10.5. I wanted to release v1.10.4 now as it's becoming quite dense, but extended chat optimization is a priority for the next release.
+**Note on Extended Chat**: v1.10.4 includes substantial improvements, but I'm actively working on a major change in philosophy and function for long-form chats. One of the pillars of this project has been avoiding character meltdown by token 12k, and I think this will be a big step in the right direction. These improvements will be coming in v1.11.0. I wanted to release v1.10.4 now as it's becoming quite dense, but extended chat optimization is a priority for the next release.
 
 ## Why It’s Different
 
