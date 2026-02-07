@@ -48,7 +48,7 @@ What's New
 1. **Continuous Character Presence (SCENE CAST)**
 - Every turn shows who's in the scene with their key traits and speech style
 - Replaces "reinforce every 5 turns" with constant lightweight grounding
-- Pre-generated "capsules", essentially shorter character cards with dislog examples, for each active character/NPC, every turn
+- Pre-generated "capsules", essentially shorter character cards with dialog examples, for each active character/NPC, every turn
 
 2. **Strategic Full Card Injection**
 - Full character cards appear at reset points: first appearance, sticky window (turns 1-3), and after long absence (20+ messages)
