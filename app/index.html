@@ -2178,7 +2178,7 @@
                     <div class="relative">
                         <select x-model="selectedMode"
                             class="appearance-none bg-slate-700/50 border border-slate-600 text-slate-300 rounded-2xl px-4 py-3 pr-10 text-[10px] font-bold uppercase tracking-widest outline-none focus:ring-2 focus:ring-blue-500/30 cursor-pointer shadow-lg shadow-black/20 hover:bg-slate-700 transition-all"
-                            :class="isClassifyingMode ? 'opacity-50' : ''" :disabled="!canGenerateText()">
+                            :disabled="!canGenerateText()">
                             <option value="auto">🤖 Auto</option>
                             <option value="narrator">🎭 Narrator</option>
                             <template x-for="char in activeCharactersWithData()" :key="char.data.name">
@@ -2186,9 +2186,7 @@
                             </template>
                         </select>
                         <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">
-                            <i class="fa-solid fa-chevron-down text-[8px]" x-show="!isClassifyingMode"></i>
-                            <i class="fa-solid fa-circle-notch fa-spin text-[10px] text-blue-400"
-                                x-show="isClassifyingMode"></i>
+                            <i class="fa-solid fa-chevron-down text-[8px]"></i>
                         </div>
                         <div x-show="!canGenerateText()"
                             class="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full shadow-lg shadow-red-900/40">
@@ -3287,7 +3285,6 @@
 
             // Mode selector
             selectedMode: 'auto',
-            isClassifyingMode: false,
 
             // Inpaint state
             showInpaintDialog: false,
@@ -5005,20 +5002,27 @@
                     return this.selectedMode;
                 }
 
-                this.isClassifyingMode = true;
-                try {
-                    const charNames = this.activeCharactersWithData().map(c => c.data.name);
-                    const res = await axios.post('/api/classify-mode', {
-                        user_message: userMessage,
-                        character_names: charNames
-                    });
-                    if (res.data.success) {
-                        return res.data.mode;
+                const charNames = this.activeCharactersWithData().map(c => c.data.name);
+                const messageLower = userMessage.toLowerCase();
+
+                for (const charName of charNames) {
+                    if (messageLower.includes(charName.toLowerCase())) {
+                        return 'focus:' + charName;
                     }
-                } catch (e) {
-                    console.error('Mode classification failed', e);
-                } finally {
-                    this.isClassifyingMode = false;
+                }
+
+                const addressPatterns = [
+                    /^(talk to|ask|tell|say to)\s+(\w+)/i,
+                    /^(\w+),?\s*(please|can you|will you|i need|help)/i
+                ];
+
+                for (const pattern of addressPatterns) {
+                    const match = messageLower.match(pattern);
+                    if (match) {
+                        const targetName = match[match.length - 1];
+                        const matchedChar = charNames.find(n => n.toLowerCase() === targetName.toLowerCase());
+                        if (matchedChar) return 'focus:' + matchedChar;
+                    }
                 }
 
                 return 'narrator';

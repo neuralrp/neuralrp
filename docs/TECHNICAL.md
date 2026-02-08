@@ -1694,9 +1694,11 @@ In v1.8.1, the edit override system was removed. Edited characters now follow th
 - Stops before other characters can speak
 - Useful for intimate scenes or character-focused interactions
 
-**Auto Mode** (available via API):
-- AI decides who should respond based on context
-- Uses `/api/classify-mode` endpoint to analyze user message
+**Auto Mode**:
+- Determines who should respond based on keyword-based heuristic classification
+- Matches character names in messages (case-insensitive) to trigger focus mode
+- Pattern matching for "talk to [name]" or "[name], please..." style addresses
+- Defaults to narrator if no character matched
 
 ### Token Budget Management
 
@@ -10640,7 +10642,7 @@ For complete API documentation, see the source code in `main.py`. Key endpoints 
 
 **Chats**: `/api/chats` (GET, POST, DELETE, fork, branches, cleanup-old-summarized, summarized/stats)
 
-**LLM**: `/api/chat`, `/api/extra/tokencount`, `/api/classify-mode`
+**LLM**: `/api/chat`, `/api/extra/tokencount`
 
 **Images**: `/api/generate-image`, `/api/inpaint`, `/api/image-metadata/{filename}`
 

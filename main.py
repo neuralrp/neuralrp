@@ -886,7 +886,7 @@ def get_entity_id(character_obj: Any) -> str:
 def build_entity_name_mapping(
     characters: List[Dict],
     npcs: Dict
-) -> Dict[str, str]:
+    ) -> Dict[str, str]:
     """
     Build mapping from entity_id to display name.
     
@@ -895,6 +895,8 @@ def build_entity_name_mapping(
     Returns:
         {entity_id: display_name, ...}
     """
+    from urllib.parse import unquote
+    
     mapping = {}
     
     # Global characters
@@ -903,6 +905,7 @@ def build_entity_name_mapping(
         name = get_character_name(char)
         if entity_id and name:
             mapping[entity_id] = name
+            mapping[unquote(entity_id)] = name
     
     # Local NPCs
     for npc_id, npc in npcs.items():
@@ -910,6 +913,7 @@ def build_entity_name_mapping(
         name = npc.get('name', 'Unknown NPC')
         if entity_id:
             mapping[entity_id] = name
+            mapping[unquote(entity_id)] = name
     
     return mapping
 
@@ -931,17 +935,23 @@ def detect_cast_change(
     Returns:
         (changed: bool, departed: Set[str], arrived: Set[str], updated_metadata: Dict)
     """
+    from urllib.parse import unquote
+    
     # Build current active set (entity IDs)
     current_set = set()
     for char in current_characters:
         if char.get('is_active', True):
-            current_set.add(char.get('_filename'))
+            entity_id = char.get('_filename')
+            if entity_id:
+                current_set.add(entity_id)
     for npc_id, npc in current_npcs.items():
         if npc.get('is_active', True):
-            current_set.add(npc.get('entity_id') or npc_id)
+            entity_id = unquote(npc.get('entity_id') or npc_id)
+            if entity_id:
+                current_set.add(entity_id)
     
     # Get previous state from provided metadata
-    previous_set = set(previous_metadata.get('previous_active_cast', []))
+    previous_set = set(unquote(id) for id in previous_metadata.get('previous_active_cast', []))
     previous_focus = previous_metadata.get('previous_focus_character')
     
     # Determine current focus (for tracking, NOT for cast change detection)
@@ -6213,6 +6223,9 @@ async def assign_visual_canon_npc(chat_id: str, npc_id: str, request: VisualCano
     matching Danbooru character via semantic search.
     """
     try:
+        from urllib.parse import unquote
+        npc_id = unquote(npc_id)
+        
         from app.visual_canon_assigner import VisualCanonAssigner
         from app.database import db_get_chat
 
@@ -6277,6 +6290,9 @@ async def reroll_visual_canon_npc(chat_id: str, npc_id: str):
     Keeps same constraints (gender) but selects different character.
     """
     try:
+        from urllib.parse import unquote
+        npc_id = unquote(npc_id)
+        
         from app.visual_canon_assigner import VisualCanonAssigner
         from app.database import db_get_chat
 
@@ -6411,6 +6427,9 @@ async def generate_danbooru_tags_npc_endpoint(
     Same logic as character endpoint, but stores binding in chat_npcs table.
     """
     try:
+        from urllib.parse import unquote
+        npc_id = unquote(npc_id)
+        
         from app.danbooru_tag_generator import generate_and_assign_to_npc
         
         result = generate_and_assign_to_npc(
@@ -6442,6 +6461,9 @@ async def generate_capsule_npc_endpoint(
     Returns capsule text to populate Capsule field in NPC editor.
     """
     try:
+        from urllib.parse import unquote
+        npc_id = unquote(npc_id)
+        
         capsule = await generate_capsule_for_character(
             char_name=request.name,
             description=request.description,
@@ -7311,6 +7333,9 @@ async def update_npc(chat_id: str, npc_id: str, request: Request):
     - If NPC only exists in metadata, sync it to database
     """
     try:
+        from urllib.parse import unquote
+        npc_id = unquote(npc_id)
+        
         body = await request.json()
         npc_data = body.get("data", {})
 
@@ -7415,16 +7440,11 @@ async def promote_npc_to_global(chat_id: str, npc_id: str):
     5. Create new global entity ID
     6. Update chat's activeCharacters to use global character
     7. Mark NPC as promoted AND REMOVE from localnpcs metadata (prevents stale data)
-    
-    Returns:
-        {
-            "success": bool,
-            "filename": str,  # Global character filename
-            "global_entity_id": str,  # New entity ID for global character
-            "promoted_npc_id": str  # Original NPC ID (now promoted)
-        }
     """
     try:
+        from urllib.parse import unquote
+        npc_id = unquote(npc_id)
+
         # 1. Load chat and verify NPC exists
         chat = db_get_chat(chat_id)
         if not chat:
@@ -7548,6 +7568,9 @@ async def delete_npc(chat_id: str, npc_id: str):
         }
     """
     try:
+        from urllib.parse import unquote
+        npc_id = unquote(npc_id)
+        
         # 1. Load chat
         chat = db_get_chat(chat_id)
         if not chat:
@@ -7632,16 +7655,11 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
     Args:
         chat_id: Chat ID
         npc_id: Unique NPC entity ID
-    
-    Returns:
-        {
-            "success": bool,
-            "npc_id": str,
-            "is_active": bool,
-            "message": str
-        }
     """
     try:
+        from urllib.parse import unquote
+        npc_id = unquote(npc_id)
+
         # Load chat
         chat = db_get_chat(chat_id)
         if not chat:

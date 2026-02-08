@@ -5,6 +5,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.11.1] - 2026-02-07
+
+### Fixed
+- **NPC URL Encoding Issues**: Fixed two related problems with NPCs containing spaces or special characters in names:
+  - NPC save operations now work correctly (404 errors when editing NPCs)
+  - SCENE UPDATE blocks now display NPC names correctly instead of "None has entered the scene"
+  - URL decoding added to NPC endpoints and cast change detection to handle encoded entity IDs consistently
+- **Auto Mode Classification**: Replaced missing `/api/classify-mode` endpoint with keyword-based heuristic classification
+  - Character names in messages now trigger focus mode (case-insensitive matching)
+  - Pattern matching for "talk to [name]" or "[name], please..." style addresses
+  - Eliminates 404 errors and LLM overhead during auto mode
+
+***
+
 ## [1.11.0] - 2026-02-06
 
 ### Changed
