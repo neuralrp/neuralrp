@@ -3603,6 +3603,16 @@
                         user_danbooru_tag: this.settings.user_danbooru_tag || ''
                     });
                     console.log('[SNAPSHOT] Settings synced successfully:', response.data);
+                    
+                    if (!this.currentChatMetadata) {
+                        this.currentChatMetadata = {};
+                    }
+                    this.currentChatMetadata.snapshot_settings = {
+                        include_user_in_snapshots: this.settings.include_user_in_snapshots,
+                        user_gender: this.settings.user_gender,
+                        user_danbooru_tag: this.settings.user_danbooru_tag
+                    };
+                    console.log('[SNAPSHOT] Updated currentChatMetadata:', this.currentChatMetadata.snapshot_settings);
                 } catch (e) {
                     console.error('[SNAPSHOT] Failed to sync settings:', e);
                     console.error('[SNAPSHOT] Error details:', e.response?.data || e.message);
@@ -4623,13 +4633,30 @@
                         this.showNotification(`NPC "${res.data.name}" created!`, 'success');
 
                         // Handle both field name formats (entityid and entity_id)
-                        const newEntityId = res.data.entity_id || res.data.entity_id;
+                        const newEntityId = res.data.entityid || res.data.entity_id;
                         if (newEntityId && !this.activeCharacters.includes(newEntityId)) {
                             this.activeCharacters.push(newEntityId);
+                            console.log('[NPC_CREATE] Added NPC to activeCharacters:', newEntityId);
+                        } else if (newEntityId) {
+                            console.log('[NPC_CREATE] NPC already in activeCharacters:', newEntityId);
+                        } else {
+                            console.error('[NPC_CREATE] ERROR: No entity_id or entityid in response!', res.data);
+                            this.showNotification('NPC created but entity ID missing!', 'warning');
                         }
 
                         await this.loadChatNPCs(this.currentChatId);
                         await this.autosaveChat();
+                        
+                        // Validation: Verify NPC is in loaded list
+                        setTimeout(() => {
+                            const found = this.localNPCs.find(n => n.entity_id === newEntityId || n.entityid === newEntityId);
+                            if (!found) {
+                                console.error('[NPC_CREATE] VALIDATION FAILED: NPC not found in loaded list!', newEntityId);
+                                this.showNotification('NPC created but failed to load. Try refreshing.', 'error');
+                            } else {
+                                console.log('[NPC_CREATE] VALIDATION PASSED: NPC found in loaded list');
+                            }
+                        }, 1000);
                         this.npcDescription = '';
                         this.npcName = '';
                         this.npcGender = '';
@@ -4678,11 +4705,30 @@
                     if (res.data.success) {
                         this.showNotification(`NPC "${res.data.name}" created!`, 'success');
 
-                        if (res.data.entity_id && !this.activeCharacters.includes(res.data.entity_id)) {
-                            this.activeCharacters.push(res.data.entity_id);
+                        // Handle both field name formats (entityid and entity_id)
+                        const newEntityId = res.data.entityid || res.data.entity_id;
+                        if (newEntityId && !this.activeCharacters.includes(newEntityId)) {
+                            this.activeCharacters.push(newEntityId);
+                            console.log('[NPC_CREATE] Added NPC to activeCharacters:', newEntityId);
+                        } else if (newEntityId) {
+                            console.log('[NPC_CREATE] NPC already in activeCharacters:', newEntityId);
+                        } else {
+                            console.error('[NPC_CREATE] ERROR: No entity_id or entityid in response!', res.data);
+                            this.showNotification('NPC created but entity ID missing!', 'warning');
                         }
                         await this.loadChatNPCs(this.currentChatId);
                         await this.autosaveChat();
+                        
+                        // Validation: Verify NPC is in loaded list
+                        setTimeout(() => {
+                            const found = this.localNPCs.find(n => n.entity_id === newEntityId || n.entityid === newEntityId);
+                            if (!found) {
+                                console.error('[NPC_CREATE] VALIDATION FAILED: NPC not found in loaded list!', newEntityId);
+                                this.showNotification('NPC created but failed to load. Try refreshing.', 'error');
+                            } else {
+                                console.log('[NPC_CREATE] VALIDATION PASSED: NPC found in loaded list');
+                            }
+                        }, 1000);
                         this.selectedText = '';
                         this.npcName = '';
                         this.npcGender = '';
@@ -5450,7 +5496,8 @@
                         prompt: this.inpaintPrompt,
                         width: img.naturalWidth,
                         height: img.naturalHeight,
-                        denoising_strength: this.inpaintDenoisingStrength
+                        denoising_strength: this.inpaintDenoisingStrength,
+                        negative_prompt: this.sdParams.negative_prompt || ''
                     });
 
                     if (res.data.url) {
@@ -6733,7 +6780,8 @@
                         chat_id: this.currentChatId,
                         width: this.sdParams.width,
                         height: this.sdParams.height,
-                        mode: this.selectedMode
+                        mode: this.selectedMode,
+                        negative_prompt: this.sdParams.negative_prompt || ''
                     });
 
                     if (response.data.error) {
@@ -6911,7 +6959,8 @@
                 try {
                     const response = await axios.post(`/api/chat/${this.currentChatId}/snapshot/regenerate`, {
                         width: this.sdParams.width,
-                        height: this.sdParams.height
+                        height: this.sdParams.height,
+                        negative_prompt: this.sdParams.negative_prompt || ''
                     });
 
                     if (response.data.error) {

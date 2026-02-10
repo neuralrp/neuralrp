@@ -5,6 +5,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [1.12.0] - 2026-02-09
+
+### Changed
+- **NPC Unification to Characters Table**: NPCs are now stored in the unified `characters` table alongside global characters, eliminating the separate `chat_npcs` table. This simplifies code, prevents sync issues, and provides a single source of truth for all character data. Both global characters and NPCs now use the same database layer and helper functions.
+- **Filename-Based Entity IDs**: All entities (characters and NPCs) now use filenames as entity IDs (e.g., `alice.json`, `npc_alice_123.json`) instead of the old separate entity_id system. This unifies relationship tracking, visual canon assignment, and other entity-based operations.
+- **Automatic NPC Migration**: On first startup after v1.12.0 upgrade, existing NPCs are automatically migrated from `chat_npcs` to the `characters` table with new filename-based entity IDs. The old table is preserved as `chat_npcs_backup` for rollback capability.
+
+### Added
+- **Database Schema Version 6**: Added `chat_id` column to `characters` table to distinguish between global characters (`chat_id IS NULL`) and local NPCs (`chat_id = 'chat_id'`).
+- **Unified Character Loading**: `db_get_characters(chat_id)` function now retrieves both global and NPC characters from the same table, with `is_npc` flag indicating type.
+- **Unified NPC CRUD Functions**: All NPC operations (create, update, delete, promote) now use the `characters` table, with same API patterns as global characters.
+- **Visual Canon for NPCs**: Visual canon assignment functions (`db_assign_visual_canon_to_npc`, `db_clear_visual_canon_from_npc`, `db_get_npc_visual_canon`) now use the unified `characters` table, enabling visual canon for NPCs.
+
+### Technical
+- **Database Migration Handler**: Schema version 5 → 6 migration handles automatic NPC migration with filename generation and entity ID updates.
+- **Helper Function Updates**: `get_entity_id()` now consistently returns filename for all entity types. `load_character_profiles()` updated to load NPCs from unified table.
+- **API Endpoint Unification**: All NPC endpoints now use filename-based entity IDs (`/api/chats/{chat_id}/npcs/{filename}`) instead of old entity_id format.
+- **Metadata Simplification**: NPC data stored in `characters` table, with only `localnpcs` in chat metadata for active status tracking.
+
+### Fixed
+- **Danbooru Tag Generation**: Fixed visual canon assignment for NPCs by updating all related functions to use the unified `characters` table instead of the deprecated `chat_npcs` table.
+
+### Migration Notes
+- **Automatic Migration**: Existing NPCs are automatically migrated on startup with no user intervention required.
+- **Filename Generation**: NPCs receive filenames in format `npc_{sanitized_name}_{timestamp}.json` to ensure uniqueness.
+- **Entity ID Updates**: The `entities` table is updated to use filenames as entity IDs, preserving relationship data.
+- **Chat Metadata Updates**: NPC references in chat metadata are updated from old entity_id format to new filename format.
+- **Backup Table**: Original `chat_npcs` table preserved as `chat_npcs_backup` for rollback capability.
+
+***
+
 ## [1.11.1] - 2026-02-07
 
 ### Fixed

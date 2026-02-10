@@ -43,7 +43,7 @@ from app.database import (
     db_get_message_context, db_cleanup_old_autosaved_chats, db_cleanup_empty_chats, db_create_empty_chat,
     db_get_chat_npcs, db_create_npc_and_update_chat,
     db_get_npc_by_id, db_update_npc, db_create_npc_with_entity_id,
-    db_delete_npc, db_set_npc_active,
+    db_delete_npc,
     # Image metadata operations
     db_save_image_metadata, db_get_image_metadata, db_get_all_image_metadata,
     # sqlite-vec embedding operations
@@ -544,10 +544,10 @@ class InpaintRequest(BaseModel):
     width: int = 512
     height: int = 512
     denoising_strength: float = 0.75
-    cfg_scale: float = 8.0
-    steps: int = 20
-    sampler_name: str = "DPM++ 2M"
-    mask_blur: int = 4
+    cfg_scale: float = 6.0
+    steps: int = 25
+    sampler_name: str = "Euler a"
+    mask_blur: int = 7
 
 class CardGenRequest(BaseModel):
     char_name: Optional[str] = "" 
@@ -770,6 +770,65 @@ Output ONLY the body line, nothing else."""
     result = await call_llm_helper(system, prompt, 300)
     return result.strip()
 
+def parse_traits(text: str) -> List[str]:
+    """Parse traits from multiple LLM output formats.
+
+    Handles:
+    - Comma-separated: "trait1, trait2, trait3"
+    - Bullet points: "- trait1\n- trait2\n- trait3"
+    - Numbered lists: "1. trait1\n2. trait2\n3. trait3"
+    - Newline-separated: "trait1\ntrait2\ntrait3"
+
+    Args:
+        text: Raw LLM response text containing traits
+
+    Returns:
+        List of cleaned trait strings
+    """
+    import re
+    traits = []
+
+    # Try bullet points first (most common in user's example)
+    if text.strip().startswith("-"):
+        lines = text.split("\n")
+        for line in lines:
+            line = line.strip()
+            if line.startswith("-"):
+                trait = line[1:].strip()
+                trait = trait.lstrip("•*1234567890.")
+                trait = trait.strip().strip('"').strip("'")
+                if trait:
+                    traits.append(trait)
+
+    # Try numbered lists
+    elif re.match(r'^\\s*\\d+[\\.)]', text.strip()):
+        lines = text.split("\n")
+        for line in lines:
+            match = re.match(r'^\\s*\\d+[\\.)]\\s*(.+)', line.strip())
+            if match:
+                trait = match.group(1).strip().strip('"').strip("'")
+                if trait:
+                    traits.append(trait)
+
+    # Try comma-separated
+    elif "," in text:
+        for t in text.split(","):
+            trait = t.strip().strip('"').strip("'")
+            if trait:
+                traits.append(trait)
+
+    # Try newline-separated as fallback
+    else:
+        for line in text.split("\n"):
+            line = line.strip()
+            if line:
+                line = line.lstrip("-•*")
+                line = line.strip().strip('"').strip("'")
+                if line:
+                    traits.append(line)
+
+    return traits
+
 class WorldGenRequest(BaseModel):
     world_name: str
     section: str # history, locations, creatures, factions
@@ -798,6 +857,11 @@ class CharacterEditFieldRequest(BaseModel):
     field: str
     context: Optional[str] = ""  # Context for AI generation
     source_mode: Optional[str] = "manual"  # "chat" or "manual"
+
+class NpcEditFieldRequest(BaseModel):
+    field: str  # mes_example, personality, body, scenario, first_message
+    context: Optional[str] = ""
+    source_mode: Optional[str] = "manual"
 
 class WorldEditRequest(BaseModel):
     world_name: str
@@ -3231,15 +3295,16 @@ async def trigger_cast_change_summarization(
             return
 
         messages = chat.get('messages', [])
-        recent, old = split_messages_by_window(messages)
+        chat_messages = [ChatMessage(**msg) for msg in messages]
+        recent, old = split_messages_by_window(chat_messages)
 
         if not old:
             logger.info(f"Cast-change summarization: no old messages for chat {chat_id}")
             return
 
-        old_start_index = len(messages) - len(recent) - len(old)
-        start_turn = calculate_turn_for_message(messages, old_start_index)
-        end_turn = calculate_turn_for_message(messages, len(messages) - 1)
+        old_start_index = len(chat_messages) - len(recent) - len(old)
+        start_turn = calculate_turn_for_message(chat_messages, old_start_index)
+        end_turn = calculate_turn_for_message(chat_messages, len(chat_messages) - 1)
 
         departed_names = [entity_to_name.get(e, e) for e in departed_characters]
         departed_note = f"Note: {', '.join(departed_names)} exited during this scene. Mention their departure."
@@ -3259,9 +3324,10 @@ async def trigger_cast_change_summarization(
         existing_summary = chat.get('summary', '')
         new_summary = (existing_summary + "\n\n" + scene_capsule).strip()
         chat['summary'] = new_summary
+        chat['messages'] = [m.dict() for m in recent]
         db_save_chat(chat_id, chat)
 
-        logger.info(f"Cast-change summarization completed for chat {chat_id} ({len(old)} messages)")
+        logger.info(f"Cast-change summarization completed for chat {chat_id} ({len(old)} messages, truncated to {len(recent)} active)")
 
     except Exception as e:
         logger.error(f"Cast-change summarization failed for chat {chat_id}: {e}")
@@ -3282,7 +3348,8 @@ async def trigger_threshold_summarization(
             return
 
         messages = chat.get('messages', [])
-        recent, old = split_messages_by_window(messages)
+        chat_messages = [ChatMessage(**msg) for msg in messages]
+        recent, old = split_messages_by_window(chat_messages)
 
         if not old:
             logger.info(f"Threshold summarization: no old messages for chat {chat_id}")
@@ -3317,9 +3384,10 @@ async def trigger_threshold_summarization(
         combined_capsules = "\n\n".join(capsules)
         new_summary = (existing_summary + "\n\n" + combined_capsules).strip()
         chat['summary'] = new_summary
+        chat['messages'] = [m.dict() for m in recent]
         db_save_chat(chat_id, chat)
 
-        logger.info(f"Threshold summarization completed for chat {chat_id} ({len(scenes)} scenes, {len(old)} messages)")
+        logger.info(f"Threshold summarization completed for chat {chat_id} ({len(scenes)} scenes, {len(old)} messages, truncated to {len(recent)} active)")
 
     except Exception as e:
         logger.error(f"Threshold summarization failed for chat {chat_id}: {e}")
@@ -3617,9 +3685,11 @@ async def generate_card_field(req: CardGenRequest):
 
             PERSONALITY_TRAITS:
             [List 4-6 personality traits, comma-separated]
+            Example: mysterious, intelligent, kind, brave, adventurous
 
             PHYSICAL_TRAITS:
             [List 4-6 physical/body traits, comma-separated]
+            Example: tall, dark hair, blue eyes, scar on cheek, leather jacket
 
             SCENARIO:
             [Write a scenario describing the setting/situation where you meet this character]
@@ -3668,12 +3738,12 @@ async def generate_card_field(req: CardGenRequest):
                 # Extract sections from LLM response
                 if "PERSONALITY_TRAITS:" in llm_result:
                     traits_text = llm_result.split("PERSONALITY_TRAITS:")[1].split("PHYSICAL_TRAITS:")[0].strip()
-                    personality_traits = [t.strip().strip('"').strip("'") for t in traits_text.split(",") if t.strip()]
+                    personality_traits = parse_traits(traits_text)
                     print(f"[NPC_CREATE] Extracted PERSONALITY_TRAITS: {len(personality_traits)} traits")
 
                 if "PHYSICAL_TRAITS:" in llm_result:
                     physical_text = llm_result.split("PHYSICAL_TRAITS:")[1].split("SCENARIO:")[0].strip()
-                    physical_traits = [t.strip().strip('"').strip("'") for t in physical_text.split(",") if t.strip()]
+                    physical_traits = parse_traits(physical_text)
                     print(f"[NPC_CREATE] Extracted PHYSICAL_TRAITS: {len(physical_traits)} traits")
 
                 if "SCENARIO:" in llm_result:
@@ -4282,6 +4352,120 @@ async def edit_character_field_ai(req: CharacterEditFieldRequest):
         print(f"Error in edit_character_field_ai: {e}")
         return {"success": False, "error": str(e)}
 
+@app.post("/api/chats/{chat_id}/npcs/{npc_id}/edit-field-ai")
+async def edit_npc_field_ai(chat_id: str, npc_id: str, req: NpcEditFieldRequest):
+    """Use AI to generate or improve an NPC field.
+
+    Takes current field value + all other NPC data from database,
+    generates improved/expanded content, and OVERWRITES field.
+
+    Supported fields:
+    - mes_example: Example dialogue exchanges
+    - personality: Personality traits (PList format)
+    - body: Physical description (PList format, stored in description)
+    - scenario: Single sentence scenario
+    - first_message: Opening greeting (Markdown format)
+
+    Args:
+        chat_id: Chat ID for NPC
+        npc_id: NPC entity ID (filename)
+        req: NpcEditFieldRequest with field, context, source_mode
+
+    Returns:
+        JSON with success status and generated text
+    """
+    try:
+        from urllib.parse import unquote
+        filename = unquote(npc_id)
+
+        print(f"[NPC_EDIT_AI] Request received:")
+        print(f"[NPC_EDIT_AI]   - chat_id: {chat_id}")
+        print(f"[NPC_EDIT_AI]   - npc_id: {filename}")
+        print(f"[NPC_EDIT_AI]   - field: {req.field}")
+
+        # Load NPC from database
+        npc_data = db_get_character(filename, chat_id)
+        if not npc_data:
+            return {"success": False, "error": "NPC not found in database"}
+
+        char_name = npc_data["name"]
+        personality = npc_data["data"].get("personality", "")
+        description = npc_data["data"].get("description", "")
+        scenario = npc_data["data"].get("scenario", "")
+        mes_example = npc_data["data"].get("mes_example", "")
+
+        result = ""
+
+        if req.field == "mes_example":
+            current_example = npc_data["data"].get("mes_example", "")
+            result = await generate_dialogue_for_edit(
+                char_name, personality, description, scenario, current_example
+            )
+            npc_data["data"]["mes_example"] = result
+
+        elif req.field == "personality":
+            current_personality = npc_data["data"].get("personality", "")
+            result = await generate_personality_for_edit(
+                char_name, current_personality, description, scenario
+            )
+            npc_data["data"]["personality"] = result
+
+        elif req.field == "body":
+            current_body = npc_data["data"].get("description", "")
+            result = await generate_body_for_edit(
+                char_name, current_body, personality, description, scenario
+            )
+            npc_data["data"]["description"] = result
+
+        elif req.field == "scenario":
+            current_scenario = npc_data["data"].get("scenario", "")
+            result = await generate_scenario_for_edit(
+                char_name, current_scenario, personality, description, scenario
+            )
+            npc_data["data"]["scenario"] = result
+
+        elif req.field == "first_message":
+            current_first_msg = npc_data["data"].get("first_mes", "")
+            result = await generate_first_message_for_edit(
+                char_name, current_first_msg, personality, description, scenario
+            )
+            npc_data["data"]["first_mes"] = result
+
+        else:
+            return {"success": False, "error": f"Field '{req.field}' not supported for AI generation"}
+
+        # Save updated NPC to database
+        success = db_update_npc(chat_id, filename, npc_data["data"])
+        if not success:
+            return {"success": False, "error": "Failed to update NPC in database"}
+
+        # Update chat metadata for consistency
+        chat = db_get_chat(chat_id)
+        if chat:
+            metadata = chat.get("metadata", {}) or {}
+            localnpcs = metadata.get("localnpcs", {}) or {}
+
+            if filename in localnpcs:
+                localnpcs[filename]["data"] = npc_data["data"]
+                localnpcs[filename]["name"] = npc_data.get(
+                    "name",
+                    localnpcs[filename].get("name", "Unknown"),
+                )
+                localnpcs[filename]["updated_at"] = int(time.time())
+
+            metadata["localnpcs"] = localnpcs
+            chat["metadata"] = metadata
+            db_save_chat(chat_id, chat)
+            print(f"[NPC_EDIT_AI] NPC {filename} updated in database and metadata")
+
+        return {"success": True, "text": result}
+
+    except Exception as e:
+        print(f"Error in edit_npc_field_ai: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
 # World Info Generation Logic (Ported from world-gen-app)
 WORLD_PROMPTS = {
     "history": {
@@ -4520,7 +4704,7 @@ async def dismiss_hint(request: dict):
         return {"success": True}
     return {"success": False, "error": "No hint_id provided"}
 
-def load_character_profiles(active_chars: List[str], localnpcs: Dict) -> List[dict]:
+def load_character_profiles(active_chars: List[str], localnpcs: Dict, chat_id: Optional[str] = None) -> List[dict]:
     """Load both global characters and local NPCs into unified character profile list."""
     character_profiles = []
 
@@ -4530,37 +4714,44 @@ def load_character_profiles(active_chars: List[str], localnpcs: Dict) -> List[di
             char_ref = char_ref.get("id") or char_ref.get("name") or ""
 
         if isinstance(char_ref, str) and char_ref.startswith("npc_"):
-            # Load NPC from local metadata
-            if char_ref in localnpcs:
-                npc = localnpcs[char_ref]
-                
-                # Validate NPC has required data
-                if not npc.get('name'):
-                    print(f"[ERROR] NPC {char_ref} missing name, skipping")
-                    continue
-                
-                if not npc.get('data'):
-                    print(f"[ERROR] NPC {char_ref} missing character data, skipping")
-                    continue
-                
-                # Check if NPC is active
-                if not npc.get('is_active', True):
-                    print(f"[CONTEXT] Skipping inactive NPC: {npc['name']}")
-                    continue
-                
-                # Normalize NPC data to ensure all V2 fields (including extensions.gender)
-                npc_data_normalized = normalize_character_v2({'data': npc['data']})['data']
-                
-                # Add to profiles
-                character_profiles.append({
-                    'name': npc['name'],
-                    'data': npc_data_normalized,
-                    'entity_id': char_ref,
-                    'is_npc': True,
-                    'updated_at': npc.get('updated_at', 0)
-                })
+            # Load NPC from unified characters table
+            if chat_id:
+                npc_data = db_get_character(char_ref, chat_id=chat_id)
+                if npc_data:
+                    # Validate NPC has required data
+                    if not npc_data.get('name'):
+                        print(f"[ERROR] NPC {char_ref} missing name, skipping")
+                        continue
+
+                    if not npc_data.get('data'):
+                        print(f"[ERROR] NPC {char_ref} missing character data, skipping")
+                        continue
+
+                    # Check if NPC is active (from metadata)
+                    is_active = True
+                    if char_ref in localnpcs:
+                        is_active = localnpcs[char_ref].get('is_active', True)
+
+                    if not is_active:
+                        print(f"[CONTEXT] Skipping inactive NPC: {npc_data.get('name')}")
+                        continue
+
+                    # Normalize NPC data to ensure all V2 fields (including extensions.gender)
+                    npc_data_normalized = normalize_character_v2({'data': npc_data['data']})['data']
+
+                    # Add to profiles
+                    character_profiles.append({
+                        'name': npc_data['name'],
+                        'data': npc_data_normalized,
+                        '_filename': npc_data['_filename'],
+                        'entity_id': char_ref,
+                        'is_npc': True,
+                        'updated_at': npc_data.get('updated_at', 0)
+                    })
+                else:
+                    print(f"[WARNING] NPC {char_ref} not found in database, skipping")
             else:
-                print(f"[WARNING] NPC {char_ref} not found in chat metadata, skipping")
+                print(f"[WARNING] NPC {char_ref} requires chat_id, skipping")
         else:
             # Load global character from database
             char_data = db_get_character(char_ref)
@@ -4569,20 +4760,21 @@ def load_character_profiles(active_chars: List[str], localnpcs: Dict) -> List[di
                 if not char_data.get('data'):
                     print(f"[ERROR] Global character {char_ref} missing data, skipping")
                     continue
-                
+
                 character_profiles.append({
                     'name': get_character_name(char_data),
                     'data': char_data.get('data', {}),
+                    '_filename': char_ref,
                     'entity_id': char_ref,
                     'is_npc': False,
                     'updated_at': char_data.get('updated_at', 0)
                 })
             else:
                 print(f"[WARNING] Global character {char_ref} not found, skipping")
-    
+
     npc_count = sum(1 for c in character_profiles if c.get('is_npc', False))
     print(f"[CONTEXT] Loaded {len(character_profiles)} characters ({npc_count} NPCs)")
-    
+
     return character_profiles
 
 @app.post("/api/chat")
@@ -4605,33 +4797,35 @@ async def chat(request: PromptRequest):
     # Check if characters are already resolved (dicts with 'data' field)
     # This happens on subsequent messages after first resolution
     if request.characters and isinstance(request.characters[0], dict) and "data" in request.characters[0]:
-        # Characters already resolved - BUT reload NPCs from metadata
+        # Characters already resolved - BUT reload NPCs from database
         # NPCs are frequently edited mid-chat and need fresh data
         if chat_data:
             metadata = chat_data.get("metadata", {}) or {}
             localnpcs = metadata.get("localnpcs", {}) or {}
-            
-            # Reload NPCs from metadata to get latest edits
+
+            # Reload NPCs from database to get latest edits
             npcs_updated = 0
             for i, char in enumerate(request.characters):
                 if char.get("is_npc") or char.get("npcId"):
-                    entity_id = char.get("entity_id") or char.get("npcId")
-                    if entity_id in localnpcs:
-                        # Reload NPC from metadata with latest data
-                        # Normalize to ensure all V2 fields (including extensions.gender)
-                        npc_data = localnpcs[entity_id].get('data', char.get('data'))
-                        npc_data_normalized = normalize_character_v2({'data': npc_data})['data']
-                        request.characters[i] = {
-                            'name': localnpcs[entity_id].get('name', char.get('name')),
-                            'data': npc_data_normalized,
-                            'entity_id': entity_id,
-                            'is_npc': True,
-                            'updated_at': localnpcs[entity_id].get('updated_at', 0)
-                        }
-                        npcs_updated += 1
-            
+                    entity_id = char.get("entity_id") or char.get("npcId") or char.get("_filename")
+                    if entity_id and entity_id.startswith("npc_"):
+                        # Reload NPC from database with latest data
+                        npc_data = db_get_character(entity_id, chat_id=request.chat_id)
+                        if npc_data:
+                            # Normalize to ensure all V2 fields (including extensions.gender)
+                            npc_data_normalized = normalize_character_v2({'data': npc_data['data']})['data']
+                            request.characters[i] = {
+                                'name': npc_data['name'],
+                                'data': npc_data_normalized,
+                                '_filename': npc_data['_filename'],
+                                'entity_id': entity_id,
+                                'is_npc': True,
+                                'updated_at': npc_data.get('updated_at', 0)
+                            }
+                            npcs_updated += 1
+
             if npcs_updated > 0:
-                print(f"[CONTEXT] Reloaded {npcs_updated} NPCs from metadata (mid-chat edits detected)")
+                print(f"[CONTEXT] Reloaded {npcs_updated} NPCs from database (mid-chat edits detected)")
 
             # Also reload global characters that may have been edited (new chat or outdated cache)
             global_chars_updated = 0
@@ -4670,7 +4864,7 @@ async def chat(request: PromptRequest):
             active_chars = chat_data.get("activeCharacters", [])
 
             # Resolve character references to full objects
-            resolved_characters = load_character_profiles(active_chars, localnpcs)
+            resolved_characters = load_character_profiles(active_chars, localnpcs, chat_id=request.chat_id)
             request.characters = resolved_characters
 
 
@@ -4902,22 +5096,31 @@ async def chat(request: PromptRequest):
 
             # 1. Cast-change forced summarization
             if cast_changed and departed:
-                asyncio.create_task(trigger_cast_change_summarization(
+                await trigger_cast_change_summarization(
                     chat_id=current_request.chat_id,
                     departed_characters=departed,
                     entity_to_name=entity_to_name,
                     canon_law_entries=canon_law_entries
-                ))
+                )
 
             # 2. Threshold-based summarization
             max_context = request.settings.get('max_context', CONFIG['max_context'])
-            total_tokens = await get_token_count(prompt) + await get_token_count(data.get("_updated_state", {}).get("summary", ""))
+            all_messages_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in current_request.messages])
+            all_messages_tokens = await get_token_count(all_messages_text)
+            existing_summary_tokens = await get_token_count(current_request.summary or "")
+            total_tokens = all_messages_tokens + existing_summary_tokens
             if total_tokens >= (max_context * 0.80):
                 data["_summarization_triggered"] = True
-                asyncio.create_task(trigger_threshold_summarization(
+                await trigger_threshold_summarization(
                     chat_id=current_request.chat_id,
                     canon_law_entries=canon_law_entries
-                ))
+                )
+
+            # Reload chat to get updated summary and messages after summarization
+            updated_chat = db_get_chat(current_request.chat_id)
+            if updated_chat:
+                data["_updated_state"]["summary"] = updated_chat.get('summary', '')
+                data["_updated_state"]["messages"] = [m.dict() for m in [ChatMessage(**msg) for msg in updated_chat.get('messages', [])]]
 
             return data
         except Exception as e:
@@ -4929,27 +5132,38 @@ async def chat(request: PromptRequest):
         try:
             response = await llm_operation()
 
-            # Phase 4: ASYNC SUMMARIZATION (after response sent, before return)
+            # Phase 4: SYNCHRONOUS SUMMARIZATION (before return)
             # Both triggers independent - can run same turn
 
             # 1. Cast-change forced summarization
             if cast_changed and departed:
-                asyncio.create_task(trigger_cast_change_summarization(
+                await trigger_cast_change_summarization(
                     chat_id=current_request.chat_id,
                     departed_characters=departed,
                     entity_to_name=entity_to_name,
                     canon_law_entries=canon_law_entries
-                ))
+                )
 
             # 2. Threshold-based summarization
             max_context = request.settings.get('max_context', CONFIG['max_context'])
-            total_tokens = await get_token_count(prompt) + await get_token_count(response.get("results", [{}])[0].get("text", ""))
+            all_messages_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in current_request.messages])
+            all_messages_tokens = await get_token_count(all_messages_text)
+            ai_response_text = response.get("results", [{}])[0].get("text", "")
+            ai_response_tokens = await get_token_count(ai_response_text)
+            total_tokens = all_messages_tokens + ai_response_tokens
             if total_tokens >= (max_context * 0.80):
                 response["_summarization_triggered"] = True
-                asyncio.create_task(trigger_threshold_summarization(
+                await trigger_threshold_summarization(
                     chat_id=current_request.chat_id,
                     canon_law_entries=canon_law_entries
-                ))
+                )
+
+            # Reload chat to get updated summary and messages after summarization
+            updated_chat = db_get_chat(current_request.chat_id)
+            if updated_chat:
+                updated_chat_id = updated_chat.get('id', current_request.chat_id)
+                response.setdefault("_updated_state", {})["summary"] = updated_chat.get('summary', '')
+                response.setdefault("_updated_state", {})["chat_id"] = updated_chat_id
 
             return response
         except Exception as e:
@@ -5091,6 +5305,7 @@ class SnapshotRequest(BaseModel):
     width: Optional[int] = None  # Image width
     height: Optional[int] = None  # Image height
     mode: Optional[str] = None  # Mode for primary character selection
+    negative_prompt: Optional[str] = None  # Use manual generation negative prompt if provided
 
 def get_primary_character_name(selected_mode: Optional[str], active_characters: List[str], character_names: List[str]) -> Optional[str]:
     """
@@ -5582,12 +5797,15 @@ async def generate_chat_snapshot(request: SnapshotRequest):
             char_tags = [t.strip() for t in character_tags.split(',') if t.strip()]
         
         # Build prompt using new simplified builder
-        positive_prompt, negative_prompt = prompt_builder.build_simple_prompt(
+        positive_prompt, built_negative_prompt = prompt_builder.build_simple_prompt(
             scene_json=scene_json,
             character_tags=char_tags,
             user_tags=user_tags,
             character_count_tags=count_tags
         )
+
+        # Use manual generation negative prompt if provided, otherwise use built negative prompt
+        negative_prompt = request.negative_prompt if request.negative_prompt else built_negative_prompt
 
         # Use size parameters from request, default to 512x512
         snapshot_width = request.width if request.width else 512
@@ -5664,6 +5882,7 @@ class SnapshotRegenerateRequest(BaseModel):
     """Request model for regenerating snapshot."""
     width: Optional[int] = None  # Image width
     height: Optional[int] = None  # Image height
+    negative_prompt: Optional[str] = None  # Use manual generation negative prompt if provided
 
 
 @app.post("/api/chats/{chat_id}/snapshot-settings")
@@ -5830,12 +6049,15 @@ async def regenerate_snapshot(chat_id: str, request: SnapshotRegenerateRequest):
             user_tags = [t.strip() for t in user_data['danbooru_tag'].split(',') if t.strip()]
 
         # Build prompt using simplified builder
-        positive_prompt, negative_prompt = prompt_builder.build_simple_prompt(
+        positive_prompt, built_negative_prompt = prompt_builder.build_simple_prompt(
             scene_json=scene_json,
             character_tags=char_tags,
             user_tags=user_tags,
             character_count_tags=count_tags
         )
+
+        # Use manual generation negative prompt if provided, otherwise use built negative prompt
+        negative_prompt = request.negative_prompt if request.negative_prompt else built_negative_prompt
 
         # Generate image
         sd_params = SDParams(
@@ -7008,7 +7230,8 @@ async def get_chat_npcs_endpoint(chat_id: str):
         # Get metadata for fallback (only if DB has no NPCs)
         chat = db_get_chat(chat_id)
         if not chat:
-            return {"success": False, "error": "Chat not found"}
+            print(f"[NPC_GET] ERROR: Chat '{chat_id}' not found")
+            return {"success": False, "error": f"Chat '{chat_id}' not found"}
         
         metadata_npcs = chat.get('metadata', {}).get('localnpcs', {})
         
@@ -7051,14 +7274,19 @@ async def get_chat_npcs_endpoint(chat_id: str):
                 seen_entity_ids.add(npc_id)
         
         print(f"[NPC_GET] Returning {len(merged_npcs)} NPCs ({len(db_npcs)} from DB, {len(merged_npcs) - len(db_npcs)} from metadata)")
+        if merged_npcs:
+            for npc in merged_npcs:
+                print(f"[NPC_GET]   - Entity ID: {npc.get('entityid')}, Name: {npc.get('name')}")
         
         return {
             "success": True,
             "npcs": merged_npcs
         }
     except Exception as e:
-        print(f"Error loading NPCs: {e}")
-        return {"success": False, "error": str(e)}
+        print(f"[NPC_GET] ERROR loading NPCs for chat '{chat_id}': {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": f"Error loading NPCs for chat '{chat_id}': {str(e)}"}
 
 # NPC Promotion Request Model
 class NPCPromotionRequest(BaseModel):
@@ -7327,73 +7555,65 @@ async def update_npc(chat_id: str, npc_id: str, request: Request):
     """
     Update an existing NPC's data.
 
-    Architectural fix:
-    - Check BOTH database (chat_npcs) AND metadata (localnpcs) for NPCs
-    - Update in both locations to maintain consistency
-    - If NPC only exists in metadata, sync it to database
+    Uses unified characters table.
+    npc_id is now the filename (e.g., npc_alice_123.json).
     """
     try:
         from urllib.parse import unquote
-        npc_id = unquote(npc_id)
-        
+        filename = unquote(npc_id)
+
+        print(f"[NPC_UPDATE] PUT request received:")
+        print(f"[NPC_UPDATE]   - chat_id: {chat_id}")
+        print(f"[NPC_UPDATE]   - filename: {filename}")
+
         body = await request.json()
         npc_data = body.get("data", {})
+        print(f"[NPC_UPDATE]   - NPC name from data: {npc_data.get('name', 'Unknown')}")
 
         if not npc_data:
             return JSONResponse({"success": False, "error": "No data provided"}, status_code=400)
 
-        # 1) Get chat
-        chat = db_get_chat(chat_id)
-        if not chat:
-            return JSONResponse({"success": False, "error": "Chat not found"}, status_code=404)
-
-        # 2) Check if NPC exists in database OR metadata
+        # Check if NPC exists in database
         existing_npcs = db_get_chat_npcs(chat_id)
+        print(f"[NPC_UPDATE] Checking for NPC {filename} in chat {chat_id}")
+        print(f"[NPC_UPDATE] Found {len(existing_npcs)} NPCs in database")
+
         npc_in_db = any(
-            npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id
+            npc.get("_filename") == filename or npc.get("entityid") == filename
             for npc in existing_npcs
         )
-        
-        metadata = chat.get("metadata", {}) or {}
-        localnpcs = metadata.get("localnpcs", {}) or {}
-        npc_in_metadata = npc_id in localnpcs
 
-        if not npc_in_db and not npc_in_metadata:
+        if not npc_in_db:
+            error_detail = f"NPC '{filename}' not found. Database has {len(existing_npcs)} NPCs."
+            print(f"[NPC_UPDATE] ERROR: {error_detail}")
             return JSONResponse(
-                {"success": False, "error": "NPC not found in database or metadata"},
+                {"success": False, "error": error_detail},
                 status_code=404,
             )
 
-        # 3) Update NPC in database (create with same entity_id if only in metadata)
-        if npc_in_db:
-            success = db_update_npc(chat_id, npc_id, npc_data)
-            if not success:
-                return JSONResponse(
-                    {"success": False, "error": "Failed to update NPC in database"},
-                    status_code=500,
-                )
-        else:
-            # NPC only in metadata - sync to database with SAME entity_id
-            print(f"[NPC_UPDATE] NPC {npc_id} only in metadata, syncing to database with same entity_id")
-            success, error = db_create_npc_with_entity_id(chat_id, npc_id, npc_data)
-            if not success:
-                print(f"[NPC_UPDATE] Failed to sync NPC to database: {error}")
+        # Update NPC in database
+        success = db_update_npc(chat_id, filename, npc_data)
+        if not success:
+            return JSONResponse(
+                {"success": False, "error": "Failed to update NPC in database"},
+                status_code=500,
+            )
 
-        # 4) Update metadata
-        chat = db_get_chat(chat_id)  # reload to get latest structure
+        # Update metadata
+        chat = db_get_chat(chat_id)
         if chat:
             metadata = chat.get("metadata", {}) or {}
             localnpcs = metadata.get("localnpcs", {}) or {}
 
-            if npc_id in localnpcs:
-                localnpcs[npc_id]["data"] = npc_data
-                localnpcs[npc_id]["name"] = npc_data.get(
+            if filename in localnpcs:
+                localnpcs[filename]["data"] = npc_data
+                localnpcs[filename]["name"] = npc_data.get(
                     "name",
-                    localnpcs[npc_id].get("name", "Unknown"),
+                    localnpcs[filename].get("name", "Unknown"),
                 )
             else:
                 # Add to metadata if not there
-                localnpcs[npc_id] = {
+                localnpcs[filename] = {
                     "name": npc_data.get("name", "Unknown"),
                     "data": npc_data,
                     "is_active": True,
@@ -7419,10 +7639,16 @@ async def update_npc(chat_id: str, npc_id: str, request: Request):
         )
 
     except Exception as e:
-        print(f"Error updating NPC: {e}")
+        print(f"[NPC_UPDATE] ERROR: Exception occurred while updating NPC:")
+        print(f"[NPC_UPDATE]   - chat_id: {chat_id}")
+        print(f"[NPC_UPDATE]   - npc_id: {npc_id}")
+        print(f"[NPC_UPDATE]   - Exception: {type(e).__name__}: {str(e)}")
         import traceback
         traceback.print_exc()
-        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+        return JSONResponse(
+            {"success": False, "error": f"Error updating NPC '{npc_id}': {str(e)}"},
+            status_code=500
+        )
 
 @app.post("/api/chats/{chat_id}/npcs/{npc_id}/promote")
 async def promote_npc_to_global(chat_id: str, npc_id: str):
@@ -7451,82 +7677,85 @@ async def promote_npc_to_global(chat_id: str, npc_id: str):
             return {"success": False, "error": "Chat not found"}
         
         # 2. Get NPC from database OR metadata
+        from urllib.parse import unquote
+        filename = unquote(npc_id)
+
         db_npcs = db_get_chat_npcs(chat_id)
         npc_data = None
         for npc in db_npcs:
-            if npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id:
+            if npc.get("_filename") == filename or npc.get("entityid") == filename:
                 npc_data = npc
                 break
-        
+
         # If not in database, check metadata
         if not npc_data:
             metadata = chat.get('metadata', {}) or {}
             localnpcs = metadata.get('localnpcs', {}) or {}
 
-            if npc_id in localnpcs:
-                metadata_npc = localnpcs[npc_id]
+            if filename in localnpcs:
+                metadata_npc = localnpcs[filename]
                 npc_data = {...}  # build from localnpcs
-                print(f"[NPC_PROMOTE] NPC {npc_id} found in metadata, proceeding with promotion")
-        
+                print(f"[NPC_PROMOTE] NPC {filename} found in metadata, proceeding with promotion")
+
         if not npc_data:
             return {"success": False, "error": "NPC not found in database or metadata"}
-        
+
         npc_name = npc_data.get("name", "Unknown")
         char_data = npc_data.get("data", {})
-        
+
         # 3. Generate global character filename
-        filename = f"{npc_name}.json"
+        global_filename = f"{npc_name}.json"
         # Handle name collisions
-        existing_char = db_get_character(filename)
+        existing_char = db_get_character(global_filename)
         if existing_char:
             counter = 1
             while f"{npc_name}_{counter}.json" in [c.get("_filename", "") for c in db_get_all_characters()]:
                 counter += 1
-            filename = f"{npc_name}_{counter}.json"
-        
+            global_filename = f"{npc_name}_{counter}.json"
+
         # 4. Create proper character card structure (SillyTavern v2 format)
         character_card = {
             "spec": "chara_card_v2",
             "spec_version": "2.0",
             "data": char_data
         }
-        
+
         # Normalize to ensure all V2 fields are present
         character_card = normalize_character_v2(character_card)
-        
+
         # Add promotion history metadata
         char_data.setdefault('extensions', {})['promotion_history'] = {
-            'promoted_from': npc_id,
+            'promoted_from': filename,
             'promoted_at': int(time.time()),
             'original_chat_id': chat_id
         }
-        
+
         # 5. Create global character file
-        file_path = os.path.join(DATA_DIR, "characters", filename)
+        file_path = os.path.join(DATA_DIR, "characters", global_filename)
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(character_card, f, indent=2, ensure_ascii=False)
-        
+
         # 6. Save to database
-        if not db_save_character(character_card, filename):
+        if not db_save_character(character_card, global_filename):
             return {"success": False, "error": "Failed to save character to database"}
-        
+
         # 7. Update chat - remove NPC from metadata and add global character to activeCharacters
         metadata = chat.get('metadata', {}) or {}
         localnpcs = metadata.get('localnpcs', {}) or {}
 
-        if npc_id in localnpcs:
-            del localnpcs[npc_id]
+        if filename in localnpcs:
+            del localnpcs[filename]
             metadata['localnpcs'] = localnpcs
 
         # 8. Update activeCharacters to use global character filename
         active_chars = chat.get('activeCharacters', [])
-        if npc_id in active_chars:
-            active_chars.remove(npc_id)
-        if filename not in active_chars:
-            active_chars.append(filename)
+        if filename in active_chars:
+            active_chars.remove(filename)
+        if global_filename not in active_chars:
+            active_chars.append(global_filename)
 
         # 9. Mark NPC as promoted in database (if it exists there)
-        db_set_npc_active(chat_id, npc_id, False)  # Deactivate in DB if exists
+        db_delete_npc(chat_id, filename)  # Delete NPC from characters table
         chat['metadata'] = metadata
         chat['activeCharacters'] = active_chars
         db_save_chat(chat_id, chat)
@@ -7575,17 +7804,20 @@ async def delete_npc(chat_id: str, npc_id: str):
         chat = db_get_chat(chat_id)
         if not chat:
             return JSONResponse({"success": False, "error": "Chat not found"}, status_code=404)
-        
-        # 2. Check if NPC exists in database OR metadata
+
+        # Check if NPC exists in database OR metadata
+        from urllib.parse import unquote
+        filename = unquote(npc_id)
+
         db_npcs = db_get_chat_npcs(chat_id)
         npc_in_db = any(
-            npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id
+            npc.get("_filename") == filename or npc.get("entityid") == filename
             for npc in db_npcs
         )
 
         metadata = chat.get("metadata", {}) or {}
         localnpcs = metadata.get("localnpcs", {}) or {}
-        npc_in_metadata = npc_id in localnpcs
+        npc_in_metadata = filename in localnpcs
 
         if not npc_in_db and not npc_in_metadata:
             return JSONResponse(
@@ -7594,45 +7826,45 @@ async def delete_npc(chat_id: str, npc_id: str):
             )
 
         if npc_in_metadata:
-            npc_name = localnpcs[npc_id].get("name", "Unknown")
+            npc_name = localnpcs[filename].get("name", "Unknown")
         elif npc_in_db:
             for npc in db_npcs:
-                if npc.get("entityid") == npc_id or npc.get("entity_id") == npc_id:
+                if npc.get("_filename") == filename or npc.get("entityid") == filename:
                     npc_name = npc.get("name", "Unknown")
                     break
-        
-        # 3. Delete from database
+
+        # Delete from database
         if npc_in_db:
-            success = db_delete_npc(chat_id, npc_id)
+            success = db_delete_npc(chat_id, filename)
             if success:
-                print(f"[NPC_DELETE] Deleted NPC {npc_id} from database")
+                print(f"[NPC_DELETE] Deleted NPC {filename} from database")
             else:
-                print(f"[NPC_DELETE] Failed to delete NPC {npc_id} from database")
-        
-        # 4. Delete from metadata (if present)
+                print(f"[NPC_DELETE] Failed to delete NPC {filename} from database")
+
+        # Delete from metadata (if present)
         if npc_in_metadata:
-            del localnpcs[npc_id]
+            del localnpcs[filename]
             metadata["localnpcs"] = localnpcs
-        
-        # 5. ALWAYS remove from activeCharacters (regardless of storage location)
+
+        # ALWAYS remove from activeCharacters (regardless of storage location)
         active_chars = chat.get('activeCharacters', [])
-        if npc_id in active_chars:
-            active_chars.remove(npc_id)
-            print(f"[NPC_DELETE] Removed NPC {npc_id} from activeCharacters")
+        if filename in active_chars:
+            active_chars.remove(filename)
+            print(f"[NPC_DELETE] Removed NPC {filename} from activeCharacters")
         chat['activeCharacters'] = active_chars
-        
-        # 6. Save updated chat
+
+        # Save updated chat
         chat["metadata"] = metadata
         db_save_chat(chat_id, chat)
-        print(f"[NPC_DELETE] Deleted NPC {npc_id} from metadata and activeCharacters")
-        
-        print(f"[NPC_DELETE] Successfully deleted NPC '{npc_name}' ({npc_id})")
-        
+        print(f"[NPC_DELETE] Deleted NPC {filename} from metadata and activeCharacters")
+
+        print(f"[NPC_DELETE] Successfully deleted NPC '{npc_name}' ({filename})")
+
         return {
             "success": True,
             "message": f"NPC '{npc_name}' has been deleted"
         }
-        
+
     except Exception as e:
         print(f"Error deleting NPC: {e}")
         import traceback
@@ -7643,78 +7875,80 @@ async def delete_npc(chat_id: str, npc_id: str):
 async def toggle_npc_active(chat_id: str, npc_id: str):
     """
     Toggle NPC active/inactive status.
-    
-    ARCHITECTURAL FIX: Check BOTH database AND metadata for NPC.
-    Database is authoritative source, metadata is fallback.
-    
+
+    Uses unified characters table.
+    npc_id is now the filename (e.g., npc_alice_123.json).
+
     Updates:
-    - is_active field in chat_npcs database (authoritative)
-    - is_active field in chat_npcs metadata (for compatibility)
+    - is_active field in chat metadata (localnpcs)
     - activeCharacters array (adds/removes npc_id)
-    
+
     Args:
         chat_id: Chat ID
-        npc_id: Unique NPC entity ID
+        npc_id: Unique NPC filename
     """
     try:
         from urllib.parse import unquote
-        npc_id = unquote(npc_id)
+        filename = unquote(npc_id)
 
         # Load chat
         chat = db_get_chat(chat_id)
         if not chat:
             return {"success": False, "error": "Chat not found"}
-        
+
         metadata = chat.get('metadata', {}) or {}
         # Check metadata for NPC
         localnpcs = metadata.get('localnpcs', {}) or {}
 
-        # Check database first (authoritative source)
+        # Check database
         db_npcs = db_get_chat_npcs(chat_id)
         db_npc = None
         for npc in db_npcs:
-            if npc.get('entityid') == npc_id or npc.get('entity_id') == npc_id:
+            if npc.get('_filename') == filename or npc.get('entityid') == filename:
                 db_npc = npc
                 break
 
         # Check metadata as fallback
-        metadata_npc = localnpcs.get(npc_id) if npc_id in localnpcs else None
+        metadata_npc = localnpcs.get(filename) if filename in localnpcs else None
 
         # NPC must exist in at least one location
         if not db_npc and not metadata_npc:
-            return {"success": False, "error": f"NPC '{npc_id}' not found in database or metadata"}
+            return {"success": False, "error": f"NPC '{filename}' not found in database or metadata"}
 
-        # Get current active state (prefer database)
-        if db_npc:
-            current_active = db_npc.get('isactive', db_npc.get('is_active', True))
-            npc_name = db_npc.get('name', 'Unknown')
-        else:
+        # Get current active state (prefer metadata since active status is metadata-only)
+        if metadata_npc:
             current_active = metadata_npc.get('is_active', True)
             npc_name = metadata_npc.get('name', 'Unknown')
+        else:
+            current_active = True  # Default to active if not in metadata
+            npc_name = db_npc.get('name', 'Unknown')
 
         # Toggle active state
         new_active = not current_active
 
-        # Update NPC in database (authoritative)
-        db_set_npc_active(chat_id, npc_id, new_active)
+        # Update NPC in metadata (active status is stored in metadata)
+        if filename in localnpcs:
+            localnpcs[filename]['is_active'] = new_active
+        else:
+            # Add to metadata if not there
+            localnpcs[filename] = {
+                'name': npc_name,
+                'is_active': new_active,
+                'created_at': int(time.time())
+            }
 
-        # Update NPC in metadata (for compatibility)
-        if npc_id in localnpcs:
-            localnpcs[npc_id]['is_active'] = new_active
-            metadata['localnpcs'] = localnpcs
-        
         # Update activeCharacters array
         active_chars = chat.get('activeCharacters', [])
-        
+
         if new_active:
             # Activate NPC: Add if not already in array
-            if npc_id not in active_chars:
-                active_chars.append(npc_id)
+            if filename not in active_chars:
+                active_chars.append(filename)
         else:
             # Deactivate NPC: Remove from array
-            if npc_id in active_chars:
-                active_chars.remove(npc_id)
-        
+            if filename in active_chars:
+                active_chars.remove(filename)
+
         # Save updated chat with modified metadata
         metadata['localnpcs'] = localnpcs
         chat['metadata'] = metadata
@@ -8084,8 +8318,8 @@ async def inpaint_image(request: InpaintRequest):
             "sampler_name": request.sampler_name,
             "mask_blur": request.mask_blur,
             "inpainting_fill": 1,  # 'original' - use original image content
-            "inpaint_full_res": False,  # 'whole picture'
-            "inpaint_full_res_padding": 0,
+            "inpaint_full_res": True,  # 'only masked'
+            "inpaint_full_res_padding": 16,
             "inpainting_mask_invert": 0  # 0 = inpaint masked, 1 = inpaint not masked
         }
         

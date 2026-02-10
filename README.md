@@ -12,7 +12,7 @@
 
 **Next step: Open [Quickstart Guide](docs/QUICKSTART.md) for setup, recommended LLM models, and example characters and worlds**
 
-**Status**: Actively developed, v1.11.0 released. Report bugs in Discussions!
+**Status**: Actively developed, v1.12.0 released. Report bugs in Discussions!
 ---
 
 ## Table of Contents
@@ -35,6 +35,13 @@
 - [License](#license)
 
 ---
+
+## v1.12.0: NPC Migration
+
+After many struggles with bugs, I bit the bullet and migrated NPC's over to the database from metadata. I also worked on optimizing inpainting under the hood, other bug fixes around NPC's and snapshots and a bunch of testing. Should be pretty stable. Will do more testing over the next few days. 
+
+I'm considering a V2.0, simplified version of NerualRP on Vue 3, since this got so big and bulky. In the meantime, I'll keep up bugfixes for this one, but I'm not planning new features. 
+
 
 ## v1.11.0: Scene-First Architecture
 

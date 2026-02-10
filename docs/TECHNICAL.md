@@ -15,29 +15,30 @@ This document explains how NeuralRP's advanced features work under the hood, des
 7. [Semantic Search](#semantic-search)
 8. [Semantic Relationship Tracker](#semantic-relationship-tracker)
 9. [Entity ID System](#entity-id-system)
-10. [Chat-Scoped NPC System](#chat-scoped-npc-system)
-10.5. [Character Card Field Mappings](#character-card-field-mappings)
-11. [Message Search System](#message-search-system)
-12. [Performance Mode](#performance-mode)
-13. [Branching System (v1.7.0, Enhanced v1.10.4)](#branching-system)
+10. [Unified Characters Table (v1.12.0)](#unified-characters-table-v1120)
+11. [Chat-Scoped NPC System (v1.12.0 - UNIFIED)](#chat-scoped-npc-system-v1120-unified)
+11.5. [Character Card Field Mappings](#character-card-field-mappings)
+12. [Message Search System](#message-search-system)
+13. [Performance Mode](#performance-mode)
+14. [Branching System (v1.7.0, Enhanced v1.10.4)](#branching-system)
     - [NPC Entity ID Remapping](#npc-entity-id-remapping-v170-enhanced-v1104)
     - [Fork Isolation and Metadata Protection](#fork-isolation-and-metadata-protection-v1104)
-14. [Memory & Summarization](#memory--summarization)
+15. [Memory & Summarization](#memory--summarization)
     - [Scene Capsule Summarization](#scene-capsule-summarization-phase-4-v1110)
     - [SCENE UPDATE Blocks](#scene-update-blocks-v1110)
-15. [Soft Delete System](#soft-delete-system)
-16. [Autosave System](#autosave-system)
-17. [Image Generation](#image-generation)
-18. [Connection Monitoring](#connection-monitoring)
-19. [Change History Data Recovery](#change-history-data-recovery)
-20. [Undo/Redo System](#undo-redo-system)
-21. [Character Name Consistency](#character-name-consistency)
-22. [Tag Management System](#tag-management-system)
-23. [Favorites Viewer](#favorites-viewer)
-24. [Snapshot Feature](#snapshot-feature)
-25. [Gender System](#gender-system)
-26. [Danbooru Tag Generator](#danbooru-tag-generator)
-27. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
+16. [Soft Delete System](#soft-delete-system)
+17. [Autosave System](#autosave-system)
+18. [Image Generation](#image-generation)
+19. [Connection Monitoring](#connection-monitoring)
+20. [Change History Data Recovery](#change-history-data-recovery)
+21. [Undo/Redo System](#undo-redo-system)
+22. [Character Name Consistency](#character-name-consistency)
+23. [Tag Management System](#tag-management-system)
+24. [Favorites Viewer](#favorites-viewer)
+25. [Snapshot Feature](#snapshot-feature)
+26. [Gender System](#gender-system)
+27. [Danbooru Tag Generator](#danbooru-tag-generator)
+28. [Design Decisions & Tradeoffs](#design-decisions--tradeoffs)
     - [Context Hygiene Philosophy](#context-hygiene-philosophy)
 
 ---
@@ -2829,49 +2830,271 @@ Forked Chat:
 
 ---
 
+## Unified Characters Table (v1.12.0)
+
+### Overview (v1.12.0)
+
+The unified characters table eliminates the separate `chat_npcs` table, storing both global characters and local NPCs in a single `characters` table. This simplifies code, prevents sync issues, and provides a single source of truth for all character data.
+
+### Key Changes
+
+- **Single Storage Layer**: Both global characters and NPCs stored in `characters` table
+- **Distinguishment via chat_id**: Global characters have `chat_id IS NULL`, NPCs have `chat_id = 'chat_id'`
+- **Filename-Based Entity IDs**: All entities (characters and NPCs) use filenames as entity IDs
+- **Unified Database Functions**: Same CRUD functions for both character types
+
+### Database Schema
+
+**Characters Table (v1.12.0)**:
+```sql
+CREATE TABLE characters (
+    id INTEGER PRIMARY KEY,
+    filename TEXT NOT NULL UNIQUE,     -- Character filename (entity ID)
+    name TEXT NOT NULL,
+    data TEXT NOT NULL,
+    danbooru_tag TEXT,
+    visual_canon_id INTEGER,
+    visual_canon_tags TEXT,
+    chat_id TEXT,                    -- NEW: NULL = global, 'chat_id' = NPC
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_characters_chat_id ON characters(chat_id);
+```
+
+**Entity ID Unification**:
+- **v1.11.0 and earlier**: `char_{filename}` for characters, `npc_{timestamp}_{chat_id}` for NPCs
+- **v1.12.0+**: All entities use filename as entity ID (e.g., `alice.json`, `npc_alice_123.json`)
+- **Benefits**: Simplifies relationship tracking, visual canon assignment, and entity lookups
+
+### Migration
+
+**Automatic Migration on Startup**:
+- **Trigger**: First launch after v1.12.0 upgrade
+- **Process**:
+  1. Check if `chat_npcs_backup` exists (already migrated)
+  2. Read all NPCs from `chat_npcs` table
+  3. Generate filenames: `npc_{sanitized_name}_{timestamp}.json`
+  4. Insert into `characters` table with `chat_id` set
+  5. Update `entities` table to use filename as entity_id
+  6. Update chat metadata `localnpcs` to use filenames
+  7. Rename `chat_npcs` → `chat_npcs_backup`
+
+**Backup Preservation**:
+- Original `chat_npcs` table preserved as `chat_npcs_backup`
+- Allows rollback if issues arise
+- Safe to keep for 1-2 weeks after successful migration
+
+### Helper Functions
+
+**`db_get_characters(chat_id: Optional[str])`**:
+```python
+# Get global characters: chat_id=None
+global_chars = db_get_characters()
+
+# Get NPCs for specific chat: chat_id='chat_id'
+npcs = db_get_characters(chat_id='chat_id')
+
+# Returns unified list with `is_npc` flag
+```
+
+**`db_get_character(filename, chat_id)`**:
+```python
+# Global character
+char = db_get_character('alice.json')
+
+# NPC (requires chat_id)
+npc = db_get_character('npc_alice_123.json', chat_id='chat_id')
+```
+
+**Visual Canon for NPCs**:
+```python
+# Now uses same functions as global characters
+db_assign_visual_canon_to_npc(chat_id, filename, canon_id, tags)
+db_get_npc_visual_canon(chat_id, filename)
+db_clear_visual_canon_from_npc(chat_id, filename)
+```
+
+### API Endpoint Updates
+
+All NPC endpoints updated to use filename-based entity IDs:
+
+| Endpoint | Change |
+|----------|--------|
+| GET `/api/chats/{chat_id}/npcs` | Returns NPCs from unified table |
+| PUT `/api/chats/{chat_id}/npcs/{filename}` | Uses filename (not entity_id) |
+| DELETE `/api/chats/{chat_id}/npcs/{filename}` | Uses filename |
+| POST `/api/chats/{chat_id}/npcs/{filename}/promote` | Uses filename |
+| POST `/api/chats/{chat_id}/npcs/{filename}/toggle-active` | Uses filename |
+
+### Context Assembly Updates
+
+**`load_character_profiles()` Update**:
+```python
+# v1.12.0+: Load NPCs from unified table
+npc_data = db_get_character(filename, chat_id=chat_id)
+if npc_data:
+    character_profiles.append({
+        'name': npc_data['name'],
+        'data': npc_data['data'],
+        '_filename': npc_data['_filename'],
+        'entity_id': npc_data['_filename'],  # Filename is entity ID
+        'is_npc': True,
+        'updated_at': npc_data.get('updated_at', 0)
+    })
+```
+
+**NPC Reload on Every Message**:
+- NPCs reloaded from `characters` table on every message
+- Ensures immediate synchronization of mid-chat edits
+- No need for metadata-only NPC storage
+
+### Key Benefits
+
+- **Simplified Code**: Single set of functions for all character operations
+- **No Sync Issues**: Single source of truth eliminates sync bugs
+- **Consistent Entity IDs**: Filenames used everywhere (characters, NPCs, relationships)
+- **Backward Compatible**: Old API endpoints still work with filename mapping
+- **Visual Canon**: NPCs now support visual canon assignment using same functions as characters
+
+### Migration Notes
+
+**Entity ID Mapping**:
+- Old NPC format: `npc_{timestamp}_{chat_id}` (e.g., `npc_1739422400_chat_abc`)
+- New unified format: `npc_{name}_{timestamp}.json` (e.g., `npc_alice_1739422400.json`)
+- Entities table updated to use new format
+- Chat metadata `localnpcs` updated to use new format
+
+**Character/NPC Parity**:
+- Both stored in `characters` table
+- Both use `db_get_character()` with `chat_id` parameter
+- Both support visual canon via same functions
+- Both use filename as entity ID
+- Distinguished only by `chat_id` field and `is_npc` flag
+
+---
+
 ## Chat-Scoped NPC System
 
-### Overview (v1.6.0)
+### Overview (v1.12.0 - UNIFIED STORAGE)
 
-The Chat-Scoped NPC System enables users to create, manage, and promote non-player characters that exist within individual chat sessions. Unlike global characters (stored as .json files in app/characters/), NPCs are stored in chat metadata and can be promoted to global characters when desired.
+The Chat-Scoped NPC System enables users to create, manage, and promote non-player characters that exist within individual chat sessions. **v1.12.0 Update**: NPCs are now stored in the unified `characters` table alongside global characters, with a `chat_id` field distinguishing between global (`chat_id IS NULL`) and local NPCs (`chat_id = 'chat_id'`).
 
 ### Key Benefits
 
 - **Emergent storytelling**: Capture NPCs mentioned by AI without manual character card creation
 - **Chat isolation**: NPCs exist only in their chat context, preventing cross-contamination
 - **Branch safety**: Forking chats creates independent NPC copies with unique IDs
-- **Relationship tracking**: NPCs participate in the semantic relationship system
+- **Relationship tracking**: NPCs participate in semantic relationship system
 - **Training data export**: NPCs included in LLM fine-tuning dataset exports
+- **Unified architecture**: Single storage layer simplifies code and prevents sync issues
 
 ### Entity ID System
 
 All participants in conversations (characters, NPCs, users) are tracked via unique entity IDs:
 
-- **Global Characters**: `char_<timestamp>` or filename (e.g., `alice.json`)
-- **Local NPCs**: `npc_<timestamp>_<chat_id>` (chat-scoped)
+- **Global Characters**: Filename (e.g., `alice.json`)
+- **Local NPCs**: Filename (e.g., `npc_alice_1739422400.json`)
 - **User Persona**: `user_default` (optional)
 
-Entity IDs enable:
-- Name collision prevention (multiple "Guard" NPCs in different chats)
-- Relationship tracking across branches
-- Safe fork operations with entity remapping
+**v1.12.0 Entity ID Unification**:
+- **All entity IDs are now filenames** (not separate systems)
+- Simplifies relationship tracking and lookups
+- Prevents ID collisions across systems
+- Enables visual canon assignment to NPCs via same functions as global characters
 
 ### Storage Architecture
 
 ```
 SQLite Database (app/data/neuralrp.db)
-├── entities table ───────────── Entity registry (characters, NPCs, users)
-├── relationship_states ──────── Relationships reference entity IDs
-└── chats.metadata ───────────── NPCs stored in JSON metadata
+├── characters table ────────────── UNIFIED storage for both global and NPCs
+│   ├── filename (PK) ──────── Character filename
+│   ├── chat_id ─────────────── NULL = global, 'chat_id' = NPC
+│   ├── name, data, danbooru_tag, visual_canon_id, visual_canon_tags
+│   └── updated_at
+├── entities table ──────────────── Entity registry (references filenames)
+├── relationship_states ──────────── Relationships reference entity IDs
+└── chats.metadata ─────────────── NPCs metadata (active status, etc.)
 
 File System
 └── app/characters/*.json ────── Global characters (promoted NPCs)
 ```
 
-NPCs are stored in chat metadata (not a separate table) to ensure:
-- Automatic copying during fork operations
-- Chat-scoped lifecycle (delete chat = delete NPCs)
-- Simpler schema (no additional foreign key management)
+**v1.12.0 Storage Changes**:
+- **Unified `characters` table**: Both global and NPCs in one table
+- **NPC metadata only**: Chat metadata stores `localnpcs` for active status tracking
+- **Automatic migration**: Existing `chat_npcs` table migrated on first startup
+- **Backup preserved**: `chat_npcs_backup` table kept for rollback
+
+### Database Schema
+
+**Characters Table (v1.12.0)**:
+```sql
+CREATE TABLE characters (
+    id INTEGER PRIMARY KEY,
+    filename TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    data TEXT NOT NULL,
+    danbooru_tag TEXT,
+    visual_canon_id INTEGER,
+    visual_canon_tags TEXT,
+    chat_id TEXT,                    -- NEW: NULL = global, 'chat_id' = NPC
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_characters_chat_id ON characters(chat_id);
+```
+
+### NPC Migration
+
+**Automatic Migration on Startup**:
+- **Trigger**: First launch after v1.12.0 upgrade
+- **Process**:
+  1. Check if `chat_npcs_backup` exists (already migrated)
+  2. Read all NPCs from `chat_npcs` table
+  3. Generate filenames: `npc_{sanitized_name}_{timestamp}.json`
+  4. Insert into `characters` table with `chat_id` set
+  5. Update `entities` table to use filename as entity_id
+  6. Update chat metadata `localnpcs` to use filenames
+  7. Rename `chat_npcs` → `chat_npcs_backup`
+- **Error handling**: Skips problematic NPCs with warnings
+
+**Benefits**:
+- Zero-downtime migration
+- Backward compatible (old table preserved)
+- Automatic (no manual intervention needed)
+
+### Chat Metadata Structure
+
+```json
+{
+  "messages": [...],
+  "summary": "...",
+  "activeCharacters": ["alice.json", "npc_alice_1739422400.json"],
+  "metadata": {
+    "localnpcs": {
+      "npc_alice_1739422400.json": {
+        "name": "Guard Marcus",
+        "is_active": true,
+        "created_at": 1739422400,
+        "data": { ... }  // NPC data
+      }
+    },
+    "characterCapsules": {
+      "alice.json": "Alice is a brave adventurer...",
+      "npc_alice_1739422400.json": "Mysterious merchant..."
+    },
+    "characterFirstTurns": {
+      "alice.json": 1,
+      "npc_alice_1739422400.json": 20  // Added mid-chat
+    }
+  }
+}
+```
+
+**Note**: NPC data stored in `characters` table, metadata only tracks active status and other metadata.
 
 ### Database Schema
 

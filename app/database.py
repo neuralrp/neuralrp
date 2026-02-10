@@ -9,6 +9,7 @@ import time
 import threading
 import os
 import hashlib
+import random
 from typing import List, Dict, Any, Optional, Tuple
 from contextlib import contextmanager
 import numpy as np
@@ -566,58 +567,137 @@ def init_db():
         # ============================================================================
 
 def db_get_all_characters() -> List[Dict[str, Any]]:
-    """Get all characters from the database."""
+    """Get all characters from the database (global characters only)."""
+    return db_get_characters(chat_id=None)
+
+
+def db_get_characters(chat_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Get characters (global and/or chat-local NPCs).
+    
+    Args:
+        chat_id: None → all characters, "chat_id" → only that chat's NPCs
+    
+    Returns:
+        List of character dictionaries with _filename added
+    """
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT filename, data, danbooru_tag, created_at, updated_at
-            FROM characters
-            ORDER BY created_at DESC
-        """)
+        
+        if chat_id:
+            # Get only NPCs for this chat
+            cursor.execute("""
+                SELECT filename, data, danbooru_tag, created_at, updated_at,
+                       visual_canon_id, visual_canon_tags
+                FROM characters
+                WHERE chat_id = ?
+                ORDER BY created_at DESC
+            """, (chat_id,))
+        else:
+            # Get all global characters (chat_id IS NULL)
+            cursor.execute("""
+                SELECT filename, data, danbooru_tag, created_at, updated_at,
+                       visual_canon_id, visual_canon_tags
+                FROM characters
+                WHERE chat_id IS NULL
+                ORDER BY created_at DESC
+            """)
         
         characters = []
         for row in cursor.fetchall():
             char_data = json.loads(row['data'])
             char_data['_filename'] = row['filename']
+            char_data['updated_at'] = row['updated_at']
+            char_data['is_npc'] = chat_id is not None
             
-            # Inject extensions if they exist
-            if 'data' in char_data and 'extensions' not in char_data['data']:
-                char_data['data']['extensions'] = {}
+            # Get extensions dict from either flat or nested structure
+            if 'data' in char_data:
+                # Nested structure: char_data['data']['extensions']
+                if 'extensions' not in char_data['data']:
+                    char_data['data']['extensions'] = {}
+                extensions = char_data['data']['extensions']
+            else:
+                # Flat structure: char_data['extensions']
+                if 'extensions' not in char_data:
+                    char_data['extensions'] = {}
+                extensions = char_data['extensions']
             
             # Add danbooru_tag to extensions
             if row['danbooru_tag']:
-                char_data['data']['extensions']['danbooru_tag'] = row['danbooru_tag']
+                extensions['danbooru_tag'] = row['danbooru_tag']
+            
+            # MIRROR: Visual canon to extensions (NPCs)
+            if row['visual_canon_id']:
+                # Get full visual canon data from DB
+                cursor.execute("""
+                    SELECT name, gender, core_tags
+                    FROM danbooru_characters
+                    WHERE id = ?
+                """, (row['visual_canon_id'],))
+                canon_row = cursor.fetchone()
+                
+                if canon_row:
+                    extensions['visual_canon_id'] = row['visual_canon_id']
+                    extensions['visual_canon_name'] = canon_row['name']
+                    extensions['visual_canon_tags'] = row['visual_canon_tags']
             
             characters.append(char_data)
         
         return characters
 
 
-def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
-    """Get a specific character by filename."""
+def db_get_character(filename: str, chat_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Get a specific character by filename, optionally scoped to chat."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT filename, data, danbooru_tag, updated_at,
-                   visual_canon_id, visual_canon_tags
-            FROM characters
-            WHERE filename = ?
-        """, (filename,))
+        
+        if chat_id:
+            # NPC in specific chat
+            cursor.execute("""
+                SELECT filename, data, danbooru_tag, updated_at,
+                       visual_canon_id, visual_canon_tags
+                FROM characters
+                WHERE filename = ? AND chat_id = ?
+            """, (filename, chat_id))
+        else:
+            # Global character
+            cursor.execute("""
+                SELECT filename, data, danbooru_tag, updated_at,
+                       visual_canon_id, visual_canon_tags
+                FROM characters
+                WHERE filename = ? AND chat_id IS NULL
+            """, (filename,))
         
         row = cursor.fetchone()
         if not row:
             return None
         
         char_data = json.loads(row['data'])
+        
+        # Normalize flat structure to nested format
+        # NPCs created by the generator have flat structure (no 'data' key)
+        # but the code expects nested structure with 'data' key (SillyTavern V2 spec)
+        if 'data' not in char_data:
+            # Extract name for top level (keep it there for quick access)
+            name = char_data.get('name', 'Unknown')
+            
+            # Move character fields into nested 'data' object
+            char_data = {
+                'data': char_data,
+                'name': name
+            }
+        
         char_data['_filename'] = row['filename']
         char_data['updated_at'] = row['updated_at']  # Include updated_at timestamp
+        char_data['is_npc'] = chat_id is not None
         
-        # Inject extensions
-        if 'data' in char_data and 'extensions' not in char_data['data']:
+        # Get extensions dict from nested structure (now guaranteed to exist)
+        if 'extensions' not in char_data['data']:
             char_data['data']['extensions'] = {}
+        extensions = char_data['data']['extensions']
         
         if row['danbooru_tag']:
-            char_data['data']['extensions']['danbooru_tag'] = row['danbooru_tag']
+            extensions['danbooru_tag'] = row['danbooru_tag']
         
         # MIRROR: Visual canon to extensions (NEW)
         if row['visual_canon_id']:
@@ -630,9 +710,9 @@ def db_get_character(filename: str) -> Optional[Dict[str, Any]]:
             canon_row = cursor.fetchone()
             
             if canon_row:
-                char_data['data']['extensions']['visual_canon_id'] = row['visual_canon_id']
-                char_data['data']['extensions']['visual_canon_name'] = canon_row['name']
-                char_data['data']['extensions']['visual_canon_tags'] = row['visual_canon_tags']
+                extensions['visual_canon_id'] = row['visual_canon_id']
+                extensions['visual_canon_name'] = canon_row['name']
+                extensions['visual_canon_tags'] = row['visual_canon_tags']
         
         return char_data
 
@@ -838,13 +918,21 @@ def db_get_characters_by_tags(tags: List[str]) -> List[Dict[str, Any]]:
             char_data = json.loads(row['data'])
             char_data['_filename'] = row['filename']
             
-            # Inject extensions if they exist
-            if 'data' in char_data and 'extensions' not in char_data['data']:
-                char_data['data']['extensions'] = {}
+            # Get extensions dict from either flat or nested structure
+            if 'data' in char_data:
+                # Nested structure: char_data['data']['extensions']
+                if 'extensions' not in char_data['data']:
+                    char_data['data']['extensions'] = {}
+                extensions = char_data['data']['extensions']
+            else:
+                # Flat structure: char_data['extensions']
+                if 'extensions' not in char_data:
+                    char_data['extensions'] = {}
+                extensions = char_data['extensions']
             
             # Add danbooru_tag to extensions
             if row['danbooru_tag']:
-                char_data['data']['extensions']['danbooru_tag'] = row['danbooru_tag']
+                extensions['danbooru_tag'] = row['danbooru_tag']
             
             characters.append(char_data)
         
@@ -3504,56 +3592,57 @@ def db_fork_chat_transaction(
                     1
                 ))
                 
-                # 2. Copy NPCs to chat_npcs with remapped IDs
+                # 2. Copy NPCs from characters table to new branch with remapped filenames
                 cursor.execute('''
-                    SELECT entity_id, name, data, created_from_text, appearance_count, is_active, 
-                           visual_canon_id, visual_canon_tags, last_used_turn, promoted, promoted_at, global_filename
-                    FROM chat_npcs WHERE chat_id = ? AND is_active = 1
+                    SELECT filename, name, data, danbooru_tag, visual_canon_id, visual_canon_tags,
+                           created_at, updated_at
+                    FROM characters
+                    WHERE chat_id = ?
                 ''', (origin_chat_id,))
-                
+
                 npcs = cursor.fetchall()
                 for npc in npcs:
-                    old_entity_id = npc['entity_id']
-                    # Look up new entity ID in mapping
-                    new_entity_id = entity_mapping.get(old_entity_id, old_entity_id)
-                    
+                    old_filename = npc['filename']
+                    # Generate new filename for forked NPC to avoid collisions
+                    # Format: npc_{name}_{branch_timestamp}_{index}.json
+                    safe_name = npc['name'].lower().replace(' ', '_').replace("'", '')
+                    new_filename = f"npc_{safe_name}_{int(time.time())}_{random.randint(0, 9999)}.json"
+
+                    # Update entity mapping with old -> new filename
+                    entity_mapping[old_filename] = new_filename
+
+                    # Insert NPC into characters table for branch chat
                     cursor.execute('''
-                        INSERT INTO chat_npcs 
-                        (chat_id, entity_id, name, data, created_from_text, 
-                         created_at, appearance_count, is_active, visual_canon_id, visual_canon_tags, 
-                         last_used_turn, promoted, promoted_at, global_filename)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO characters
+                        (filename, name, data, chat_id, danbooru_tag,
+                         visual_canon_id, visual_canon_tags, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (
-                        branch_chat_id,
-                        new_entity_id,
+                        new_filename,
                         npc['name'],
                         npc['data'],
-                        npc['created_from_text'],
-                        time.time(),
-                        npc['appearance_count'],
-                        npc['is_active'],
+                        branch_chat_id,
+                        npc['danbooru_tag'],
                         npc['visual_canon_id'],
                         npc['visual_canon_tags'],
-                        npc['last_used_turn'],
-                        npc['promoted'],
-                        npc['promoted_at'],
-                        npc['global_filename'],
+                        int(time.time()),
+                        int(time.time())
                     ))
-                    
-                    # Register entity for the branch chat
+
+                    # Register entity for branch chat
                     cursor.execute('''
-                        INSERT INTO entities 
+                        INSERT INTO entities
                         (entity_id, entity_type, name, chat_id, first_seen, last_seen)
                         VALUES (?, ?, ?, ?, ?, ?)
                     ''', (
-                        new_entity_id,
+                        new_filename,
                         'npc',
                         npc['name'],
                         branch_chat_id,
                         int(time.time()),
                         int(time.time())
                     ))
-                
+
                 # 3. Copy relationship states with remapped entity IDs
                 cursor.execute('''
                     SELECT character_from, character_to, 
@@ -3881,94 +3970,61 @@ def db_remap_entities_for_branch(
 # ============================================================================
 
 def db_create_npc(chat_id: str, npc_data: Dict) -> Tuple[bool, Optional[str], Optional[str]]:
-    """Create a new NPC. Returns (success, entity_id, error_message).
+    """Create a new NPC in characters table. Returns (success, filename, error_message).
     
-    FIX #1: Explicit transaction commit handling
-    FIX #2: Comprehensive error logging at each step
-    FIX #3: Entity ID uniqueness using UUID for guaranteed uniqueness
+    Entity ID is now the filename (unified system).
     """
     try:
         name = npc_data.get("name", "Unknown NPC")
         
-        # FIX #3: Generate entity_id using UUID for guaranteed uniqueness
-        # This prevents collisions when multiple NPCs are created rapidly
-        import uuid
-        entity_id = f"npc_{uuid.uuid4().hex}"
+        # Generate filename: npc_{sanitized_name}_{timestamp}.json
+        safe_name = name.lower().replace(' ', '_').replace("'", '')
+        filename = f"npc_{safe_name}_{int(time.time())}.json"
         
         with get_connection() as conn:
             cursor = conn.cursor()
             
-            # Verify entity_id uniqueness before insertion
-            cursor.execute(
-                "SELECT entity_id, name FROM chat_npcs WHERE chat_id = ? AND entity_id = ?",
-                (chat_id, entity_id)
-            )
-            existing_by_id = cursor.fetchone()
+            # Check for name uniqueness in this chat
+            cursor.execute("""
+                SELECT filename FROM characters
+                WHERE chat_id = ? AND name = ?
+            """, (chat_id, name))
             
-            if existing_by_id:
-                return False, None, "Entity ID already exists"
-            
-            # Also check for name uniqueness
-            cursor.execute(
-                "SELECT entity_id, name FROM chat_npcs WHERE chat_id = ? AND name = ?",
-                (chat_id, name)
-            )
-            existing_by_name = cursor.fetchone()
-            
-            if existing_by_name:
+            if cursor.fetchone():
                 return False, None, "NPC name already exists in this chat"
             
+            # Extract extensions
+            extensions = npc_data.get('data', {}).get('extensions', {})
+            danbooru_tag = extensions.get('danbooru_tag', '')
+            visual_canon_id = extensions.get('visual_canon_id', None)
+            visual_canon_tags = extensions.get('visual_canon_tags', '')
+            
+            # Prepare data for save
+            save_data = npc_data.copy()
+            
+            # Insert into characters table
+            cursor.execute("""
+                INSERT INTO characters (filename, name, data, chat_id, danbooru_tag,
+                                     visual_canon_id, visual_canon_tags, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (filename, name, json.dumps(save_data, ensure_ascii=False), chat_id,
+                   danbooru_tag, visual_canon_id, visual_canon_tags,
+                   int(time.time()), int(time.time())))
+            
+            # Register in entities table
             try:
-                cursor.execute(
-                    """
-                    INSERT INTO chat_npcs 
-                        (chat_id, entity_id, name, data, created_from_text, created_at, 
-                         appearance_count, last_used_turn, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        chat_id,
-                        entity_id,
-                        name,
-                        json.dumps(npc_data),
-                        npc_data.get("created_from_text", ""),
-                        int(time.time()),
-                        0,          # appearance_count
-                        None,       # last_used_turn
-                        1,          # is_active
-                    ),
-                )
-                
-                # Verify INSERT succeeded
-                affected_rows = cursor.rowcount
-                
-                if affected_rows == 0:
-                    return False, None, "Database insertion failed (no rows affected)"
-                
-            except sqlite3.IntegrityError as e:
-                return False, None, f"Database integrity error: {str(e)}"
-
-            except Exception as e:
-                return False, None, f"Database error during insertion: {str(e)}"
-
-            # Register in entities
-            try:
-                success = db_create_entity(
+                db_create_entity(
                     chat_id=chat_id,
-                    entity_id=entity_id,
+                    entity_id=filename,
                     name=name,
                     entity_type="npc",
                 )
-                
-                if not success:
-                    pass  # NPC is already in chat_npcs, don't fail
-                    
             except Exception as e:
-                pass  # NPC is already in chat_npcs, don't fail
-
+                pass  # Entity creation failed, but NPC is created
+            
             conn.commit()
             
-            return True, entity_id, None
+            return True, filename, None
 
     except Exception as e:
         return False, None, f"Unexpected error: {str(e)}"
@@ -3976,143 +4032,127 @@ def db_create_npc(chat_id: str, npc_data: Dict) -> Tuple[bool, Optional[str], Op
 
 
 def db_get_chat_npcs(chat_id: str) -> list:
-    """Get all NPCs for a specific chat"""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT entity_id, chat_id, name, data, is_active, created_at
-                FROM chat_npcs
-                WHERE chat_id = ?
-            """, (chat_id,))
-            rows = cursor.fetchall()
-            
-            npcs = []
-            for row in rows:
-                npcs.append({
-                    "entityid": row[0],
-                    "entity_id": row[0],
-                    "chat_id": row[1],
-                    "name": row[2],
-                    "data": json.loads(row[3]) if row[3] else {},
-                    "isactive": bool(row[4]),
-                    "is_active": bool(row[4]),
-                    "promoted": False,
-                    "globalfilename": None,
-                    "createdat": row[5]
-                })
-            
-            return npcs
-        except Exception as e:
-            return []
+    """Get all NPCs for a specific chat (using unified characters table)."""
+    try:
+        npcs = db_get_characters(chat_id)
+        
+        # Transform to match old format
+        result = []
+        for npc in npcs:
+            result.append({
+                "entityid": npc['_filename'],
+                "entity_id": npc['_filename'],
+                "chat_id": chat_id,
+                "name": npc.get("name", "Unknown"),
+                "data": npc,
+                "isactive": True,  # Active status is now in chat metadata
+                "is_active": True,
+                "promoted": False,
+                "globalfilename": None,
+                "createdat": npc.get("created_at", int(time.time()))
+            })
+        
+        return result
+    except Exception as e:
+        print(f"[NPC] Error getting chat NPCs: {e}")
+        return []
        
 
-def db_get_npc_by_id(entity_id: str, chat_id: str = None) -> Optional[Dict]:
-    """Get NPC by entity_id."""
+def db_get_npc_by_id(entity_id: str, chat_id: Optional[str] = None) -> Optional[Dict]:
+    """Get NPC by entity_id (now filename) from unified characters table."""
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
             if chat_id:
                 cursor.execute('''
-                    SELECT * FROM chat_npcs 
-                    WHERE entity_id = ? AND chat_id = ?
+                    SELECT filename, name, data, danbooru_tag, created_at, updated_at,
+                           visual_canon_id, visual_canon_tags
+                    FROM characters
+                    WHERE filename = ? AND chat_id = ?
                 ''', (entity_id, chat_id))
             else:
                 cursor.execute('''
-                    SELECT * FROM chat_npcs WHERE entity_id = ?
+                    SELECT filename, name, data, danbooru_tag, created_at, updated_at,
+                           visual_canon_id, visual_canon_tags
+                    FROM characters
+                    WHERE filename = ? AND chat_id IS NOT NULL
                 ''', (entity_id,))
-            
+
             row = cursor.fetchone()
             if row:
-                npc = dict(row)
-                npc['data'] = json.loads(npc['data'])
+                npc = {
+                    'filename': row['filename'],
+                    'name': row['name'],
+                    'data': json.loads(row['data']),
+                    'danbooru_tag': row['danbooru_tag'],
+                    'created_at': row['created_at'],
+                    'updated_at': row['updated_at'],
+                    'visual_canon_id': row['visual_canon_id'],
+                    'visual_canon_tags': row['visual_canon_tags'],
+                }
                 return npc
             return None
     except Exception as e:
         return None
 
 
-def db_update_npc(chat_id: str, npc_id: str, npc_data: Dict) -> bool:
-    """Update an existing NPC's data."""
+def db_update_npc(chat_id: str, filename: str, npc_data: Dict) -> bool:
+    """Update an existing NPC in characters table."""
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
 
             # First check if NPC exists and get current values
             cursor.execute("""
-                SELECT entity_id, visual_canon_id, visual_canon_tags FROM chat_npcs 
-                WHERE chat_id = ? AND entity_id = ?
-            """, (chat_id, npc_id))
-            
+                SELECT filename, visual_canon_id, visual_canon_tags FROM characters
+                WHERE chat_id = ? AND filename = ?
+            """, (chat_id, filename))
+
             existing = cursor.fetchone()
             if not existing:
-                print(f"[NPC] {npc_id} not found in chat {chat_id} for update")
+                print(f"[NPC] {filename} not found in chat {chat_id} for update")
                 return False
 
             # Preserve visual canon fields if they exist in database
             existing_visual_canon_id = existing['visual_canon_id']
             existing_visual_canon_tags = existing['visual_canon_tags']
 
-            # Extract name from data if present
+            # Extract fields
             name = npc_data.get("name", "")
+            # Handle both flat and nested data structures
+            if 'data' in npc_data:
+                extensions = npc_data.get('data', {}).get('extensions', {})
+            else:
+                extensions = npc_data.get('extensions', {})
+            danbooru_tag = extensions.get('danbooru_tag', '')
 
             # Update NPC, preserving existing visual canon fields
             cursor.execute("""
-                UPDATE chat_npcs 
-                SET data = ?, name = ?, visual_canon_id = ?, visual_canon_tags = ?
-                WHERE chat_id = ? AND entity_id = ?
-            """, (json.dumps(npc_data), name, existing_visual_canon_id, existing_visual_canon_tags, chat_id, npc_id))
+                UPDATE characters
+                SET data = ?, name = ?, danbooru_tag = ?, visual_canon_id = ?, visual_canon_tags = ?, updated_at = ?
+                WHERE chat_id = ? AND filename = ?
+            """, (json.dumps(npc_data, ensure_ascii=False), name, danbooru_tag,
+                   existing_visual_canon_id, existing_visual_canon_tags, int(time.time()),
+                   chat_id, filename))
 
             conn.commit()
 
             # Optional: log change for undo
-            log_change("npc", npc_id, "UPDATE", {"chat_id": chat_id, "data": npc_data})
+            log_change("npc", filename, "UPDATE", {"chat_id": chat_id, "data": npc_data})
 
             return cursor.rowcount > 0
     except Exception as e:
         print(f"[NPC] Error updating NPC: {e}")
         return False
 
-def db_increment_npc_appearance(chat_id: str, entity_id: str) -> None:
-    """Increment appearance count when NPC speaks."""
+def db_delete_npc(chat_id: str, filename: str) -> bool:
+    """Permanently delete NPC from characters table."""
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                UPDATE chat_npcs 
-                SET appearance_count = appearance_count + 1,
-                    last_used_turn = ?
-                WHERE chat_id = ? AND entity_id = ?
-            ''', (time.time(), chat_id, entity_id))
-            conn.commit()
-    except Exception as e:
-        print(f"[NPC] Error incrementing NPC appearance: {e}")
-
-
-def db_set_npc_active(chat_id: str, entity_id: str, is_active: bool) -> bool:
-    """Set NPC active/inactive status."""
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE chat_npcs SET is_active = ?
-                WHERE chat_id = ? AND entity_id = ?
-            ''', (1 if is_active else 0, chat_id, entity_id))
-            conn.commit()
-            return cursor.rowcount > 0
-    except Exception as e:
-        print(f"[NPC] Error setting active status: {e}")
-        return False
-
-
-def db_delete_npc(chat_id: str, entity_id: str) -> bool:
-    """Permanently delete NPC."""
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM chat_npcs WHERE chat_id = ? AND entity_id = ?
-            ''', (chat_id, entity_id))
+                DELETE FROM characters WHERE chat_id = ? AND filename = ?
+            ''', (chat_id, filename))
             conn.commit()
             return cursor.rowcount > 0
     except Exception as e:
@@ -4122,61 +4162,63 @@ def db_delete_npc(chat_id: str, entity_id: str) -> bool:
 
 def db_create_npc_with_entity_id(chat_id: str, entity_id: str, npc_data: Dict) -> Tuple[bool, Optional[str]]:
     """
-    Create NPC in database with a specific entity_id.
-    Used when syncing metadata-only NPCs to the database.
-    
+    Create NPC in database with a specific entity_id (now filename).
+    Used when syncing metadata-only NPCs to database.
+
     Args:
         chat_id: Chat ID
-        entity_id: Existing entity ID to use (preserves relationships)
+        entity_id: Existing filename to use (preserves relationships)
         npc_data: Character data dictionary
-    
+
     Returns:
         (success: bool, error_message: str or None)
     """
     try:
         name = npc_data.get("name", "Unknown NPC")
-        
+        filename = entity_id  # entity_id is now filename
+
         with get_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Check if already exists
             cursor.execute(
-                "SELECT entity_id FROM chat_npcs WHERE chat_id = ? AND entity_id = ?",
-                (chat_id, entity_id)
+                "SELECT filename FROM characters WHERE chat_id = ? AND filename = ?",
+                (chat_id, filename)
             )
             if cursor.fetchone():
-                return db_update_npc(chat_id, entity_id, npc_data), None
-            
-            # Insert with the provided entity_id
+                return db_update_npc(chat_id, filename, npc_data), None
+
+            # Extract extensions
+            extensions = npc_data.get('data', {}).get('extensions', {})
+            danbooru_tag = extensions.get('danbooru_tag', '')
+
+            # Insert with provided filename
             cursor.execute(
                 """
-                INSERT INTO chat_npcs
-                    (chat_id, entity_id, name, data, created_from_text, created_at,
-                     appearance_count, last_used_turn, is_active)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO characters
+                    (chat_id, filename, name, data, danbooru_tag, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
-                    entity_id,
+                    filename,
                     name,
-                    json.dumps(npc_data),
-                    npc_data.get("created_from_text", ""),
+                    json.dumps(npc_data, ensure_ascii=False),
+                    danbooru_tag,
                     int(time.time()),
-                    0,          # appearance_count
-                    None,       # last_used_turn
-                    1,          # is_active
+                    int(time.time()),
                 ),
             )
-            
+
             # Register in entities table
             cursor.execute(
                 """
-                INSERT OR REPLACE INTO entities 
+                INSERT OR REPLACE INTO entities
                 (entity_id, entity_type, name, chat_id, first_seen, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    entity_id,
+                    filename,
                     "npc",
                     name,
                     chat_id,
@@ -4192,93 +4234,94 @@ def db_create_npc_with_entity_id(chat_id: str, entity_id: str, npc_data: Dict) -
         return False, str(e)
 
 
-def db_promote_npc_to_character(chat_id: str, entity_id: str) -> Optional[str]:
+def db_promote_npc_to_character(chat_id: str, filename: str) -> Optional[str]:
     """
-    Promote NPC to permanent character.
-    Returns filename of created character, or None on failure.
+    Promote NPC to global character by setting chat_id to NULL.
+    Returns new global filename, or None on failure.
     Also stores promotion history in character's extensions.
     """
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
-            
+
             # Get NPC data
             cursor.execute('''
-                SELECT data, name FROM chat_npcs 
-                WHERE chat_id = ? AND entity_id = ?
-            ''', (chat_id, entity_id))
-            
+                SELECT data, name FROM characters
+                WHERE chat_id = ? AND filename = ?
+            ''', (chat_id, filename))
+
             row = cursor.fetchone()
             if not row:
                 return None
-            
+
             npc_data = json.loads(row['data'])
             npc_name = row['name']
-            
-            # Generate unique filename
-            filename = f"{npc_name.lower().replace(' ', '_')}.json"
-            char_path = os.path.join(BASE_DIR, "app", "data", "characters", filename)
-            
-            # Check if character already exists
-            counter = 1
-            while os.path.exists(char_path):
-                filename = f"{npc_name.lower().replace(' ', '_')}_{counter}.json"
-                char_path = os.path.join(BASE_DIR, "app", "data", "characters", filename)
-                counter += 1
-            
+
             # Add promotion history to character extensions
             if 'extensions' not in npc_data:
                 npc_data['extensions'] = {}
-            
+
             npc_data['extensions']['promotion_history'] = {
                 'origin_chat': chat_id,
                 'promoted_at': int(time.time()),
-                'original_entity_id': entity_id  # ✅ Added: Track original NPC ID
+                'original_filename': filename
             }
-            
-            # Save as permanent character (reuse existing save logic)
-            success = db_save_character(npc_data, filename)
-            
-            if success:
-                # ✅ UPDATED: Mark as promoted + inactive + track global filename
-                cursor.execute('''
-                    UPDATE chat_npcs 
-                    SET is_active = 0,
-                        promoted = 1,
-                        promoted_at = ?,
-                        global_filename = ?
-                    WHERE chat_id = ? AND entity_id = ?
-                ''', (int(time.time()), filename, chat_id, entity_id))
-                conn.commit()
-                
-                print(f"[NPC] Promoted '{npc_name}' to character: {filename}")
-                return filename
-            
-            return None
+
+            # Generate global filename (remove npc_ prefix)
+            global_filename = f"{npc_name.lower().replace(' ', '_')}.json"
+
+            # Check for filename collision
+            counter = 1
+            while True:
+                cursor.execute("SELECT id FROM characters WHERE filename = ? AND chat_id IS NULL",
+                             (global_filename,))
+                if not cursor.fetchone():
+                    break
+                global_filename = f"{npc_name.lower().replace(' ', '_')}_{counter}.json"
+                counter += 1
+
+            # Update the character to be global (set chat_id to NULL)
+            cursor.execute("""
+                UPDATE characters
+                SET chat_id = NULL, filename = ?, name = ?, data = ?, updated_at = ?
+                WHERE filename = ? AND chat_id = ?
+            """, (global_filename, npc_name, json.dumps(npc_data, ensure_ascii=False), int(time.time()),
+                   filename, chat_id))
+
+            # Update entities table with new filename
+            cursor.execute("""
+                UPDATE entities
+                SET entity_id = ?
+                WHERE entity_id = ?
+            """, (global_filename, filename))
+
+            conn.commit()
+
+            print(f"[NPC] Promoted '{npc_name}' to character: {global_filename}")
+            return global_filename
     except Exception as e:
         print(f"[NPC] Error promoting NPC: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, Optional[str], Optional[str]]:
     """
-    Create NPC and update chat metadata in a single atomic transaction.
-    
-    This fixes a connection caching issue where NPCs created in the chat_npcs 
-    table aren't immediately visible because db_create_npc() uses one connection 
-    and db_save_chat() uses a separate connection that hasn't refreshed.
+    Create NPC in characters table and update chat metadata in a single atomic transaction.
     
     Args:
         chat_id: Chat ID
         npc_data: Character data dictionary
     
     Returns:
-        (success: bool, entity_id: str, error_message: str)
+        (success: bool, filename: str, error_message: str)
     """
     try:
         name = npc_data.get("name", "Unknown NPC")
-        
-        # Generate unique entity_id
-        entity_id = f"npc_{chat_id}_{int(time.time())}_{hash(name + str(time.time())) % 100000}"
+
+        # Generate filename: npc_{sanitized_name}_{timestamp}.json
+        safe_name = name.lower().replace(' ', '_').replace("'", '')
+        filename = f"npc_{safe_name}_{int(time.time())}.json"
         
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -4287,19 +4330,19 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
             cursor.execute("BEGIN TRANSACTION")
             
             try:
-                # Step 1: Check for existing NPC by entity_id or name
+                # Step 1: Check for existing NPC by filename or name
                 cursor.execute(
-                    "SELECT entity_id, name FROM chat_npcs WHERE chat_id = ? AND entity_id = ?",
-                    (chat_id, entity_id)
+                    "SELECT filename, name FROM characters WHERE chat_id = ? AND filename = ?",
+                    (chat_id, filename)
                 )
                 existing_by_id = cursor.fetchone()
                 
                 if existing_by_id:
                     conn.rollback()
-                    return False, None, "Entity ID already exists"
+                    return False, None, "Filename already exists"
                 
                 cursor.execute(
-                    "SELECT entity_id, name FROM chat_npcs WHERE chat_id = ? AND name = ?",
+                    "SELECT filename, name FROM characters WHERE chat_id = ? AND name = ?",
                     (chat_id, name)
                 )
                 existing_by_name = cursor.fetchone()
@@ -4308,24 +4351,23 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                     conn.rollback()
                     return False, None, "NPC name already exists in this chat"
                 
-                # Insert NPC into chat_npcs table
+                # Insert NPC into characters table
+                extensions = npc_data.get('data', {}).get('extensions', {})
+                danbooru_tag = extensions.get('danbooru_tag', '')
                 cursor.execute(
                     """
-                    INSERT INTO chat_npcs
-                        (chat_id, entity_id, name, data, created_from_text, created_at, 
-                         appearance_count, last_used_turn, is_active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO characters
+                        (chat_id, filename, name, data, danbooru_tag, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chat_id,
-                        entity_id,
+                        filename,
                         name,
-                        json.dumps(npc_data),
-                        npc_data.get("created_from_text", ""),
+                        json.dumps(npc_data, ensure_ascii=False),
+                        danbooru_tag,
                         int(time.time()),
-                        0,          # appearance_count
-                        None,       # last_used_turn
-                        1,          # is_active
+                        int(time.time()),
                     ),
                 )
                 
@@ -4337,7 +4379,7 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        entity_id,
+                        filename,
                         "npc",
                         name,
                         chat_id,
@@ -4372,7 +4414,7 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                     existing_metadata["localnpcs"] = {}
                 
                 # Add new NPC to metadata (preserving existing localnpcs)
-                existing_metadata["localnpcs"][entity_id] = {
+                existing_metadata["localnpcs"][filename] = {
                     'name': name,
                     'data': npc_data,
                     'is_active': True,
@@ -4383,8 +4425,8 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                 # Get current active characters
                 active_chars = existing_metadata.get('activeCharacters', [])
                 
-                if entity_id not in active_chars:
-                    active_chars.append(entity_id)
+                if filename not in active_chars:
+                    active_chars.append(filename)
                 
                 existing_metadata["activeCharacters"] = active_chars
                 existing_metadata["activeWI"] = existing_metadata.get('activeWI')
@@ -4415,7 +4457,7 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                 # Force WAL checkpoint to ensure other connections can see the changes
                 cursor.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 
-                return True, entity_id, None
+                return True, filename, None
                 
             except Exception as e:
                 # Rollback on any error
@@ -4909,18 +4951,18 @@ def db_assign_visual_canon_to_character(
 
 def db_assign_visual_canon_to_npc(
     chat_id: str,
-    npc_id: str,
+    filename: str,
     canon_id: int,
     canon_tags: str
 ) -> bool:
-    """Assign visual canon to an NPC."""
+    """Assign visual canon to an NPC (uses unified characters table)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE chat_npcs
-            SET visual_canon_id = ?, visual_canon_tags = ?
-            WHERE chat_id = ? AND entity_id = ?
-        """, (canon_id, canon_tags, chat_id, npc_id))
+            UPDATE characters
+            SET visual_canon_id = ?, visual_canon_tags = ?, updated_at = ?
+            WHERE chat_id = ? AND filename = ?
+        """, (canon_id, canon_tags, int(time.time()), chat_id, filename))
         conn.commit()
         return cursor.rowcount > 0
 
@@ -4938,15 +4980,15 @@ def db_clear_visual_canon_from_character(filename: str) -> bool:
         return cursor.rowcount > 0
 
 
-def db_clear_visual_canon_from_npc(chat_id: str, npc_id: str) -> bool:
-    """Clear visual canon binding from an NPC."""
+def db_clear_visual_canon_from_npc(chat_id: str, filename: str) -> bool:
+    """Clear visual canon binding from an NPC (uses unified characters table)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE chat_npcs
-            SET visual_canon_id = NULL, visual_canon_tags = NULL
-            WHERE chat_id = ? AND entity_id = ?
-        """, (chat_id, npc_id))
+            UPDATE characters
+            SET visual_canon_id = NULL, visual_canon_tags = NULL, updated_at = ?
+            WHERE chat_id = ? AND filename = ?
+        """, (int(time.time()), chat_id, filename))
         conn.commit()
         return cursor.rowcount > 0
 
@@ -4975,16 +5017,16 @@ def db_get_character_visual_canon(filename: str) -> Optional[Dict[str, Any]]:
         }
 
 
-def db_get_npc_visual_canon(chat_id: str, npc_id: str) -> Optional[Dict[str, Any]]:
-    """Get visual canon for an NPC."""
+def db_get_npc_visual_canon(chat_id: str, filename: str) -> Optional[Dict[str, Any]]:
+    """Get visual canon for an NPC (uses unified characters table)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT cn.visual_canon_id, cn.visual_canon_tags, dc.name, dc.gender, dc.core_tags
-            FROM chat_npcs cn
-            LEFT JOIN danbooru_characters dc ON cn.visual_canon_id = dc.id
-            WHERE cn.chat_id = ? AND cn.entity_id = ?
-        """, (chat_id, npc_id))
+            SELECT c.visual_canon_id, c.visual_canon_tags, dc.name, dc.gender, dc.core_tags
+            FROM characters c
+            LEFT JOIN danbooru_characters dc ON c.visual_canon_id = dc.id
+            WHERE c.chat_id = ? AND c.filename = ?
+        """, (chat_id, filename))
         
         row = cursor.fetchone()
         if not row:
@@ -5033,6 +5075,147 @@ def db_record_migration(migration_name: str):
         conn.commit()
 
 
-# Initialize database on module import (only once at the end)
+def migrate_npcs_to_characters():
+    """
+    Run on startup - migrate all existing NPCs from chat_npcs to characters table.
+    
+    This function:
+    1. Reads all NPCs from chat_npcs table
+    2. Generates filenames for NPCs: npc_{sanitized_name}_{timestamp}.json
+    3. Inserts NPCs into characters table with chat_id set
+    4. Updates entities table to use filename instead of entity_id
+    5. Updates chat metadata localnpcs references
+    6. Renames chat_npcs to chat_npcs_backup
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Check if migration already ran (look for backup table)
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='chat_npcs_backup'
+        """)
+        if cursor.fetchone():
+            print("[MIGRATION] NPCs already migrated to characters table (backup exists)")
+            return
+        
+        # Check if chat_npcs table exists
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name='chat_npcs'
+        """)
+        if not cursor.fetchone():
+            print("[MIGRATION] No chat_npcs table found (fresh install)")
+            return
+        
+        # Get all NPCs
+        cursor.execute("SELECT * FROM chat_npcs")
+        npcs = cursor.fetchall()
+        
+        if not npcs:
+            print("[MIGRATION] No NPCs found to migrate")
+            return
+        
+        print(f"[MIGRATION] Migrating {len(npcs)} NPCs to characters table...")
+        
+        migrated_count = 0
+        skipped_count = 0
+        entity_to_filename_map = {}
+        
+        for npc in npcs:
+            npc_dict = dict(npc)
+            entity_id = npc_dict['entity_id']
+            chat_id = npc_dict['chat_id']
+            name = npc_dict['name']
+            
+            # Generate filename: npc_{sanitized_name}_{timestamp}.json
+            safe_name = name.lower().replace(' ', '_').replace("'", '')
+            filename = f"npc_{safe_name}_{int(time.time())}_{migrated_count}.json"
+            
+            # Skip if filename collision
+            cursor.execute("SELECT id FROM characters WHERE filename = ?", (filename,))
+            if cursor.fetchone():
+                print(f"[MIGRATION] Skipping {entity_id} - filename collision: {filename}")
+                skipped_count += 1
+                continue
+            
+            # Insert into characters table
+            cursor.execute("""
+                INSERT INTO characters (filename, name, data, chat_id, danbooru_tag,
+                                     visual_canon_id, visual_canon_tags, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (filename, name, npc_dict['data'], chat_id,
+                   npc_dict.get('danbooru_tag'),
+                   npc_dict.get('visual_canon_id'),
+                   npc_dict.get('visual_canon_tags'),
+                   npc_dict['created_at'], npc_dict['created_at']))
+            
+            # Track mapping for entities table update
+            entity_to_filename_map[entity_id] = filename
+            migrated_count += 1
+        
+        print(f"[MIGRATION] Migrated {migrated_count} NPCs (skipped {skipped_count})")
+        
+        # Update entities table to use filename instead of entity_id
+        print("[MIGRATION] Updating entities table...")
+        for old_entity_id, new_filename in entity_to_filename_map.items():
+            cursor.execute("""
+                UPDATE entities
+                SET entity_id = ?
+                WHERE entity_id = ?
+            """, (new_filename, old_entity_id))
+        
+        # Update chat metadata localnpcs references
+        print("[MIGRATION] Updating chat metadata...")
+        cursor.execute("SELECT id, metadata FROM chats")
+        chats = cursor.fetchall()
+        
+        metadata_updated = 0
+        for chat in chats:
+            chat_id = chat['id']
+            metadata = json.loads(chat['metadata']) if chat['metadata'] else {}
+            localnpcs = metadata.get('localnpcs', {})
+            active_characters = metadata.get('activeCharacters', [])
+            
+            # Update localnpcs keys from entity_id to filename
+            new_localnpcs = {}
+            for old_key, npc_info in localnpcs.items():
+                new_key = entity_to_filename_map.get(old_key, old_key)
+                new_localnpcs[new_key] = npc_info
+            metadata['localnpcs'] = new_localnpcs
+            
+            # Update activeCharacters list
+            new_active_characters = []
+            for char_ref in active_characters:
+                if char_ref in entity_to_filename_map:
+                    new_active_characters.append(entity_to_filename_map[char_ref])
+                else:
+                    new_active_characters.append(char_ref)
+            metadata['activeCharacters'] = new_active_characters
+            
+            # Save updated metadata
+            metadata_json = json.dumps(metadata, ensure_ascii=False)
+            cursor.execute("UPDATE chats SET metadata = ? WHERE id = ?", (metadata_json, chat_id))
+            metadata_updated += 1
+        
+        print(f"[MIGRATION] Updated metadata for {metadata_updated} chats")
+        
+        # Backup old table
+        print("[MIGRATION] Backing up chat_npcs table...")
+        cursor.execute("ALTER TABLE chat_npcs RENAME TO chat_npcs_backup")
+        
+        conn.commit()
+        print("[MIGRATION] NPC migration complete!")
+
+
+# Initialize database on module import (only once at end)
 init_db()
 init_vec_table()
+
+# Run NPC migration on startup (after database initialization)
+try:
+    migrate_npcs_to_characters()
+except Exception as e:
+    print(f"[MIGRATION ERROR] Failed to migrate NPCs: {e}")
+    import traceback
+    traceback.print_exc()

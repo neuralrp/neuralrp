@@ -30,7 +30,7 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Schema version - increment when making schema changes
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
@@ -210,6 +210,26 @@ def _apply_migrations(c, from_version: int, to_version: int):
         _add_column_if_not_exists(c, "chat_npcs", "visual_canon_tags", "TEXT")
 
         print("[MIGRATION] v1.11.0 visual canon column consistency complete")
+
+    # Migration 5 → 6 (v1.12.0: Unify NPCs into characters table)
+    if from_version < 6:
+        print("[MIGRATION] Applying v1.12.0 NPC unification...")
+
+        # Add chat_id column to characters table (for storing NPCs)
+        _add_column_if_not_exists(c, "characters", "chat_id", "TEXT")
+
+        # Create index on chat_id for performance
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS idx_characters_chat_id ON characters(chat_id)")
+            print("[MIGRATION] Created idx_characters_chat_id index")
+        except sqlite3.Error as e:
+            print(f"[MIGRATION WARNING] Could not create index idx_characters_chat_id: {e}")
+
+        # Create unique constraint on (chat_id, filename) for NPCs
+        # Note: SQLite doesn't support adding UNIQUE constraints directly,
+        # so we rely on application-level uniqueness checks
+
+        print("[MIGRATION] v1.12.0 NPC unification complete")
   
 def _add_column_if_not_exists(c, table: str, column: str, dtype: str):
     """Add a column to a table if it doesn't already exist."""
