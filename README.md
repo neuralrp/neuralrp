@@ -39,13 +39,13 @@
 ---
 ## v2.0.0: Stabilization
 
-v2.0.0 is a stabilization release. The codebase grew too fast, I kept adding features and wasn't thinking about the state of the codbase until it got out of control. To try to keep the project maintainable, I removed three overly-complex systems: forking, relationship tracking, and snapshot variation mode. If these features are essential for you and you don't mind the bugs, don't download v2.0.0. 
+v2.0.0 is a stabilization release. The codebase grew too fast, I kept adding features and wasn't thinking about the state of the codebase until it got out of control. To try to keep the project maintainable, I removed three overly-complex systems: forking, relationship tracking, and snapshot variation mode. If these features are essential for you and you don't mind the bugs, don't download v2.0.0. 
 
-Over the coming weeks, I'll debug this and continue to optimize. I want to leave this project in as good a place as I can, and removing those features is going to help me do it.
+Over the coming weeks, I'll continue debug this and optimizing.
 
 ## Scene-First Architecture
 
-This represents a large architectural and philosophical shift for NeuralRP. Through extensive testing, I have found that smaller LLMs (I roleplay with a 12b LLM) simply cannot keep characters straight, no matter what you prompt, when lots of dialog is present. Characters just merge together. 
+Through extensive testing, I have found that smaller LLMs (I roleplay with a 12b LLM) simply cannot keep characters straight, no matter what you prompt, when lots of dialog is present. Characters just merge together. 
 
 To keep this from happening, I have combined consistent, small chunks of character reinforcement and a "spike" of reinforcement for new characters, along with smart auto-summarization based on scene change, to ensure the LLM both recognizes the change, and doesn't "merge" the new and old characters together.
 
@@ -276,6 +276,7 @@ All data in SQLite (neuralrp.db) with automatic JSON export for SillyTavern comp
 - All testing done with a NVidia 3060 12GB vRAM GPU
 - Running 2 LLMs with an 8GB vRAM GPU is untested, will likely lead to sub-optimal results
 - Danbooru tagging is optimized for SD models like Pony and Illustrious, which are trained for that input. Other SD models are untested
+- There's a SCENE CAST bug, when an NPC enters a chat and is the only NPC/Character there, the prompt treats them like they are new to the chat every turn and drops their entire character card. I'm trying to find the bug but also haven't found that it significantly impacts chat negatively either.
 
 ## Hardware Requirements
 
