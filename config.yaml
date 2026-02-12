@@ -1,0 +1,50 @@
+# NeuralRP Configuration File
+# All settings can be overridden via environment variables
+# Environment variable format: NEURALRP_{SECTION}_{KEY} (e.g., NEURALRP_SERVER_PORT)
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  fallback_ports: [8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008, 8009, 8010]  # Try these if primary port is busy
+  cors_origins: ["*"]  # Allow all origins by default (adjust for security if exposing to internet)
+  log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+
+kobold:
+  url: "http://127.0.0.1:5001"
+
+stable_diffusion:
+  url: "http://127.0.0.1:7861"
+  timeout: 10.0
+
+context:
+  max_context: 10000
+  summarize_threshold: 0.80
+  history_window: 6
+  max_exchanges_per_scene: 15
+  world_info_reinforce_freq: 3
+
+retention:
+  # Backup settings
+  backup_enabled: true
+  backup_schedule: "daily"  # daily, weekly, or manual
+  backup_retention_days: 30
+
+  # Chat cleanup
+  unnamed_chat_days: 30  # Delete chats with default names older than N days
+  autosaved_chat_days: 7   # Keep autosaved chats for N days
+
+  # Data retention
+  change_log_days: 30
+  performance_metrics_days: 7
+  summarized_messages_days: 90
+  log_retention_days: 30
+
+  # Database maintenance
+  vacuum_interval_days: 7  # Run VACUUM every N days
+
+features:
+  performance_mode_enabled: true
+
+# System prompt for AI responses
+# This can also be changed in the settings UI
+system_prompt: "Write a highly detailed, creative, and immersive response. Stay in character at all times."

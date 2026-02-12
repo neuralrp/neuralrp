@@ -10,20 +10,16 @@ This document explains how NeuralRP's advanced features work under the hood, des
 2. [Configuration Settings](#configuration-settings)
 3. [SQLite Database](#sqlite-database)
 4. [Database Setup System](#database-setup-system)
-5. [Context Assembly](#context-assembly)
-6. [World Info Engine](#world-info-engine)
-7. [Semantic Search](#semantic-search)
-8. [Semantic Relationship Tracker](#semantic-relationship-tracker)
-9. [Entity ID System](#entity-id-system)
-10. [Unified Characters Table (v1.12.0)](#unified-characters-table-v1120)
+ 5. [Context Assembly](#context-assembly)
+ 6. [World Info Engine](#world-info-engine)
+ 7. [Semantic Search](#semantic-search)
+ 8. [Entity ID System](#entity-id-system)
+ 9. [Unified Characters Table (v1.12.0)](#unified-characters-table-v1120)
 11. [Chat-Scoped NPC System (v1.12.0 - UNIFIED)](#chat-scoped-npc-system-v1120-unified)
 11.5. [Character Card Field Mappings](#character-card-field-mappings)
 12. [Message Search System](#message-search-system)
 13. [Performance Mode](#performance-mode)
-14. [Branching System (v1.7.0, Enhanced v1.10.4)](#branching-system)
-    - [NPC Entity ID Remapping](#npc-entity-id-remapping-v170-enhanced-v1104)
-    - [Fork Isolation and Metadata Protection](#fork-isolation-and-metadata-protection-v1104)
-15. [Memory & Summarization](#memory--summarization)
+14. [Memory & Summarization](#memory--summarization)
     - [Scene Capsule Summarization](#scene-capsule-summarization-phase-4-v1110)
     - [SCENE UPDATE Blocks](#scene-update-blocks-v1110)
 16. [Soft Delete System](#soft-delete-system)
@@ -123,7 +119,7 @@ SCENE UPDATE           50-100         On cast change only
 SCENE CAST             400-600        Every turn
 Recent dialogue (6 ex)  900-1500       Every turn
 Canon law              100-200        Every 3 turns
-Relationships           100-200        If meaningful
+
 Lead-in                50             Every turn
 Total                  2450-4050
 Generation headroom     3950-5550
@@ -227,11 +223,10 @@ FastAPI Endpoint
     ↓
 Resource Manager (queues operations)
     ↓
-├─→ LLM Call → KoboldCpp → Response → Database save
-├─→ Image Gen → Stable Diffusion → Image save → Metadata store
-├─→ Character/World Edit → Database → JSON export
-├─→ Relationship Analysis → Semantic embeddings → Relationship update
-└─→ Semantic Search → sqlite-vec → Ranked results
+    ├─→ LLM Call → KoboldCpp → Response → Database save
+    ├─→ Image Gen → Stable Diffusion → Image save → Metadata store
+    ├─→ Character/World Edit → Database → JSON export
+    ├─→ Semantic Search → sqlite-vec → Ranked results
 ```
 
 ### Configuration Settings
@@ -374,12 +369,6 @@ NeuralRP migrated from JSON files to SQLite in v1.5.0 for several key benefits:
 **vec_world_entries** - Vector embeddings (768-dimensional) for semantic search via sqlite-vec
 
 **change_log** - Audit trail for undo/redo support (30-day retention)
-
-**relationships** - Current relationship states between entities with five-dimensional emotional tracking
-
-**relationship_history** - Historical snapshots of relationships (20 retained per relationship pair)
-
-**entities** - Entity registry with unique IDs for characters, NPCs, and users
 
 ### Startup Health Check
 
@@ -675,7 +664,7 @@ The setup script creates 17 core tables:
 - **Characters & Worlds**: characters, worlds, world_entries
 - **Chat System**: chats, messages
 - **Tag Management**: character_tags, world_tags
-- **NPCs & Relationships**: chat_npcs, relationship_states, entities
+- **NPCs**: chat_npcs
 - **Image Features**: danbooru_tags, sd_favorites, danbooru_tag_favorites, image_metadata
 - **Utilities**: change_log, performance_metrics, schema_version
 
@@ -727,13 +716,9 @@ flowchart TD
     
     AddHistory --> CanonReinforce{Canon Law Reinforcement?}
     CanonReinforce --> |Turn 1,2 OR every N turns| CanonPinned[Pinned Canon Law at End]
-    CanonReinforce --> |No| CheckRelationship
+    CanonReinforce --> |Turn 1,2 OR every N turns| CanonPinned[Pinned Canon Law at End]
 
-    CanonPinned --> CheckRelationship{Relationship Data?}
-    CheckRelationship --> |Sufficient data| AddRel[Relationship Context: Emotional States]
-    CheckRelationship --> |No data| AddLeadIn
 
-    AddRel --> AddLeadIn[Add Generation Lead-In]
     AddLeadIn --> End([Complete Prompt])
     
     subgraph "World Info Matching Logic"
@@ -753,15 +738,14 @@ flowchart TD
 - **Reset Points**: Full cards also trigger on:
   - First appearance in chat
   - Returning after long absence (20+ messages not in recent history)
-- **Canon Law**: Always shown, reinforced every 3 turns at prompt end
-- **Relationship Context**: Emotional states injected at very end (before Lead-In) for maximum attention
-- **Entity ID Extraction** (v1.10.4): Use `get_entity_id()` for consistent relationship lookups
-- **World Info**:
-  - Quoted keys (`"Event Name"`): Exact phrase match only
-  - Unquoted keys (`dragon`): Semantic similarity + flexible keyword match
-- **Character Modes**:
-  - Reset points (first appearance/return): Full card (1000-1500 tokens)
-  - Sticky window (turns 2-3): Full card (1000-1500 tokens)
+ - **Canon Law**: Always shown, reinforced every 3 turns at prompt end
+ - **Entity ID Extraction** (v1.10.4): Use `get_entity_id()` for consistent entity lookups
+ - **World Info**:
+   - Quoted keys (`"Event Name"`): Exact phrase match only
+   - Unquoted keys (`dragon`): Semantic similarity + flexible keyword match
+ - **Character Modes**:
+   - Reset points (first appearance/return): Full card (1000-1500 tokens)
+   - Sticky window (turns 2-3): Full card (1000-1500 tokens)
   - Regular turns (4+): SCENE CAST capsules (50-150 tokens each)
  
 ### 8-Turn Reinforcement Cycle (DEPRECATED - see Hybrid System above)
@@ -866,7 +850,7 @@ flowchart LR
 2. **User Description** (v1.11.0+)
    - User name shown as "Name: [user_name]" (if provided)
    - User persona shown as "Description: [user_persona]" (if provided)
-   - **Injected EVERY turn** (not just first turn) for consistent relationship building
+   - **Injected EVERY turn** (not just first turn) for consistent identity
    - Placed early to influence perspective
    - Enables LLM to track user identity and personality across conversations
 
@@ -971,34 +955,6 @@ NeuralRP uses a hybrid approach combining full cards and capsules, driven by con
     - World rules reinforced at prompt end
     - Shown on turns 1-2 (initial) and every Nth turn thereafter
     - Overrides character drift to maintain story logic
-
-8.5. **Relationship Context** (v1.6.0, repositioned v1.10.4)
-    - Current relationship states between characters, NPCs, and user
-    - Five emotional dimensions: Trust, Emotional Bond, Conflict, Power Dynamic, Fear/Anxiety
-    - Directional tracking (Alice→Bob separate from Bob→Alice)
-    - Only included if sufficient relationship data exists
-    - **Positioned at end for maximum LLM attention before generation**
-    
-**Positioning Rationale (v1.10.4)**:
-Relationship context was moved from section 5.5 (after World Knowledge) to section 8.5 (after Canon Law) to ensure relationship dynamics receive maximum LLM attention before generation.
-
-| Position | Previous (v1.10.3) | Current (v1.10.4) |
-|----------|-------------------------|---------------------|
-| **Section** | 5.5 (After World Knowledge) | 8.5 (After Canon Law) |
-| **Context Order** | System → World → Relationships → History → Canon → Lead-In | System → World → History → Canon → Relationships → Lead-In |
-| **Attention Decay** | 7 sections before generation | 2 sections before generation |
-| **Benefit** | - | **Emotional states emphasized**, less likely to be lost in long prompts |
-
-**Why This Matters**:
-LLMs pay more attention to context near the end of prompts (recency bias). By moving relationship context to just before the generation lead-in:
-- Relationship shifts are more likely to influence immediate responses
-- Emotional dynamics are emphasized over earlier context
-- Character reactions reflect current relationship state accurately
-
-**Impact**:
-- No functional changes to relationship tracking logic
-- Position-only change affects context assembly order
-- Improves emotional consistency in long conversations
 
 ### Reinforcement System (updated in v1.7.3)
 
@@ -1362,12 +1318,6 @@ prompt = construct_prompt(current_request, character_first_turns, absolute_turn=
 - Summarization may truncate `current_request.messages` mid-request, but `absolute_turn` remains correct
 - All turn-based logic (sticky window, reinforcement) uses accurate absolute turn count
 
-**Forking:**
-- Branches have independent message histories
-- `/api/chat` called on branch receives branch's complete messages
-- `absolute_turn` accurately reflects branch's turn count
-- `characterFirstTurns` copied and remapped during fork (per-character first turn preserved)
-
 ---
 
 **Reinforcement Tradeoffs and Context Hygiene Philosophy**
@@ -1399,7 +1349,7 @@ prompt = construct_prompt(current_request, character_first_turns, absolute_turn=
 - **Character Grounding**: ~20% for reinforcement (prevents drift without overwhelming)
 - **World Rules**: ~5% for canon law (small but critical)
 - **System Overhead**: ~8% for instructions (unavoidable)
-- **Headroom**: ~22% buffer for triggered lore, relationships, dynamic elements
+- **Headroom**: ~22% buffer for triggered lore, dynamic elements
 
 **Reinforcement as "Hygiene Maintenance":**
 
@@ -1706,7 +1656,6 @@ In v1.8.1, the edit override system was removed. Edited characters now follow th
 Context assembly monitors token count and adjusts automatically:
 - **Target**: Stay under configurable threshold (default 85% of max context)
 - **When exceeded**: Trigger summarization of oldest messages
-- **Relationship Data**: Minimal overhead (~50-100 bytes per relationship)
 - **Canon Law**: Never counted against caps, always included
 
 ---
@@ -1909,793 +1858,11 @@ To improve relevance, structural words are excluded from embeddings:
 | Memory overhead | 0 bytes (disk-based) |
 | Storage per entry | ~3KB (768 floats × 4 bytes) |
 
----
-
-## Semantic Relationship Tracker
-
-### Overview (v1.6.0)
-
-NeuralRP automatically tracks emotional relationships between characters, NPCs, and user using semantic embeddings. This provides emotionally consistent responses without LLM calls or context bloat.
-
-### Five-Dimensional Emotional Model
-
-Relationships are tracked across five emotional dimensions:
-
-1. **Trust** (-1.0 to +1.0): How much Entity A trusts Entity B
-   - +1.0: Complete trust, reveals secrets
-   - 0.0: Neutral, guarded
-   - -1.0: Complete distrust, hostility
-
-2. **Emotional Bond** (-1.0 to +1.0): Strength of emotional connection
-   - +1.0: Deep emotional attachment
-   - 0.0: Indifferent
-   - -1.0: Strong negative emotions (hate, resentment)
-
-3. **Conflict** (-1.0 to +1.0): Level of disagreement or tension
-   - +1.0: Constant conflict, opposition
-   - 0.0: Harmonious
-   - -1.0: Aligned, cooperative
-
-4. **Power Dynamic** (-1.0 to +1.0): Power balance between entities
-   - +1.0: Entity A has complete control over B
-   - 0.0: Equal power
-   - -1.0: Entity B has complete control over A
-
-5. **Fear/Anxiety** (-1.0 to +1.0): Level of fear or anxiety
-   - +1.0: Terrified, panicked
-   - 0.0: Calm
-   - -1.0: Fearless, confident
-
-### Analysis Engine
-
-**Trigger**: Every 10 messages
-
-**Method**: Semantic embedding analysis (no LLM calls)
-
-**Process**:
-1. Extract last 10 messages
-2. Identify entities present (characters, NPCs, user)
-3. **Extract entity IDs** using `get_entity_id()` helper (v1.10.4)
-4. Compute semantic embeddings for message segments
-5. Compare embeddings to previous relationship state
-6. Calculate emotional deltas for each dimension
-7. Update relationship scores incrementally (gradual evolution)
-
-**Function Signature Changes (v1.10.4)**:
-```python
-# Old (pre-v1.10.4): Passed character names only
-analyze_and_update_relationships(
-    chat_id: str,
-    messages: list,
-    characters: List[str],  # ← Just names, no entity IDs
-    user_name: str = None
-)
-
-# New (v1.10.4): Passes full character objects for entity ID extraction
-analyze_and_update_relationships(
-    chat_id: str,
-    messages: list,
-    character_objs: List[dict],  # ← Full objects with _filename, entity_id
-    user_name: str = None
-)
-```
-
-**Why Full Objects?**
-- Global characters need `_filename` (e.g., `alice.json`) for entity IDs
-- Local NPCs need `entity_id` (e.g., `npc_123456_789`) for entity IDs
-- Database stores entity IDs, not names → proper lookups require correct IDs
-
-**Time Complexity**: O(n × m) where n=messages, m=entities
-
-**Performance**: <20ms overhead per update
-
-### Scoring Algorithm (v1.6.1+)
-
-**Hybrid Approach**: Combines semantic embeddings with keyword polarity for nuance.
-
-**Algorithm**:
-1. Extract last 10 messages involving both entities
-2. Detect keyword polarity (positive/negative signals for each dimension)
-3. Compute semantic similarity between messages and dimension prototypes
-4. Combine signals: `delta = (semantic_similarity × 0.7) + (keyword_polarity × 0.3)`
-5. Apply smoothing: Max ±15 points per update to prevent wild swings
-6. Clamp scores to [0, 100] range
-
-**Why Hybrid?**
-- **Semantic embeddings**: Capture emotional tone, sarcasm, subtle jabs
-- **Keyword polarity**: Provides directional signal (trust vs distrust)
-- **Combined**: Best of both worlds - semantic accuracy + keyword direction
-
-**Example**:
-Message: "Oh, thanks a lot. That's really helpful."
-Semantic similarity: 0.72 to "conflict" (detects sarcastic tone)
-Keyword polarity: +1 (contains "thanks")
-Combined delta: (0.72 × 0.7) + (1 × 0.3) = +0.804 → +8 points
-Result: Conflict increases from 50 → 58 (subtle sarcasm detected)
-
-**Performance**: <20ms per update (embedding encoding + similarity computation)
-
-### Directional Tracking
-
-Relationships are directional:
-- Alice→Bob: How Alice feels about Bob
-- Bob→Alice: How Bob feels about Alice
-
-This allows for asymmetric relationships (e.g., Alice trusts Bob, but Bob doesn't trust Alice).
-
-### Relationship History
-
-Every relationship update saves a snapshot:
-
-**Retention**: 20 most recent snapshots per relationship pair
-
-**Automatic Pruning**: Oldest snapshots deleted when limit exceeded
-
-**Purpose**: Track relationship evolution over time, enabling retrospective analysis
-
-**Snapshot Structure**:
-```json
-{
-  "from_entity_id": "char_abc123",
-  "to_entity_id": "npc_xyz789",
-  "timestamp": 1737254400,
-  "trust": 0.5,
-  "emotional_bond": 0.3,
-  "conflict": -0.2,
-  "power_dynamic": 0.0,
-  "fear_anxiety": -0.4,
-  "message_count_at_update": 50
-}
-```
-
-### Context Injection
-
-Relevant relationship states are automatically injected into prompts:
-
-**Inclusion Criteria**:
-- At least 20 messages exchanged between entities
-- Relationship score magnitude > 0.3 (avoid weak signals)
-
-**Format**:
-```
-### Relationship Context:
-Alice → Bob (Trust: 0.5, Bond: 0.3, Conflict: -0.2)
-John → User (Trust: -0.2, Fear: 0.6)
-```
-
-**Benefit**: AI understands emotional dynamics without explicit instructions, providing emotionally consistent responses.
-
-### API Endpoints
-
-**POST /api/relationships/update**
-- Analyzes messages and updates relationship states
-- Called automatically after every 10th message
-
-**GET /api/relationships/{chat_id}**
-- Returns current relationship states for all entities in chat
-
-**GET /api/relationships/{chat_id}/history**
-- Returns relationship evolution history (20 snapshots per pair)
-
-**GET /api/entities/{chat_id}**
-- Returns all entities registered for chat (characters, NPCs, user)
-
-### Database Schema
-
-**relationships table**:
-```sql
-CREATE TABLE relationships (
-    id INTEGER PRIMARY KEY,
-    chat_id TEXT NOT NULL,
-    from_entity_id TEXT NOT NULL,
-    to_entity_id TEXT NOT NULL,
-    trust REAL DEFAULT 0.0,
-    emotional_bond REAL DEFAULT 0.0,
-    conflict REAL DEFAULT 0.0,
-    power_dynamic REAL DEFAULT 0.0,
-    fear_anxiety REAL DEFAULT 0.0,
-    last_updated INTEGER,
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
-    UNIQUE(chat_id, from_entity_id, to_entity_id)
-)
-```
-
-**relationship_history table**:
-```sql
-CREATE TABLE relationship_history (
-    id INTEGER PRIMARY KEY,
-    relationship_id INTEGER NOT NULL,
-    timestamp INTEGER NOT NULL,
-    trust REAL NOT NULL,
-    emotional_bond REAL NOT NULL,
-    conflict REAL NOT NULL,
-    power_dynamic REAL NOT NULL,
-    fear_anxiety REAL NOT NULL,
-    message_count INTEGER NOT NULL,
-    FOREIGN KEY (relationship_id) REFERENCES relationships(id) ON DELETE CASCADE
-)
-```
-
-### Performance
-
-| Metric | Value |
-|--------|-------|
-| Analysis overhead (every 10 messages) | <20ms |
-| Storage per relationship snapshot | ~50-100 bytes |
-| Context injection overhead | <5ms |
-| History query time | <50ms (20 snapshots) |
-| Total overhead per chat session | <0.5% of generation time |
-
-### Design Philosophy
-
-**Why Semantic Embeddings Instead of LLM?**
-- **Speed**: <20ms vs 500ms+ for LLM analysis
-- **No Context Bloat**: Embeddings computed separately, doesn't add to prompt
-- **Consistency**: Same model used for world info semantic search
-- **Cost**: Zero token cost
-
-**Why Every 10 Messages?**
-- **Granularity**: Fine-grained tracking without excessive overhead
-- **Smoothing**: Reduces noise from individual message fluctuations
-- **Performance**: Balances tracking accuracy with system load
-
-**Why Five Dimensions?**
-- **Expressive**: Captures complex emotional states
-- **Interpretable**: Each dimension has clear meaning
-- **Balanced**: Comprehensive without overwhelming complexity
-
----
-
-## Adaptive Relationship Tracker (v1.6.1)
-
-### Overview
-
-The Adaptive Relationship Tracker is an enhancement to the Semantic Relationship Tracker that provides real-time, three-tier detection of dramatic relationship shifts while maintaining noise reduction for gradual changes.
-
-### Why Adaptive Detection?
-
-**Problem with Fixed Intervals**:
-- Dramatic moments missed: "I hate you!" triggers at 10-message interval, not immediately
-- Unnecessary overhead: Normal conversation triggers relationship analysis every 10 messages
-- Inconsistent: Emotional shifts caught late, after context has already moved on
-
-**Solution with Adaptive System**:
-- Immediate detection: Dramatic shifts caught in real-time
-- Graceful degradation: Falls back to 10-message interval if no adaptive triggers
-- Performance-aware: Only analyzes when relationship changes are detected
-- Context-sensitive: Semantic filtering ensures only relevant dimensions injected
-
-### Three-Tier Detection System
-
-#### Tier 1: Keyword Detection (~0.5ms)
-
-**Purpose**: Catch explicit relationship mentions with minimal overhead
-
-**Implementation**:
-```python
-# 60+ relationship keywords across 5 dimensions
-self.relationship_keywords = {
-    'trust': ['trust', 'believe', 'betray', 'lie', ...],
-    'emotional_bond': ['love', 'hate', 'adore', 'despise', ...],
-    'conflict': ['fight', 'argue', 'enemy', 'oppose', ...],
-    'power_dynamic': ['lead', 'dominate', 'submit', 'obey', ...],
-    'fear_anxiety': ['afraid', 'terrified', 'calm', 'safe', ...]
-}
-
-# Word boundary matching prevents false positives
-pattern = r'\b' + re.escape(keyword) + r'\b'
-```
-
-**Benefits**:
-- Fastest detection method (<1ms)
-- Catches explicit statements ("I trust you", "I hate him")
-- Word boundary prevents false positives ("trust" won't match "distrust")
-
-**Limitations**:
-- Misses implicit emotional shifts
-- Requires exact keyword matches
-
-#### Tier 2: Semantic Similarity (~2-3ms)
-
-**Purpose**: Detect implicit emotional shifts through conversation changes
-
-**Implementation**:
-```python
-# Compare current turn embedding to previous turn embedding
-similarity = np.dot(current_embedding, previous_turn_embedding) / (
-    np.linalg.norm(current_embedding) * np.linalg.norm(previous_turn_embedding)
-)
-
-# Below 0.7 indicates major topic/emotional shift
-if similarity < 0.7:
-    trigger_adaptive_analysis(reason="semantic_shift")
-```
-
-**Benefits**:
-- Catches implicit emotional changes (no keywords needed)
-- Detects conversation topic shifts
-- Reuses existing semantic search model (zero memory overhead)
-
-**Limitations**:
-- Slightly slower than keyword detection
-- Requires previous turn for comparison
-
-#### Tier 3: Dimension Filtering (~1-2ms)
-
-**Purpose**: Only inject relationship dimensions semantically relevant to current conversation
-
-**Implementation**:
-```python
-# Pre-computed dimension prototype embeddings
-dimension_embeddings = {
-    'trust': model.encode("deep trust betrayal loyalty faith confidence..."),
-    'emotional_bond': model.encode("love affection romance care adoration..."),
-    'conflict': model.encode("argument tension disagreement anger hostility..."),
-    'power_dynamic': model.encode("dominance authority control leadership..."),
-    'fear_anxiety': model.encode("fear terror dread intimidation threat...")
-}
-
-# Filter dimensions by semantic relevance to current conversation
-relevant_dimensions = []
-for dimension, score in relationship_states.items():
-    if abs(score - 50) > 15:  # Deviates from neutral
-        dim_similarity = semantic_similarity(current_text, dimension_embeddings[dimension])
-        if dim_similarity > 0.35:  # Semantically relevant
-            relevant_dimensions.append(dimension)
-```
-
-**Benefits**:
-- Reduces prompt bloat (only relevant dimensions injected)
-- Prevents irrelevant context injection
-- Natural conversation flow
-
-**Filtering Criteria**:
-1. **Deviation from neutral**: Score must be >15 points from 50 (on 0-100 scale)
-2. **Semantic relevance**: Similarity to current conversation >0.35
-
-### Spam Blocker Implementation
-
-**Problem**: Repeated words in long fight scenes ("I hate you!", "I hate you!", "I hate you!") cause constant triggering
-
-**Solution**: Cooldown mechanism with minimum turn separation
-
-**Implementation**:
-```python
-class AdaptiveRelationshipTracker:
-    def __init__(self):
-        self.turn_count = 0
-        self.last_trigger_turn = 0
-        self.cooldown_turns = 3  # Minimum turns between triggers
-    
-    def should_trigger_adaptive_analysis(self, current_text: str) -> Tuple[bool, str]:
-        self.turn_count += 1
-        
-        # Enforce cooldown
-        if self.turn_count - self.last_trigger_turn < self.cooldown_turns:
-            return False, f"cooldown ({self.turn_count - self.last_trigger_turn}/{self.cooldown_turns})"
-        
-        # Check for triggers (Tier 1 + Tier 2)
-        # ... (keyword + semantic detection)
-        
-        if triggered:
-            self.last_trigger_turn = self.turn_count
-            return True, "trigger_reason"
-        
-        return False, "no_trigger"
-```
-
-**Cooldown Behavior**:
-- **Minimum gap**: 3 turns between adaptive triggers
-- **Logging**: Returns cooldown status for debugging
-- **Graceful**: Falls back to 10-message scheduled analysis if no adaptive triggers
-- **Reset**: Reset on chat fork or reset scenarios
-
-### Integration Points
-
-#### 1. Adaptive Relationship Tracker Class (app/relationship_tracker.py)
-
-**Key Components**:
-```python
-class AdaptiveRelationshipTracker:
-    def __init__(self, model: SentenceTransformer):
-        # Reuses existing semantic search model
-        self.model = model
-        
-        # Tier 1: Keyword detection
-        self.relationship_keywords = {...}  # 60+ keywords
-        
-        # Tier 2: Semantic similarity tracking
-        self.previous_turn_embedding = None
-        
-        # Tier 3: Dimension prototypes
-        self.dimension_embeddings = self._initialize_dimension_embeddings()
-        
-        # Cooldown mechanism
-        self.cooldown_turns = 3
-    
-    def should_trigger_adaptive_analysis(self, current_text: str) -> Tuple[bool, str]:
-        # Three-tier decision system
-        # Returns (should_trigger, reason)
-    
-    def get_relevant_dimensions(self, current_text: str, relationship_states: Dict) -> Dict:
-        # Tier 3: Semantic filtering
-        # Returns {entity: [relevant_dimensions]}
-```
-
-#### 2. Initialization in main.py
-
-```python
-# Import adaptive tracker
-from app.relationship_tracker import (
-    AdaptiveRelationshipTracker,
-    initialize_adaptive_tracker,
-    adaptive_tracker
-)
-
-# Startup initialization
-@app.on_event("startup")
-async def startup_event():
-    global adaptive_tracker
-    
-    # Check environment variable for semantic scoring control (v1.10.4)
-    import os
-    USE_SEMANTIC_SCORING = os.environ.get('NEURALRP_DISABLE_SEMANTIC_SCORING', '0') != '1'
-    
-    if not USE_SEMANTIC_SCORING:
-        print("[RELATIONSHIP] Semantic scoring disabled via environment variable, skipping")
-        return
-    
-    # Initialize with shared semantic search model
-    if initialize_adaptive_tracker(semantic_search_engine):
-        print("[ADAPTIVE_TRACKER] Ready - Three-tier detection system active")
-    else:
-        print("[ADAPTIVE_TRACKER] Warning: Could not initialize - semantic model not loaded")
-```
-
-#### 3. Context Assembly Integration (main.py)
-
-```python
-def get_relationship_context(chat_id: str, character_objs: list, user_name: str, 
-                            recent_messages: list) -> str:
-    # Extract entity IDs and names from full character objects (v1.10.4)
-    entity_map = {}  # entity_id -> name
-    name_map = {}    # name -> entity_id
-    for char_obj in character_objs:
-        entity_id = get_entity_id(char_obj)  # New helper function
-        name = get_character_name(char_obj)
-        entity_map[entity_id] = name
-        name_map[name] = entity_id
-    
-    # Get current turn text for semantic filtering
-    current_text = recent_messages[-1].content if recent_messages else ""
-    
-    # Build relationship states dictionary using entity IDs
-    relationship_states = build_relationship_states(active_characters, chat_id)
-    
-    # Use adaptive tracker's Tier 3 semantic filtering
-    if adaptive_tracker and relationship_states:
-        relevant_dimensions = adaptive_tracker.get_relevant_dimensions(
-            current_text=current_text,
-            relationship_states=relationship_states
-        )
-        
-        # Generate templates only for relevant dimensions
-        return generate_filtered_context(relevant_dimensions)
-    
-    # Fallback: Legacy behavior without semantic filtering
-    # Note: Fallback code properly unpacks entity ID tuples (v1.10.4 fix)
-    return generate_legacy_context(relationship_states)
-```
-
-#### 4. Database Support (app/database.py)
-
-**Table Schema**:
-```sql
-CREATE TABLE relationship_states (
-    id INTEGER PRIMARY KEY,
-    chat_id TEXT NOT NULL,
-    character_from TEXT NOT NULL,
-    character_to TEXT NOT NULL,
-    trust INTEGER DEFAULT 50,
-    emotional_bond INTEGER DEFAULT 50,
-    conflict INTEGER DEFAULT 50,
-    power_dynamic INTEGER DEFAULT 50,
-    fear_anxiety INTEGER DEFAULT 50,
-    last_updated INTEGER,
-    last_analyzed_message_id INTEGER,
-    interaction_count INTEGER DEFAULT 0,
-    history TEXT,
-    UNIQUE(chat_id, character_from, character_to)
-);
-```
-
-**Helper Function**:
-```python
-def get_relationship_context_filtered(
-    chat_id: str,
-    current_text: str,
-    relationship_states: Dict[str, Dict[str, float]],
-    relationship_templates: Dict[str, Dict[Tuple[int, int], List[str]]]
-) -> str:
-    """
-    Generate filtered relationship context using adaptive Tier 3.
-    Only includes dimensions deviating >15 points from neutral AND semantically relevant.
-    """
-    # Filter and generate templates
-    return filtered_context_string
-```
-
-### Natural Language Templates
-
-**Template System**: Randomized phrases prevent repetitive context injection
-
-```python
-RELATIONSHIP_TEMPLATES = {
-    'trust': {
-        (0, 20): ["{from_} deeply distrusts {to}", "{from_} views {to} with complete suspicion"],
-        (61, 80): ["{from_} trusts {to}", "{from_} has faith in {to}"],
-        (81, 100): ["{from_} trusts {to} completely", "{from_} would trust {to} with their life"]
-    },
-    'emotional_bond': {
-        (0, 20): ["{from_} is repulsed by {to}", "{from_} actively dislikes {to}"],
-        (61, 80): ["{from_} cares deeply for {to}", "{from_} has strong feelings for {to}"],
-        (81, 100): ["{from_} is deeply in love with {to}", "{from_} adores {to}"]
-    },
-    # ... similar for conflict, power_dynamic, fear_anxiety
-}
-```
-
-**Example Output**:
-```
-### Relationship Context:
-Alice deeply distrusts Bob. Alice feels slightly uneasy near Bob. Alice views Carol as an enemy.
-```
-
-### Score Clamping and Template Range Lookup (v1.10.4)
-
-**Problem**: Template lookups could fail when scores fall outside defined ranges (0-100).
-
-**Solution**: Automatic score clamping ensures safe template selection:
-
-```python
-# Clamp score to valid range before template lookup
-score = max(0, min(100, state['trust']))
-
-# Find matching template range
-for (low, high), templates in RELATIONSHIP_TEMPLATES['trust'].items():
-    if low <= score <= high:
-        template = random.choice(templates)
-        break  # Stop after finding first match
-```
-
-**Benefits**:
-- **No crashes**: Out-of-range scores (e.g., -5 or 105) safely clamped
-- **Early exit**: Break statement prevents unnecessary range checking after match
-- **Consistent behavior**: All scores map to valid templates
-
-**Template Ranges**:
-| Dimension | (0, 20) | (21, 40) | (41, 60) | (61, 80) | (81, 100) |
-|-----------|------------|-------------|-------------|-------------|--------------|
-| **Trust** | Distrust | Wary | Neutral | Trust | Complete trust |
-| **Bond** | Repulsed | Indifferent | Neutral | Cares | Deeply in love |
-| **Conflict** | (empty) | Minor | Notable | Active | Enemy |
-| **Power** | Submissive | Defers | Equal | Leads | Dominates |
-| **Fear** | (empty) | Nervous | Anxious | Fears | Terrified |
-
-Note: Ranges (0, 20) and (81, 100) for conflict/fear are empty by design - low conflict/fear is neutral state.
-
-### Environment Variable Control (v1.10.4)
-
-**NEURALRP_DISABLE_SEMANTIC_SCORING**:
-```bash
-# Disable relationship tracking entirely
-export NEURALRP_DISABLE_SEMANTIC_SCORING=1
-python app/main.py
-```
-
-**Behavior**:
-- When set to `1`: All relationship analysis is skipped
-- Default (not set): Relationship tracking enabled
-- Logging: Prints `[RELATIONSHIP] Semantic scoring disabled via environment variable, skipping`
-
-**Use Cases**:
-- **Debugging**: Disable to isolate other systems
-- **Performance**: Eliminate <20ms overhead per 10 messages
-- **Testing**: Verify conversation behavior without relationship context
-
-### Performance Characteristics
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Tier 1: Keyword detection | ~0.5ms | Fastest method |
-| Tier 2: Semantic similarity | ~2-3ms | Requires embedding computation |
-| Tier 3: Dimension filtering | ~1-2ms | Semantic comparisons |
-| Total adaptive overhead | 3-5ms per turn | vs 5ms static injection |
-| Memory overhead | 0 bytes | Reuses existing model |
-| Spam blocker overhead | <1ms | Cooldown check |
-| Template generation | <1ms | Random selection from dict |
-
-### Comparison: Adaptive vs Fixed Interval
-
-| Aspect | Fixed Interval (v1.6.0) | Adaptive (v1.6.1) |
-|--------|---------------------------|----------------|
-| Detection speed | Every 10 messages | Immediate (dramatic shifts) |
-| Overhead | Every 10 messages (~5ms) | Only when triggered (3-5ms) |
-| Sensitivity | Delayed by interval | Real-time detection |
-| Prompt bloat | All deviations injected | Only relevant dimensions |
-| Noise reduction | Good (smoothing) | Better (tiered filtering) |
-| Graceful degradation | N/A | Falls back to 10-msg interval |
-
-### Design Decisions
-
-#### Why Three Tiers Instead of Single Method?
-
-**Tier 1 (Keywords)**:
-- ✅ Fastest detection
-- ✅ Catches explicit statements
-- ✅ Zero embedding overhead
-- ❌ Misses implicit shifts
-
-**Tier 2 (Semantic)**:
-- ✅ Catches implicit emotions
-- ✅ Detects topic shifts
-- ✅ Reuses existing model
-- ❌ Slower than keywords
-
-**Tier 3 (Filtering)**:
-- ✅ Reduces prompt bloat
-- ✅ Context-aware injection
-- ✅ Natural conversation flow
-- ❌ Requires semantic computation
-
-**Combination**: Best of all worlds - fast, sensitive, and efficient
-
-#### Why Cooldown of 3 Turns?
-
-**Problem**: Repeated triggers during long argument scenes
-- "I hate you!" (trigger)
-- "I hate you!" (trigger) ← spam
-- "I hate you!" (trigger) ← spam
-
-**Solution**: Minimum 3-turn gap
-- ✅ Prevents spam triggering
-- ✅ Still catches escalation across turns
-- ✅ Allows emotional shift after cooldown
-
-**Trade-off**: Might miss rapid-fire same-turn escalations, but prevents overwhelming spam
-
-#### Why 0.7 Similarity Threshold?
-
-**Too Low (<0.5)**:
-- Catches normal conversation shifts
-- Too many false positives
-- Prompt bloat from irrelevant triggers
-
-**Too High (>0.9)**:
-- Only detects extreme topic changes
-- Misses important emotional shifts
-- Defeats purpose of adaptive system
-
-**0.7 Sweet Spot**:
-- Catches major emotional topic shifts
-- Filters normal conversation variations
-- Balanced sensitivity
-
-#### Why 15-Point Deviation Threshold?
-
-**Purpose**: Only inject dimensions with meaningful scores
-
-**< 15 points from neutral (50)**:
-- Score 35-65: Near neutral, likely noise
-- Score 0-35 OR 65-100: Significant deviation, worth injecting
-
-**Trade-off**:
-- ✅ Reduces prompt overhead
-- ✅ Filters weak signals
-- ✅ Focuses AI on important relationships
-- ❌ Might miss subtle but meaningful shifts
-
-### Debugging
-
-**Console Logging**:
-```python
-[ADAPTIVE_TRACKER] Initialized 5 dimension embeddings
-[ADAPTIVE_TRACKER] Ready - Three-tier detection system active
-[ADAPTIVE_TRACKER] Tier 1: keyword_detection (dimensions: trust, emotional_bond)
-[ADAPTIVE_TRACKER] Tier 2: semantic_shift (similarity: 0.452)
-[ADAPTIVE_TRACKER] Tier 3: Filtered to 2 relevant dimensions for Alice→Bob
-```
-
-**Trigger Reasons** (returned by `should_trigger_adaptive_analysis`):
-- `"keyword_detection (dimensions: trust, emotional_bond)"`
-- `"semantic_shift (similarity: 0.654)"` 
-- `"cooldown (2/3 turns since last trigger)"`
-- `"no_trigger"`
-
-### Future Enhancements
-
-**Not Implemented (v1.6.1)**:
-- Configurable cooldown period (currently fixed at 3 turns)
-- Per-dimension keyword tuning (current weights are uniform)
-- Adaptive similarity threshold (adjusts based on conversation velocity)
-- Multi-turn pattern detection (detect escalation across 2-3 turns)
-- Visual relationship dashboard (UI for viewing relationship evolution)
-
-### Critical Bug Fixes (v1.10.4)
-
-**Message Type Mismatch - ChatMessage Access**:
-- **Problem**: `analyze_and_update_relationships()` treated Pydantic models as dictionaries
-- **Symptom**: Crashes with `AttributeError: 'ChatMessage' object has no attribute 'get'`
-- **Fix**: Changed `msg.get('speaker', '')` → `msg.speaker or ''`
-- **Impact**: Relationship analysis now runs correctly at summarization boundaries
-
-**Relationship State Structure Mismatch**:
-- **Problem**: `get_relationship_context()` passed full DB row dict to semantic filter
-- **Symptom**: Tier 3 filtering fails with `KeyError: 'trust'` when iterating dimensions
-- **Fix**: Extract only dimension scores before passing to `get_relevant_dimensions()`
-- **Impact**: Semantic filtering now works correctly, injecting only relevant dimensions
-
-**Keyword Polarity Regex Bug**:
-- **Problem**: Used string literals `\\b` instead of regex word boundaries
-- **Symptom**: Incorrect keyword matching ("trust" matches "distrust")
-- **Fix**: Use proper regex: `re.search(r'\b' + re.escape(kw) + r'\b', text_lower)`
-- **Impact**: Keyword detection now correctly matches whole words
-
-**Entity ID vs Name Inconsistency**:
-- **Problem**: Functions used character names instead of entity IDs for lookups
-- **Symptom**: Relationship lookups return None for characters and NPCs
-- **Root Cause**: Database stores entity IDs (`char_alice.json`, `npc_123456_789`), not names
-- **Fix**: Added `get_entity_id()` helper; updated functions to accept full character objects
-- **Additional Fix**: Fallback code (lines 1593-1664) now properly unpacks entity ID tuples
-- **Impact**: Relationship tracking now works correctly for both global characters and local NPCs
-
-**Template Range Lookup Fallback**:
-- **Problem**: No default case when scores fall outside 0-100 range
-- **Symptom**: Returns None, causing template generation to fail
-- **Fix**: Added score clamping `score = max(0, min(100, score))` + early exit `break`
-- **Impact**: No more crashes or None returns for edge-case scores
-
-**Fallback Code Entity ID Issue**:
-- **Problem**: Fallback code passed tuples `(entity_id, name)` directly to `db_get_relationship_state()`
-- **Symptom**: Type error in database queries when adaptive tracker fails
-- **Fix**: Unpack tuples before database lookups: `for from_id, from_name in active_characters:`
-- **Impact**: Fallback code now works reliably when adaptive tracker fails
-
-### v1.10.4 Relationship Tracker Improvements Summary
-
-**Purpose**: Fix critical bugs preventing relationship tracker from working correctly with characters and NPCs.
-
-**Key Changes**:
-| Component | Change | Impact |
-|-----------|---------|---------|
-| **Message Access** | Pydantic models accessed via `.speaker`/`.content` instead of `.get()` | Relationship analysis no longer crashes |
-| **State Structure** | Pass only dimension scores to semantic filter (not full DB rows) | Tier 3 filtering now works correctly |
-| **Keyword Regex** | Use `re.search(r'\b...\b')` for word boundaries | Keyword matching accurate (no false positives) |
-| **Entity ID System** | Add `get_entity_id()` helper; pass full character objects | Relationship lookups work for all entity types |
-| **Fallback Code** | Properly unpack entity ID tuples before DB queries | Fallback path now reliable |
-| **Template Lookup** | Clamp scores to [0, 100] range + early exit | No crashes on edge-case scores |
-| **Environment Control** | `NEURALRP_DISABLE_SEMANTIC_SCORING=1` to disable | Easy testing/debugging |
-| **Positioning** | Move to section 8.5 (after Canon Law) | Relationship states get maximum attention |
-
-**Technical Impact**:
-- **Code Complexity**: +25 lines for `get_entity_id()` helper, but simplified entity ID handling
-- **Performance**: No measurable change (<1ms overhead for entity ID extraction)
-- **Reliability**: 100% relationship analysis success rate (vs crashes before v1.10.4)
-- **User Experience**: Emotional tracking now works correctly for all characters and NPCs
-
-**Migration Path**:
-- **Automatic**: No database migrations required
-- **Code Only**: Changes are in Python code only
-- **Backward Compatible**: Existing chats work without modification
-- **Frontend**: No changes needed (backend handles entity ID extraction)
-
----
-
 ## Entity ID System
 
 ### Overview (v1.6.0)
 
-The entity ID system provides unique identification for all entities (characters, NPCs, users) to prevent name collisions and ensure relationship tracker reliability.
+The entity ID system provides unique identification for all entities (characters, NPCs, users) to prevent name collisions and ensure consistent entity management.
 
 ### Why Entity IDs?
 
@@ -2742,7 +1909,7 @@ char_name = get_character_name(character_obj)
 The `get_entity_id()` function ensures consistent entity ID extraction across all systems:
 
 ```python
-# Always use this helper for relationship tracking
+# Always use this helper for consistent entity lookups
 entity_id = get_entity_id(character_obj)
 # Returns: Entity ID ("char_abc123" or "npc_xyz789")
 ```
@@ -2754,16 +1921,15 @@ entity_id = get_entity_id(character_obj)
 
 **Usage Example**:
 ```python
-# In relationship analysis
+# In character operations
 for char_obj in character_objs:
     entity_id = get_entity_id(char_obj)
-    name = get_character_name(char_obj)
-    entity_map[entity_id] = name  # entity_id -> name mapping
+    # Use entity_id for consistent lookups
 ```
 
 **Entity ID Lookup**:
-- Entity IDs stored in relationship tables
-- Name lookup via `entities` table
+- Entity IDs stored as filenames in characters table
+- Name lookup via characters table
 - Automatic NPC entity creation on first mention
 
 ### Database Schema
@@ -2779,26 +1945,6 @@ CREATE TABLE entities (
     last_seen INTEGER NOT NULL,
     FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
 )
-```
-
-### Fork Safety
-
-**Problem**: Branching creates duplicate entity records if not handled properly
-
-**Solution**:
-- Entity IDs are chat-scoped (unique within chat)
-- Forks copy entities to new chat with same names
-- Relationship history preserved via relationship_id foreign keys
-
-**Example**:
-```
-Original Chat:
-  - Entity: char_abc123 (John Smith)
-  - Relationship: char_abc123 → user_default
-
-Forked Chat:
-  - Entity: char_def456 (John Smith)  -- Different ID
-  - Relationship: char_def456 → user_ghi789  -- Independent tracking
 ```
 
 ### API Endpoints
@@ -2825,7 +1971,7 @@ Forked Chat:
 
 **Why Auto-Generate NPC Entity IDs?**
 - Seamless: NPCs tracked without manual setup
-- Flexible: Any named character can have relationships
+- Flexible: Any named character can be an NPC
 - Scalable: Hundreds of NPCs supported without configuration
 
 ---
@@ -2866,7 +2012,7 @@ CREATE INDEX idx_characters_chat_id ON characters(chat_id);
 **Entity ID Unification**:
 - **v1.11.0 and earlier**: `char_{filename}` for characters, `npc_{timestamp}_{chat_id}` for NPCs
 - **v1.12.0+**: All entities use filename as entity ID (e.g., `alice.json`, `npc_alice_123.json`)
-- **Benefits**: Simplifies relationship tracking, visual canon assignment, and entity lookups
+- **Benefits**: Simplifies visual canon assignment and entity lookups
 
 ### Migration
 
@@ -2877,9 +2023,8 @@ CREATE INDEX idx_characters_chat_id ON characters(chat_id);
   2. Read all NPCs from `chat_npcs` table
   3. Generate filenames: `npc_{sanitized_name}_{timestamp}.json`
   4. Insert into `characters` table with `chat_id` set
-  5. Update `entities` table to use filename as entity_id
-  6. Update chat metadata `localnpcs` to use filenames
-  7. Rename `chat_npcs` → `chat_npcs_backup`
+  5. Update chat metadata `localnpcs` to use filenames
+  6. Rename `chat_npcs` → `chat_npcs_backup`
 
 **Backup Preservation**:
 - Original `chat_npcs` table preserved as `chat_npcs_backup`
@@ -2954,7 +2099,7 @@ if npc_data:
 
 - **Simplified Code**: Single set of functions for all character operations
 - **No Sync Issues**: Single source of truth eliminates sync bugs
-- **Consistent Entity IDs**: Filenames used everywhere (characters, NPCs, relationships)
+- **Consistent Entity IDs**: Filenames used everywhere (characters, NPCs)
 - **Backward Compatible**: Old API endpoints still work with filename mapping
 - **Visual Canon**: NPCs now support visual canon assignment using same functions as characters
 
@@ -2963,7 +2108,6 @@ if npc_data:
 **Entity ID Mapping**:
 - Old NPC format: `npc_{timestamp}_{chat_id}` (e.g., `npc_1739422400_chat_abc`)
 - New unified format: `npc_{name}_{timestamp}.json` (e.g., `npc_alice_1739422400.json`)
-- Entities table updated to use new format
 - Chat metadata `localnpcs` updated to use new format
 
 **Character/NPC Parity**:
@@ -2985,8 +2129,6 @@ The Chat-Scoped NPC System enables users to create, manage, and promote non-play
 
 - **Emergent storytelling**: Capture NPCs mentioned by AI without manual character card creation
 - **Chat isolation**: NPCs exist only in their chat context, preventing cross-contamination
-- **Branch safety**: Forking chats creates independent NPC copies with unique IDs
-- **Relationship tracking**: NPCs participate in semantic relationship system
 - **Training data export**: NPCs included in LLM fine-tuning dataset exports
 - **Unified architecture**: Single storage layer simplifies code and prevents sync issues
 
@@ -3000,7 +2142,7 @@ All participants in conversations (characters, NPCs, users) are tracked via uniq
 
 **v1.12.0 Entity ID Unification**:
 - **All entity IDs are now filenames** (not separate systems)
-- Simplifies relationship tracking and lookups
+- Simplifies entity lookups
 - Prevents ID collisions across systems
 - Enables visual canon assignment to NPCs via same functions as global characters
 
@@ -3014,7 +2156,6 @@ SQLite Database (app/data/neuralrp.db)
 │   ├── name, data, danbooru_tag, visual_canon_id, visual_canon_tags
 │   └── updated_at
 ├── entities table ──────────────── Entity registry (references filenames)
-├── relationship_states ──────────── Relationships reference entity IDs
 └── chats.metadata ─────────────── NPCs metadata (active status, etc.)
 
 File System
@@ -3210,44 +2351,6 @@ Replace in activeCharacters: 'npc_123' → 'guard-marcus.json'
 Save chat: db_save_chat(chat_id, chat_data)
 ```
 
-**Fork with NPCs (Branch Safety) - v1.10.4 Transaction-Based**:
-```
-POST /api/chats/fork
-    origin: 'chat_123'
-    fork_at: message 10
-    ↓
-Load origin chat data
-    ↓
-Remap NPC entity IDs:
-    FOR EACH npc IN local_npcs:
-        old_id: 'npc_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6'
-        new_id: 'npc_{branch_chat_id}_{timestamp}_{index}'
-        
-        Register new entity: db_create_entity(branch_id, new_id, name, 'npc')
-        Update npc.entity_id: new_id
-        Track mapping: {old_id: new_id}
-    ↓
-Remap metadata entity IDs:
-    characterCapsules: {old_id: capsule} → {new_id: capsule}
-    characterFirstTurns: {old_id: turn} → {new_id: turn}
-    ↓
-Execute atomic transaction (db_fork_chat_transaction):
-    BEGIN TRANSACTION
-        1. Create branch chat record
-        2. Copy NPCs to chat_npcs with remapped IDs (preserves appearance_count, visual_canon_id)
-        3. Copy relationship states with remapping (preserves interaction_count)
-        4. Register all new entities
-    COMMIT (or ROLLBACK on error)
-    ↓
-Update activeCharacters with new IDs
-    ↓
-Save branch chat with independent NPCs and remapped metadata
-    ↓
-Validation: Check for "Unknown" entity references
-    ↓
-Console log: "Forked chat with {N} entities remapped"
-```
-
 ### API Endpoints
 
 **NPC Management**:
@@ -3303,26 +2406,10 @@ Every N turns (default: 5), character profiles re-injected to prevent drift:
 - Includes both global characters and active NPCs
 - Logs: `[REINFORCEMENT] [NPC] Guard Marcus reinforced`
 
-#### 4. Relationship Tracking
-
-NPCs fully participate in the semantic relationship system:
-- Relationships stored as: `(chat_id, entity_id_from, entity_id_to, scores...)`
-- Entity IDs reference entities table
-- Branch forks copy relationships with entity ID remapping
-
-#### 5. Chat Forking
-
-Fork operation ensures NPC independence:
-- New entity IDs generated for NPCs in branch
-- Relationship states copied with remapped IDs
-- Original chat NPCs unchanged
-
-### Key Features
-
 #### Active/Inactive State
 
 NPCs can be toggled active/inactive:
-- **Active**: Included in context assembly, relationship tracking, reinforcement
+- **Active**: Included in context assembly, reinforcement
 - **Inactive**: Skipped during context assembly, preserved in metadata
 
 **Use case**: Temporarily remove NPC from scene without deleting
@@ -3372,7 +2459,6 @@ If entities table missing:
 | NPC creation | O(1) | Single entity insert, metadata update |
 | Load NPCs in context | O(n) | n = active NPCs in chat |
 | Promote NPC | O(1) | File write + entity creation |
-| Fork with NPCs | O(n) | n = NPCs to remap |
 | Export training data | O(m) | m = messages in chat |
 
 **Storage**:
@@ -3451,7 +2537,6 @@ curl -X POST http://localhost:8000/api/chats/adventure_chat_1/export-training \
 #### Why Store NPCs in Metadata (Not Separate Table)?
 
 **Pros**:
-- ✅ Automatic fork behavior (metadata copies with chat)
 - ✅ Chat-scoped lifecycle (delete chat = delete NPCs)
 - ✅ Simpler schema (no additional foreign keys)
 - ✅ No orphaned records (metadata is part of chat)
@@ -3465,27 +2550,21 @@ curl -X POST http://localhost:8000/api/chats/adventure_chat_1/export-training \
 #### Why Chat-Scoped Entity IDs?
 
 **Pros**:
-- ✅ Branch isolation (forks create independent entities)
 - ✅ No global namespace pollution
-- ✅ Prevents name collisions between branches
+- ✅ Prevents name collisions between chats
 
 **Cons**:
 - ❌ Slightly more complex than global IDs
-- ❌ Entity remapping required on fork
-
-**Mitigation**: Automatic remapping in `db_remap_entities_for_branch()`
 
 #### Why Promote Instead of "Move to Global"?
 
 **Pros**:
 - ✅ Preserves original NPC in source chat
 - ✅ Creates independent global character
-- ✅ Branches unaffected by promotion
 
 **Cons**:
 - ❌ Creates duplicate data (NPC + global character)
 
-**Mitigation**: Promotion metadata tracks relationship, original NPC marked as promoted
 
 ### Future Enhancements (Not Implemented)
 
@@ -3568,13 +2647,6 @@ Check:
 #### Promoted NPC Still Shows in Chat
 
 Expected behavior: Promoted NPCs remain in chat metadata (marked `promoted: true`) but `activeCharacters` is updated to use global filename. This preserves audit trail while switching to global character.
-
-#### Fork Doesn't Copy NPCs
-
-Check:
-- `db_remap_entities_for_branch()` called in fork function
-- Entity remapping logged: `[BRANCH_REMAP] npc_123 → npc_456`
-- Branch chat has local_npcs in metadata
 
 #### Training Export Missing NPCs
 
@@ -4292,7 +3364,6 @@ curl -X POST http://localhost:8000/api/chats/adventure_chat_1/export-training \
 - Minimum/maximum message count
 
 **Metadata**:
-- Include relationship states in exports
 - Include entity ID mappings
 - Export character card JSON alongside training data
 
@@ -4412,7 +3483,7 @@ NeuralRP tracks prompt token counts for both performance optimization and databa
 **LLM Token Counting:**
 - Uses KoboldAI's `/api/extra/tokencount` endpoint
 - Counts the **full constructed prompt** (not just chat messages)
-- Includes: system prompt, mode instructions, world info, character profiles, chat history, relationship context
+- Includes: system prompt, mode instructions, world info, character profiles, chat history
 - Falls back to rough estimate (÷4) if API unavailable
 
 **What Gets Counted:**
@@ -4523,184 +3594,6 @@ If KoboldAI API is unavailable (network error, service down), the system continu
 
 **Why Return Token Count in Response?**
 Frontend needs context size for SD optimization. Rather than forcing frontend to recalculate (slow), backend includes it in response (fast).
-
----
-
-## Branching System
-
-### Purpose
-
-Create alternate "what-if" timelines from any point in a conversation without affecting the original.
-
-### How It Works
-
-1. **Fork from message**: Right-click any message and select "Fork Branch"
-2. **New timeline created**: Contains all messages up to that point
-3. **Independent**: Changes in branch don't affect original
-4. **Settings inherited**: Characters, world info, and settings copied over
-
-### Branch Independence
-
-- Each branch is a separate database record
-- No shared mutable state
-- Editing one branch doesn't affect others
-- Instant creation (O(1) row insert, not file copy)
-
-### Branch Metadata
-
-Each branch tracks its origin:
-
-```json
-{
-  "origin_chat_id": "original_chat_name",
-  "origin_message_id": 12345678,
-  "branch_name": "Custom Branch Name",
-  "created_at": 1736279867.123
-}
-```
-
-### Management
-
-- **Rename branches**: Change display name without affecting data
-- **Delete branches**: Remove entire timeline and its messages
-- **View origin**: Navigate back to original chat
-- **List branches**: See all forks from a specific chat
-
-### NPC Entity ID Remapping (v1.7.0, Enhanced v1.10.4)
-
-When forking a chat that contains NPCs, the system automatically remaps NPC entity IDs to prevent conflicts between branches. This ensures each branch has independent NPCs with unique identifiers.
-
-**Remapping Process**:
-1. Generate new entity IDs for NPCs in branch
-   - Original NPC (created during chat): `npc_{uuid}` (32-character UUID)
-   - Forked NPC: `npc_{branch_chat_id}_{timestamp}_{index}` (prevents millisecond collisions)
-2. Register new entities in `entities` table
-3. Update NPC metadata with new entity IDs
-4. Track entity ID mappings for relationship state copying
-
-**Relationship State Copying**:
-- Relationship states for NPCs are copied to branch
-- Entity IDs are remapped using the mapping dictionary
-- **v1.10.4**: Interaction counts now preserved from origin chat (was resetting to 0)
-- Relationship history preserved at fork point
-
-**Metadata Remapping (v1.10.4)**:
-- `characterCapsules`: Chat-scoped character capsules remapped to new entity IDs
-- `characterFirstTurns`: First turn tracking remapped to new entity IDs
-- Ensures sticky window (turns 1-3) and capsule injection work correctly in branched chats
-
-**Example**:
-```
-Original Chat (my_cool_story):
-  - NPC: npc_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 (Guard Marcus)
-  - Visual Canon: ID=123, Tags="1boy, male_focus, armor..."
-  - Appearance Count: 15, Last Used: Turn 42
-  - Relationship: Alice → npc_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 (Trust: 0.5)
-  - Interaction Count: 25
-
-Forked Chat (my_cool_story_1738601234):
-  - NPC: npc_my_cool_story_1738601234_1738601234567_0 (Guard Marcus) -- New entity ID
-  - Visual Canon: ID=123, Tags="1boy, male_focus, armor..." -- Preserved (v1.10.4)
-  - Appearance Count: 15, Last Used: Turn 42 -- Preserved (v1.10.4)
-  - Relationship: Alice → npc_my_cool_story_1738601234_1738601234567_0 (Trust: 0.5) -- Remapped
-  - Interaction Count: 25 -- Preserved (v1.10.4)
-```
-
-**Database Functions**:
-- `db_fork_chat_transaction()` - **v1.10.4**: New atomic transaction function that wraps all fork operations
-- `db_remap_entities_for_branch()` - Generates new entity IDs for NPCs
-
-**NPC Field Preservation (v1.10.4)**:
-All NPC fields are preserved when forking:
-- `visual_canon_id` - Visual canon assignment ID
-- `visual_canon_tags` - **CRITICAL**: Visual canon tags for snapshot generation (was missing in previous versions)
-- `last_used_turn` - Last turn NPC appeared (for usage tracking)
-- `appearance_count` - Total appearances counter
-- `promoted` - Whether NPC was promoted to global character
-- `promoted_at` - Timestamp of promotion
-- `global_filename` - Filename of promoted global character
-
-**Relationship State Preservation**:
-- All relationship dimensions (trust, emotional_bond, conflict, power_dynamic, fear_anxiety)
-- `interaction_count` - Preserved from origin chat (was resetting to 0 before v1.10.4)
-- Relationship history snapshots at fork point
-
-**Atomic Transaction Safety (v1.10.4)**:
-All fork operations now execute in a single SQLite transaction:
-- Chat creation
-- NPC copying with entity ID remapping
-- Relationship state copying with preserved interaction counts
-- Entity registration
-
-If any step fails, the entire transaction is rolled back automatically. Failed forks are cleaned up (partial branches deleted) with comprehensive error logging.
-
-**Fork Safety**:
-- Each branch has completely independent NPCs
-- No cross-branch references to original NPCs
-- Relationship tracking works correctly in both branches
-- Interaction counts preserved from origin (v1.10.4)
-- Metadata entity IDs properly remapped (v1.10.4)
-- All NPC fields preserved including visual canon data (v1.10.4)
-- Promoted NPCs handled separately (use global filename)
- - Snapshot generation works correctly for NPCs in branches (v1.10.4)
-
-### Fork Isolation and Metadata Protection (v1.10.4)
-
-**Problem**: NPCs and character tracking data from forked chats could "bleed" into original chats due to metadata not being preserved during saves.
-
-**Root Cause**:
-- Frontend `autosaveChat()` omitted the `metadata` field from save requests
-- Backend-managed metadata (`localnpcs`, `characterFirstTurns`, `characterCapsules`) was lost on each save
-- Switching between forked and original chats could transfer metadata inappropriately
-
-**Solution**:
-1. **Frontend**:
-   - Added `currentChatMetadata` state property to preserve loaded metadata
-   - Updated `loadChat()` to store full metadata object: `this.currentChatMetadata = d.metadata || {}`
-   - Updated `autosaveChat()` to include metadata in save requests: `metadata: this.currentChatMetadata || {}`
-
-2. **Backend**:
-   - Added fork isolation validation in `db_save_chat()`
-   - Validates `origin_chat_id` doesn't change between saves
-   - Raises `ValueError` if forked chat data is saved to original (cross-contamination detection)
-   - Logs mismatched origins for debugging
-
-**How It Prevents Bleeding**:
-```
-Original Chat (my_cool_story):
-  - origin_chat_id: null (or not present)
-  - localnpcs: { npc_a1b2... }
-  - characterFirstTurns: { "alice.json": 1 }
-
-Forked Chat (my_cool_story_fork_123):
-  - origin_chat_id: "my_cool_story"
-  - localnpcs: { npc_new_uuid... }
-  - characterFirstTurns: { "alice.json": 1 }
-```
-
-If frontend accidentally sends fork's metadata to original:
-- `origin_chat_id` mismatch detected ("my_cool_story" vs null)
-- **Blocked by backend validation** → Saves rejected
-- Original chat's metadata preserved
-
-**Files Changed**:
-- `app/index.html` (+3 lines): Added `currentChatMetadata`, updated `loadChat()` and `autosaveChat()`
-- `app/database.py` (+15 lines): Added fork isolation validation in `db_save_chat()`
-
-**Benefits**:
-- Forked chats maintain complete isolation
-- NPCs and tracking data don't contaminate original chats
-- Original chats remain unaffected by branch changes
-- Metadata persists correctly across saves
-
-### No Merge Semantics
-
-Branches are independent timelines by design:
-- Fork = create new timeline
-- Switch = load that timeline
-- No automatic merging or conflict resolution
-
-This keeps the mental model simple: each branch is its own story.
 
 ---
 
@@ -5097,7 +3990,7 @@ This ensures world rules are preserved in scene summaries.
 
 **With Soft Delete System:**
 - Messages marked `summarized=1` after scene capsule generation
-- Preserved in database for search and relationship tracking
+- Preserved in database for search
 - Excluded from active conversation context
 
 **Example Workflow:**
@@ -5382,13 +4275,13 @@ You can trigger summarization manually via API or by setting a `summarize_thresh
 
 ### Overview (v1.6.0)
 
-The soft delete system preserves message history after summarization by marking messages as `summarized=1` instead of deleting them. This ensures persistent message IDs for relationship tracker continuity and enables full history search across active and archived messages.
+The soft delete system preserves message history after summarization by marking messages as `summarized=1` instead of deleting them. This ensures persistent message IDs and enables full history search across active and archived messages.
 
 ### Why Soft Delete?
 
 **Problem with Hard Delete**:
 - Message IDs change after summarization
-- Relationship tracker references become invalid
+- Message references become invalid
 - Historical conversation lost permanently
 - No way to search old messages
 
@@ -5410,14 +4303,12 @@ The soft delete system preserves message history after summarization by marking 
 - `summarized=0` (default)
 - Included in conversation context
 - Displayed in UI
-- Used for relationship analysis
 
 **Archived Messages**:
 - `summarized=1`
 - Excluded from conversation context
 - Hidden from UI (unless explicitly requested)
 - Still searchable via search API
-- Still tracked for relationship analysis
 
 ### Database Schema
 
@@ -5474,7 +4365,7 @@ message_id = 123  # Marked summarized=1, relationships valid
 **Analysis Accuracy**:
 - Relationship tracker uses message IDs for tracking
 - Soft delete ensures historical relationships preserved
-- No broken references or orphaned relationship states
+- No broken references
 
 ### Optional Cleanup
 
@@ -6484,7 +5375,7 @@ The undo system is built on the change logging infrastructure (v1.5.1), which tr
 **Logged Operations**:
 - Characters: CREATE, UPDATE, DELETE
 - World Info: CREATE, UPDATE, DELETE
-- Chats: DELETE, CREATE_BRANCH, RENAME, CLEAR, ADD_CHARACTER, REMOVE_CHARACTER
+- Chats: DELETE, RENAME, CLEAR, ADD_CHARACTER, REMOVE_CHARACTER
 
 **Retention**: 30 days rolling window with automatic cleanup
 
@@ -6501,7 +5392,7 @@ The undo system is built on the change logging infrastructure (v1.5.1), which tr
 
 ### Overview (v1.6.0)
 
-NeuralRP uses the `get_character_name()` helper function throughout the codebase to ensure consistent character name handling. This prevents the relationship tracker and other systems from getting confused by name variations.
+NeuralRP uses the `get_character_name()` helper function throughout the codebase to ensure consistent character name handling. This prevents name confusion by name variations.
 
 ### Critical Rule
 
@@ -6509,7 +5400,7 @@ NeuralRP uses the `get_character_name()` helper function throughout the codebase
 
 ### Why This Matters
 
-**Problem**: Inconsistent name extraction breaks relationship tracking:
+**Problem**: Inconsistent name extraction:
 
 ```python
 # BAD: First-name extraction
@@ -6614,11 +5505,6 @@ for char_obj in request.characters:
     char_name = get_character_name(char_obj)
     # char_name = "Sally Smith" (full name)
 
-# In relationship tracking
-from_char = get_character_name(character_a)
-to_char = get_character_name(character_b)
-state = db_get_relationship_state(chat_id, from_char, to_char)
-
 # In speaker filtering
 speaker_name = get_character_name(speaker_obj)
 results = filter_by_speaker(results, speaker_name)
@@ -6629,11 +5515,11 @@ results = filter_by_speaker(results, speaker_name)
 ```python
 # DON'T: Extract first name
 char_name = char_obj["data"]["name"].split()[0]
-# Result: "Sally" - Breaks relationships!
+# Result: "Sally" - Inconsistent naming
 
 # DON'T: Create shortened versions
 nickname = char_obj["data"]["name"].split()[0]
-# Result: "Sally" - Breaks relationships!
+# Result: "Sally" - Inconsistent naming
 
 # DON'T: Access data.name directly
 name = char_obj["data"]["name"]
@@ -6686,11 +5572,10 @@ if name1.lower() == name2.lower():
 
 The character name consistency helper integrates with:
 
-1. **Relationship Tracker**: Ensures entity IDs map consistently to character names
-2. **Entity ID System**: Prevents name collision confusion
-3. **Prompt Construction**: Consistent character names in system prompts
-4. **Search System**: Reliable speaker filtering and results
-5. **Change History**: Accurate entity identification in audit trail
+1. **Entity ID System**: Prevents name collision confusion
+2. **Prompt Construction**: Consistent character names in system prompts
+3. **Search System**: Reliable speaker filtering and results
+4. **Change History**: Accurate entity identification in audit trail
 
 ---
 
@@ -7930,7 +6815,6 @@ def migrate_character_tags():
 - ✅ Context assembly (tags are purely organizational)
 - ✅ Character/world data (tags stored in separate tables)
 - ✅ Chat functionality (tags don't affect chat state)
-- ✅ Relationship tracking (tags not used in relationship calculations)
 - ✅ Semantic search (tags are separate from world info search)
 - ✅ Image generation (tags don't affect SD parameters)
 
@@ -9129,7 +8013,7 @@ content = last_message['content']  # ← Full text preserved
 
 #### Relationship Tracker Enhancements (v1.10.3)
 
-**Overview**: Enhanced relationship scoring with hybrid semantic + keyword analysis for more accurate emotional tracking.
+**Overview**: Danbooru tag generation
 
 **New Features**:
 
@@ -9217,7 +8101,6 @@ similarity = np.dot(message_embedding, dimension_embedding) / (
 **Test Harness Usage**:
 
 ```python
-from app.relationship_tracker import test_relationship_scoring
 
 # Run validation tests
 test_relationship_scoring()
@@ -9243,260 +8126,6 @@ Result: {'trust': 68, 'emotional_bond': 78, 'conflict': 50, 'power_dynamic': 50,
 ============================================================
 
 ```
-
-#### Snapshot Variation Mode (v1.10.4)
-
-**Overview**
-
-The "Regenerate with Variation" button provides creative alternative interpretations of the current scene using the original prompt structure with all examples removed, while maintaining the same character tags, visual canon, and prompt structure as standard snapshots.
-
-**Key Changes from v1.10.4**:
-- **Variation Mode LLM Prompt**: Original prompt structure with ALL examples removed (no pattern priming)
-- **Same Temperature**: 0.3 (identical to standard mode) - variation comes from lack of examples, not temperature
-- **Same Constraints**: All word count constraints preserved (EXACTLY 3-5 words, etc.) for SD compatibility
-- **SD-Focused Instruction**: Explicit mention that phrases are designed specifically for Stable Diffusion generation
-- **Same Downstream Processing**: Character extraction, tag aggregation, and prompt building remain identical
-- **Variation Source**: LLM must invent its own danbooru-style phrases without example guidance
-
-**System Architecture**:
-
-```
-User clicks "🔄 Regenerate with variation"
-    ↓
-Frontend: POST /api/chat/{chat_id}/snapshot/regenerate
-    ↓
-Backend: Load chat messages + character data + activeCharacters
-    ↓
-Determine Primary Character (defaults to first active character):
-    - Load character card (description + personality)
-    - Strip character names to prevent name leakage
-    ↓
-LLM JSON Extraction (VARIATION MODE):
-    - Temperature: 0.3 (same as standard)
-    - Max length: 75 tokens (same as standard)
-    - Original prompt structure: All constraints preserved
-    - NO examples: No RIGHT/WRONG pattern priming
-    - SD instruction: Explicit focus on short danbooru-style phrases for SD
-    - Return JSON: {"location": "...", "action": "...", "activity": "...", "dress": "...", "expression": "..."}
-    ↓
-SnapshotPromptBuilder.build_simple_prompt():
-    - Same 5-block structure as standard snapshot
-    - Quality → Character tags → Scene → Dress → Location → User tags
-    - Identical to standard mode (no changes)
-    ↓
-Call existing generate_image(SDParams)
-    ↓
-Save snapshot to chat.metadata.snapshot_history (mode: "variation")
-    ↓
-Return {image_url, prompt, scene_analysis, mode: "variation"}
-    ↓
-Frontend: Display as new message from "Visual System" speaker
-```
-
-**Variation Mode Prompt** (temperature 0.3, max 75 tokens):
-
-```python
-prompt = f"""Analyze the conversation and extract scene information as JSON.
-
-[CHARACTER PROFILE - PRIMARY CHARACTER]
-{description} {personality}
-
-{"Focus on primary character" if primary_character else "No character focus"}
-
-CONTEXT: You will receive 20 recent messages:
-- Messages 1-19: Truncated to 350 characters each (may be incomplete)
-- Message 20: Full text (most recent turn)
-
-MISSION: Intelligently infer scene information from context clues across all messages. You are ALLOWED to make educated guesses when information is incomplete.
-
-OUTPUT STYLE: You are designing short danbooru-style phrases specifically for Stable Diffusion image generation. Generate danbooru/booru-style tags (short phrases used in anime image generation models like PonyXL/Illustrious). Use lowercase, avoid filler words like "is", "the", "a". Examples: "smile" not "smiling", "sitting" not "is sitting".
-
-Extract:
-1. "location": Where is the scene happening? (EXACTLY 3-5 words, NO proper names)
-   GUESS from context clues across all 20 messages (activities, descriptions, dialogue hints)
-
-2. "action": What is the {"primary character" if primary_character else "main character"} doing RIGHT NOW in the MOST RECENT TURN? (EXACTLY 2-3 words, NO proper names)
-   CRITICAL: DETERMINE from FINAL MESSAGE ONLY (message 20, full text)
-   Action priority: Physical action with another → Physical action with self → Emotional reaction → Passive pose
-
-3. "activity": What is the most helpful 1-4 word phrase for image generation that describes the current scene? (1-4 words, NO proper names, or "" if no context)
-   CRITICAL: This should be optimized for Stable Diffusion generation - the single most useful phrase to understand the scene.
-   - Consider the broader context that makes the immediate action coherent for SD
-   - If action is "trips" and location is "at park", use "walking with another" (frames the action)
-   - If action is "doing dishes" and context is tavern, use "working" or "tavern scene"
-   - Let the LLM determine what context is most helpful, even if it overlaps with other fields
-
-4. "dress": What is the {"primary character" if primary_character else "the character"} wearing? (EXACTLY 2-3 words, NO proper names, or "nude" if NSFW)
-   GUESS from context clues (activity, location, genre) - make reasonable inferences if not explicitly stated
-   Use "nude" if nudity mentioned or strongly implied by activity/location
-   Use "" (empty string) only if absolutely no clues available
-
-5. "expression": What is the facial expression of the {"primary character" if primary_character else "the character"}? (EXACTLY 1-2 words, NO proper names)
-   CRITICAL: Consider the character's PERSONALITY TRAITS from the profile above.
-   - If character is shy/timid, use subtle expressions ("nervous", "embarrassed")
-   - If character is bold/cheerful, use stronger expressions ("smile", "excited")
-   - Match expression to both current situation AND personality
-   DETERMINE from dialogue, context, and emotional cues in the conversation
-   Use "neutral" if no emotional cues are available or if unclear
-   Use "" (empty string) only if character is not present in scene
-
-IMPORTANT:
-- ACTION: Determine from FINAL MESSAGE ONLY (message 20, full text)
-- ACTIVITY/LOCATION/DRESS/EXPRESSION: Infer from context across all 20 messages, you are encouraged to make educated guesses
-- NO proper names in any field: Use generic terms only (e.g., "fighting with another", NOT "fighting with Bob")
-- EXACTLY 2-3 words per field (or 3-5 for location, 1-4 for activity, 1-2 for expression), no exceptions
-- Use context clues to infer location, activity, dress, and expression when not explicitly stated
-- Third-person only, NO "you" or "your"
-- Location is shared by all characters
-
-Reply with ONLY valid JSON, no extra text.
-
-Conversation:
-{conversation_text}
-
-Assistant:"""
-```
-
-**Key Differences from Standard Mode**:
-
-| Aspect | Standard Mode | Variation Mode | Effect |
-|---------|---------------|-----------------|--------|
-| **Temperature** | 0.3 | 0.3 | No difference |
-| **Prompt constraints** | Same word counts preserved | Same word counts preserved | Identical SD compatibility |
-| **Examples** | RIGHT/WRONG examples for each field | **No examples** | Variation from lack of priming |
-| **SD instruction** | Implicit | Explicit "You are designing short danbooru-style phrases specifically for Stable Diffusion" | Focuses output |
-| **Character card** | Same (injected) | Same (injected) | Maintained |
-| **Downstream processing** | Same | Same | Identical quality tags, character tags, SD parameters |
-| **LLM max_length** | 75 tokens | 75 tokens | No difference |
-
-**Variation Emergence**:
-
-The variation emerges from a single factor:
-
-**No Examples (No Pattern Priming)**: Without RIGHT/WRONG examples for each field, the LLM must invent its own danbooru-style phrase patterns. The prompt structure and constraints remain identical, ensuring parseable output, but the lack of examples means each variation uses different phrasing choices.
-
-**Example Variations**:
-
-Same conversation context (Alice is crying in a tavern):
-
-| Field | Standard Mode (with examples) | Variation Mode (no examples) | Variation 2 |
-|--------|-------------------------------|------------------------------|-------------|
-| **location** | "tavern interior" | "dimly lit tavern" | "wooden bar" |
-| **action** | "crying" | "weeping" | "sobbing" |
-| **activity** | "at tavern" | "sitting alone" | "seeking comfort" |
-| **dress** | "casual clothes" | "peasant attire" | "simple dress" |
-| **expression** | "sad" | "tearful" | "grief-stricken" |
-
-**Technical Implementation**:
-
-**New Methods in `app/snapshot_analyzer.py`**:
-
-```python
-async def extract_character_scene_json_variation(
-    self,
-    messages: List[Dict],
-    primary_character: Optional[str],
-    primary_character_card: Optional[str],
-    message_window: int = 20
-) -> Dict[str, str]:
-    """
-    Extract scene description with VARIATION mode - alternative interpretations.
-
-    Uses original prompt structure with all examples removed, letting LLM generate
-    alternative danbooru-style phrases without example priming. Variation comes
-    from lack of examples, not from temperature changes.
-    """
-    # ... (uses original prompt, examples removed, SD instruction added)
-
-async def analyze_scene_variation(self, messages: List[Dict], chat_id: str,
-                               character_names: Optional[List[str]] = None,
-                               primary_character: Optional[str] = None,
-                               primary_character_card: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Simplified scene analysis using VARIATION mode for alternative interpretations.
-
-    Wrapper method that calls extract_character_scene_json_variation()
-    with same signature as analyze_scene() for compatibility.
-    """
-    # ... (20 lines of implementation)
-```
-
-**Updated Endpoint in `main.py`**:
-
-```python
-@app.post("/api/chat/{chat_id}/snapshot/regenerate")
-async def regenerate_snapshot(chat_id: str):
-    """
-    Regenerate snapshot with variation mode enabled.
-
-    Uses creative scene analysis with original prompt structure and no examples
-    to generate alternative interpretations of current scene, while maintaining
-    the same character tags and visual canon data.
-    """
-    # Load chat + character data
-    chars_data = get_active_characters_data(chat, max_chars=3, include_visual_canon=True)
-    character_names = [c.get('name', '') for c in chars_data if c.get('name')]
-
-    # Determine primary character for variation mode (defaults to first active character)
-    primary_char_name = character_names[0] if character_names else None
-    primary_char_card = None
-    if primary_char_name:
-        # Load character card with PList parsing
-        for char_data in chars_data:
-            if char_data.get('name') == primary_char_name:
-                description = char_data.get('description', '')
-                personality = char_data.get('personality', '')
-                desc_traits = parse_physical_body_plist(description)
-                person_traits = parse_personality_plist(personality)
-                desc_text = ', '.join(desc_traits) if desc_traits else description
-                person_text = person_traits if person_traits else personality
-                primary_char_card = desc_text + ' ' + person_text
-                primary_char_card = snapshot_analyzer._strip_character_names(primary_char_card, [primary_char_name])
-                break
-
-    # Analyze scene using VARIATION mode (original prompt, no examples, temperature 0.3)
-    scene_analysis = await snapshot_analyzer.analyze_scene_variation(
-        messages, chat_id, character_names=character_names,
-        primary_character=primary_char_name,
-        primary_character_card=primary_char_card
-    )
-
-    # Continue with same downstream processing as standard snapshot...
-```
-
-**Performance Characteristics**:
-
-| Metric | Standard Mode | Variation Mode | Difference |
-|--------|---------------|-----------------|-------------|
-| **LLM extraction time** | 1-2 seconds | 1-2 seconds | No difference |
-| **Temperature** | 0.3 | 0.3 | No difference |
-| **Max tokens** | 75 | 75 | No difference |
-| **Prompt complexity** | Identical | Identical | No difference |
-| **Downstream processing** | Identical | Identical | No difference |
-| **SD parameters** | Identical | Identical | No difference |
-
-**Use Cases**:
-
-1. **Creative Exploration**: Get alternative visual interpretations of same scene through different phrase choices
-2. **Phrase Variations**: Different danbooru-style wording for same concepts
-3. **A/B Testing**: Compare multiple variations to select best phrase choices
-4. **Semantic Variety**: Different ways to describe same scene elements
-
-**Design Philosophy**:
-
-**Why Remove Examples Instead of Changing Temperature?**
-
-| Approach | Remove Examples | Higher Temperature |
-|----------|---------------|-------------------|
-| **Parseability** | ✅ Word count constraints preserved, parseable output | ❌ May produce verbose unparseable output |
-| **SD compatibility** | ✅ Short danbooru-style phrases guaranteed | ⚠️ May produce longer, less SD-friendly phrases |
-| **Variation source** | ✅ Different phrase patterns (no priming) | ⚠️ More randomness but less semantic coherence |
-| **Consistency** | ✅ Same temperature = consistent behavior | ❌ Higher temp = less predictable behavior |
-| **User intent** | ✅ Click to generate new variation | ⚠️ Same as seed changes? |
-
-**Verdict**: Removing examples provides semantic variety through different phrase invention while maintaining parseability and SD compatibility. Variation emerges from lack of pattern priming, not temperature changes.
-
----
 
 ## Gender System (v1.10.0)
 
@@ -10773,7 +9402,6 @@ Future versions may allow configurable undo duration.
 
 **Pros**:
 - Prevents name collisions (e.g., multiple "John" characters)
-- Fork-safe: Relationships branch correctly
 - Scalable: Supports hundreds of NPCs
 - Type-safe: Clear distinction between characters, NPCs, users
 
@@ -10786,7 +9414,7 @@ Future versions may allow configurable undo duration.
 ### Why Soft Delete Instead of Hard Delete?
 
 **Pros**:
-- Persistent message IDs for relationship tracking
+- Persistent message IDs 
 - Full history search across all messages
 - Optional cleanup (user-controlled)
 - No data loss from summarization
@@ -10863,7 +9491,7 @@ For complete API documentation, see the source code in `main.py`. Key endpoints 
 
 **World Info**: `/api/world-info` (GET, POST, edit-entry, add-entry, delete-entry)
 
-**Chats**: `/api/chats` (GET, POST, DELETE, fork, branches, cleanup-old-summarized, summarized/stats)
+**Chats**: `/api/chats` (GET, POST, DELETE, cleanup-old-summarized, summarized/stats)
 
 **LLM**: `/api/chat`, `/api/extra/tokencount`
 

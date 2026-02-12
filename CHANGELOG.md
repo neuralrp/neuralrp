@@ -5,6 +5,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [2.0.0] - 2026-02-11
+
+### Removed
+- **Forking System**: Complete removal of built-in branching/forking functionality
+  - Removed `/api/chats/fork` and all related fork API endpoints from `main.py` (~520 lines)
+  - Removed fork transaction helpers and entity ID remapping logic
+  - Removed fork isolation checks from save operations
+  - Removed branch metadata from chat save path
+  - Removed fork origin linkage system
+  - Forked chats in existing databases remain as plain independent chats with no origin linkage
+  - Users now use standard save workflows ("Save As" with different names) instead of hidden branching model
+
+- **Relationship System**: Complete removal of semantic relationship tracking
+  - Removed `app/relationship_tracker.py` module (502 lines)
+  - Removed `RELATIONSHIP_TEMPLATES` dictionary from `main.py` (~42 lines)
+  - Removed `get_relationship_context()` function from `main.py` (~218 lines)
+  - Removed `analyze_and_update_relationships()` function from `main.py` (~113 lines)
+  - Removed relationship functions from `app/database.py` (~92 lines)
+  - Removed `db_get_relationship_state()` function
+  - Removed `db_get_all_relationship_states()` function
+  - Removed `db_update_relationship_state()` function
+  - Removed `relationship_states` table from database schema
+  - Removed `entities` table from database schema
+  - Removed relationship context injection from prompt assembly
+  - Removed relationship analysis trigger from `/api/chat` endpoint
+  - Removed `adaptive_tracker` initialization and cleanup
+  - Eliminated O(N²) per-request overhead from embedding computation
+  - `NEURALRP_FEATURES_SEMANTIC_SCORING_ENABLED` config option no longer needed
+
+- **Snapshot Variation Mode**: Complete removal of variation mode functionality
+  - Removed `extract_character_scene_json_variation()` function from `app/snapshot_analyzer.py` (~143 lines)
+  - Removed `analyze_scene_variation()` function from `app/snapshot_analyzer.py` (~91 lines)
+  - Removed `/api/chat/{chat_id}/snapshot/regenerate` endpoint from `main.py` (~162 lines)
+  - Removed `SnapshotRegenerateRequest` class from `main.py` (~5 lines)
+  - Updated frontend `regenerateSnapshot()` to call standard `/api/chat/snapshot` endpoint
+  - Added `chat_id` parameter to regenerate request (was missing)
+  - Added `mode` parameter to regenerate request (for consistency with standard snapshot)
+  - Changed button title from "Regenerate with variation mode" to "Regenerate"
+  - Fixed all `kobold_url` config access bugs (6 locations total across codebase)
+
+### Changed
+- **Snapshot Regenerate Behavior**: Regenerate button now generates standard snapshots (same LLM prompt with examples)
+  - Results: Natural SD seed variations instead of prompt variations
+  - User intent: "Regenerate" -> Generate same scene with different random seed
+- **Simplified Context Assembly**: Removed relationship injection and character reinforcement intervals based on relationship state
+- **Database Schema**: Removed `relationship_states` and `entities` tables
+- **Metadata Structure**: Removed relationship-related metadata fields (no longer relevant)
+- **Documentation**: Removed all relationship tracker sections from `docs/TECHNICAL.md` (~780 lines)
+
+### Fixed
+- **Snapshot Feature**: Fixed configuration access for `kobold_url` causing LLM unavailability
+  - Changed from `config['kobold_url']` (incorrect) to `config.get('kobold', {}).get('url')` (correct)
+  - Applied to: `app/snapshot_analyzer.py` (2 locations in LLM HTTP requests), `main.py` (1 location in character counting, 1 location in variation endpoint, 2 total in regenerate endpoint)
+
+### Technical
+- **Code Reduction**: Removed ~2,173 lines of complex, crosscutting code
+  - Forking system: ~520 lines (endpoints, transactions, entity remapping)
+  - `app/relationship_tracker.py`: 502 lines (deleted)
+  - `main.py`: ~1,000 lines (functions, templates, imports, calls)
+  - `app/database.py`: ~92 lines (functions, table creation)
+  - `app/database_setup.py`: ~60 lines (functions, indexes)
+  - `docs/TECHNICAL.md`: ~780 lines (sections removed)
+- **Performance**: Eliminated blocking synchronous embedding operations during chat requests (1+ second overhead removed)
+- **Maintainability**: Removed maintenance burden of forking and relationship tracking code
+- **Simplicity**: Future features no longer need to consider branch or relationship state
+
+### Migration Notes
+- **Forking Data**: Existing forked chats remain as plain independent chats with no origin linkage; no special migration required
+- **No Automatic Migration**: Relationship and forking data are not preserved after upgrade to v2.0.0
+- **Database Migration**: Schema version 6 → 7 drops `relationship_states` and `entities` tables
+- **Existing Chats**: Continue to work normally, but relationship context and branch isolation are no longer tracked
+- **No Data Migration Required (Snapshot)**: All existing snapshots work correctly with standard endpoint
+- **Existing Regenerates**: Snapshots with `mode: "variation"` remain in history but future regenerates use `mode: "standard"` (or omitted)
+
+***
+
 ## [1.12.0] - 2026-02-09
 
 ### Changed

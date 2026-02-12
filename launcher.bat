@@ -76,14 +76,30 @@ echo  NOTE: First run downloads ~400MB AI model
 echo  This takes 5-10 minutes. Please be patient.
 echo ========================================
 echo.
-echo The application will be available at: http://localhost:8000
+
+REM Find available port
+set "PORT=8000"
+:check_port
+netstat -ano | findstr ":%PORT%" >nul 2>&1
+if errorlevel 1 (
+    echo Found available port: %PORT%
+    goto port_found
+)
+set /a "PORT+=1"
+if %PORT% LEQ 8020 goto check_port
+echo ERROR: No available ports found in range 8000-8020
+pause
+exit /b 1
+
+:port_found
+echo The application will be available at: http://localhost:%PORT%
 echo Press Ctrl+C to stop the server.
 echo.
 echo ========================================
 echo.
-
+ 
 REM Start the application
-python main.py
+python main.py --port %PORT%
 
 REM If server stops, keep window open to see any errors
 if errorlevel 1 (

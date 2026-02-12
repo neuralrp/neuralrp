@@ -16,13 +16,77 @@ import random
 import re
 import time
 import asyncio
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Tuple, Set
 from pydantic import BaseModel
+import argparse
 
 # Set up logging
-logger = logging.getLogger(__name__)
+import logging
+from logging.handlers import RotatingFileHandler
 
-# Import the updated NPC functions with defensive lookup
+def setup_logging():
+    """Configure structured logging with file rotation."""
+    # BASE_DIR is defined at module level, so we can't use DATA_DIR yet
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR = os.path.join(BASE_DIR, "app/data")
+
+    log_dir = os.path.join(DATA_DIR, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_level_str = CONFIG['server']['log_level'].upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+
+    # Create formatters
+    console_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    file_format = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+
+    console_formatter = logging.Formatter(console_format)
+    file_formatter = logging.Formatter(file_format)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(console_formatter)
+
+    # File handler with rotation (max 50MB per file, keep 30 days)
+    log_file = os.path.join(log_dir, "neuralrp.log")
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=50 * 1024 * 1024,  # 50MB
+        backupCount=30,  # Keep 30 files = 1.5GB max
+        encoding='utf-8'
+    )
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(file_formatter)
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+
+    # Configure application logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(log_level)
+
+    print(f"[LOGGING] Logging initialized at {log_level_str} level")
+    print(f"[LOGGING] Log file: {log_file}")
+    print(f"[LOGGING] Rotation: Max 50MB per file, keep 30 files")
+
+    return logger
+
+# Import configuration
+from app.config_loader import CONFIG
+
+# Initialize logging
+logger = setup_logging()
+
+# Global startup time for uptime tracking
+startup_time = time.time()
+
+# Import backup manager functions
+from app.backup_manager import create_backup, rotate_backups, list_backups
 from app.database import (
     # Core connection and initialization
     init_db, get_connection,
@@ -40,7 +104,7 @@ from app.database import (
     db_get_worlds_by_tags, db_add_world_tags, db_remove_world_tags,
     # Chat and message operations
     db_get_chat, db_get_all_chats, db_save_chat, db_delete_chat,
-    db_get_message_context, db_cleanup_old_autosaved_chats, db_cleanup_empty_chats, db_create_empty_chat,
+    db_get_message_context, db_cleanup_old_autosaved_chats, db_cleanup_empty_chats,
     db_get_chat_npcs, db_create_npc_and_update_chat,
     db_get_npc_by_id, db_update_npc, db_create_npc_with_entity_id,
     db_delete_npc,
@@ -65,13 +129,11 @@ from app.database import (
     # Health check function
     verify_database_health,
     # Autosave cleanup functions
-    db_cleanup_old_autosaved_chats, db_cleanup_empty_chats,
-    # Relationship tracker functions
-    db_get_relationship_state, db_get_all_relationship_states, db_update_relationship_state,
-    # Branch fork functions
-    db_remap_entities_for_branch, db_fork_chat_transaction,
+    db_cleanup_old_autosaved_chats, db_cleanup_empty_chats, db_cleanup_old_unnamed_chats,
     # Change log cleanup
     db_cleanup_old_changes,
+    # Summarized messages cleanup
+    db_cleanup_old_summarized_messages,
 )
 
 from app.tag_manager import parse_tag_string
@@ -154,7 +216,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CONFIG['server']['cors_origins'],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -165,7 +227,7 @@ SD_PRESETS = {
         "steps": 25,
         "width": 640,
         "height": 512,
-        "threshold": 0
+        "threshold": 0.2
     },
     "light": {
         "steps": 20,
@@ -377,16 +439,6 @@ resource_manager = ResourceManager()
 performance_tracker = PerformanceTracker()
 hint_engine = SmartHintEngine()
 
-# Configuration
-CONFIG = {
-    "kobold_url": "http://127.0.0.1:5001",
-    "sd_url": "http://127.0.0.1:7861",
-    "system_prompt": "Write a highly detailed, creative, and immersive response. Stay in character at all times.",
-    "performance_mode_enabled": True,
-    "max_context": 8192,
-    "summarize_threshold": 0.80
-}
-
 # Multi-Character Mode Instruction Templates
 NARRATOR_INSTRUCTION = """You are the narrator of an interactive story.
 
@@ -426,7 +478,7 @@ SCENE_CAPSULE_PROMPT = """### System: Summarize the following conversation into 
 Requirements:
 - Use neutral, factual, past-tense prose
 - Include key events and plot developments
-- Note relationship changes between characters
+- Note character interactions and dialogue exchanges
 - Record any world information discovered
 - Explicitly mention when characters enter or exit
 
@@ -535,6 +587,7 @@ class SDParams(BaseModel):
     scheduler: str = "Automatic"
     context_tokens: Optional[int] = 0  # Context length for SD optimization
     chat_id: Optional[str] = None  # For loading NPCs in manual generation
+    skip_preset: bool = False  # Skip preset application (for snapshots)
 
 class InpaintRequest(BaseModel):
     image: str  # Base64 encoded image
@@ -877,14 +930,12 @@ class WorldEditEntryRequest(BaseModel):
     context: Optional[str] = ""
     source_mode: Optional[str] = "manual"
 
-# Character name helper for consistency with relationship tracking
 def get_character_name(character_obj: Any) -> str:
     """
     Extract character name consistently from any character reference.
 
     CRITICAL: This is the ONLY approved way to get character names.
     DO NOT extract first name only or modify the name string.
-    This ensures relationship tracker and other features work correctly.
 
     Args:
         character_obj: Can be:
@@ -917,7 +968,6 @@ def get_character_name(character_obj: Any) -> str:
 def get_entity_id(character_obj: Any) -> str:
     """
     Extract entity ID consistently from any character reference.
-    Used for relationship tracking to ensure proper entity identification.
 
     Args:
         character_obj: Can be:
@@ -1002,17 +1052,16 @@ def detect_cast_change(
     from urllib.parse import unquote
     
     # Build current active set (entity IDs)
+    # NOTE: Only iterate current_characters, not local_npcs.
+    # local_npcs contains ALL NPCs (active and inactive), which would cause
+    # duplicate processing since request.characters already has active NPCs filtered.
     current_set = set()
     for char in current_characters:
         if char.get('is_active', True):
             entity_id = char.get('_filename')
             if entity_id:
-                current_set.add(entity_id)
-    for npc_id, npc in current_npcs.items():
-        if npc.get('is_active', True):
-            entity_id = unquote(npc.get('entity_id') or npc_id)
-            if entity_id:
-                current_set.add(entity_id)
+                # Unquote entity IDs to match how they're stored in previous_set
+                current_set.add(unquote(entity_id))
     
     # Get previous state from provided metadata
     previous_set = set(unquote(id) for id in previous_metadata.get('previous_active_cast', []))
@@ -1083,7 +1132,7 @@ async def get_token_count(text: str):
     async with httpx.AsyncClient() as client:
         try:
             res = await client.post(
-                f"{CONFIG['kobold_url']}/api/extra/tokencount",
+                f"{CONFIG['kobold']['url']}/api/extra/tokencount",
                 json={"prompt": text},
                 timeout=10.0
             )
@@ -1569,408 +1618,6 @@ snapshot_analyzer = None
 prompt_builder = None
 snapshot_http_client = None
 
-# ============================================================================
-# ADAPTIVE RELATIONSHIP TRACKING ENGINE (v1.6.1)
-# ============================================================================
-
-# Import adaptive tracker
-from app.relationship_tracker import (
-    AdaptiveRelationshipTracker,
-    initialize_adaptive_tracker,
-    adaptive_tracker
-)
-
-# Legacy RelationshipAnalyzer kept for reference, but not used
-# The AdaptiveRelationshipTracker in app/relationship_tracker.py is the new implementation
-relationship_analyzer = None  # Deprecated, use adaptive_tracker instead
-
-
-# ============================================================================
-# RELATIONSHIP TEMPLATES
-# ============================================================================
-
-# Template definitions for natural language injection
-RELATIONSHIP_TEMPLATES = {
-    'trust': {
-        (0, 20): ["{from_} deeply distrusts {to}", "{from_} views {to} with complete suspicion"],
-        (21, 40): ["{from_} is wary of {to}", "{from_} has doubts about {to}'s intentions"],
-        (41, 60): [],  # Neutral - don't inject
-        (61, 80): ["{from_} trusts {to}", "{from_} has faith in {to}"],
-        (81, 100): ["{from_} trusts {to} completely", "{from_} would trust {to} with their life"]
-    },
-    'emotional_bond': {
-        (0, 20): ["{from_} is repulsed by {to}", "{from_} actively dislikes {to}"],
-        (21, 40): ["{from_} is indifferent to {to}", "{from_} feels little connection to {to}"],
-        (41, 60): [],  # Neutral - don't inject
-        (61, 80): ["{from_} cares deeply for {to}", "{from_} has strong feelings for {to}"],
-        (81, 100): ["{from_} is deeply in love with {to}", "{from_} adores {to}"]
-    },
-    'conflict': {
-        (0, 20): [],  # Low conflict - don't inject
-        (21, 40): ["{from_} has minor disagreements with {to}", "{from_} occasionally argues with {to}"],
-        (41, 60): ["{from_} has noticeable tension with {to}", "{from_} is in active conflict with {to}"],
-        (61, 80): ["{from_} is in active conflict with {to}", "{from_} openly opposes {to}"],
-        (81, 100): ["{from_} views {to} as an enemy", "intense hostility exists between {from_} and {to}"]
-    },
-    'power_dynamic': {
-        (0, 20): ["{from_} is completely submissive to {to}", "{from_} defers to {to} in all things"],
-        (21, 40): ["{from_} often defers to {to}", "{from_} follows {to}'s lead"],
-        (41, 60): [],  # Equal - don't inject
-        (61, 80): ["{from_} often leads {to}", "{to} tends to take charge in situations"],
-        (81, 100): ["{from_} completely dominates {to}", "{from_} commands {to} without question"]
-    },
-    'fear_anxiety': {
-        (0, 20): [],  # No fear - don't inject
-        (21, 40): ["{from_} is slightly nervous around {to}", "{from_} feels a bit uneasy near {to}"],
-        (41, 60): ["{from_} is noticeably anxious around {to}", "{from_} shows signs of nervousness with {to}"],
-        (61, 80): ["{from_} fears {to}", "{from_} is intimidated by {to}"],
-        (81, 100): ["{from_} is terrified of {to}", "{from_} is completely paralyzed by fear around {to}"]
-    }
-}
-
-
-def get_relationship_context(chat_id: str, character_objs: list, user_name: str,
-                            recent_messages: list) -> str:
-    """
-    Generate compact relationship context for prompt injection.
-    Uses Tier 3 semantic filtering to only include dimensions relevant to current conversation.
-    Returns 0-75 tokens depending on active interactions.
-
-    CRITICAL: character_objs should be full character objects (not just names).
-    This function extracts entity IDs and names for proper relationship tracking.
-    """
-    import random
-
-    # Extract entity IDs and names from character objects
-    entity_map = {}  # entity_id -> name
-    name_map = {}    # name -> entity_id
-    for char_obj in character_objs:
-        entity_id = get_entity_id(char_obj)
-        name = get_character_name(char_obj)
-        entity_map[entity_id] = name
-        name_map[name] = entity_id
-
-    # Identify active speakers in last 5 messages
-    # Fix: Access Pydantic model attributes directly (m.speaker, m.role)
-    active_speakers = set(m.speaker or m.role for m in recent_messages[-5:])
-
-    # Find active characters (by entity ID or name)
-    active_characters = []
-    for entity_id, name in entity_map.items():
-        if entity_id in active_speakers or name in active_speakers:
-            active_characters.append((entity_id, name))
-
-    user_is_active = any(
-        m.role == 'user' or m.speaker == user_name
-        for m in recent_messages[-5:]
-    )
-
-    # Need at least 2 entities (char+char or char+user)
-    if not ((len(active_characters) >= 1 and user_is_active) or len(active_characters) >= 2):
-        return ""
-
-    # Get current turn text for semantic relevance filtering
-    # Use the most recent message's content
-    current_text = ""
-    if recent_messages:
-        current_text = recent_messages[-1].content or ""
-
-    lines = []
-
-    # Build relationship states dictionary for all active entity pairs
-    # Format: {from_entity: {dimension: score}}
-    relationship_states = {}
-
-    # Character-to-character relationships
-    for from_id, from_name in active_characters:
-        for to_id, to_name in active_characters:
-            if from_id == to_id:
-                continue
-
-            state = db_get_relationship_state(chat_id, from_id, to_id)
-            if state:
-                entity_key = f"{from_name}→{to_name}"
-                relationship_states[entity_key] = {
-                    'trust': state['trust'],
-                    'emotional_bond': state['emotional_bond'],
-                    'conflict': state['conflict'],
-                    'power_dynamic': state['power_dynamic'],
-                    'fear_anxiety': state['fear_anxiety']
-                }
-
-    # Character-to-user relationships
-    if user_is_active and active_characters:
-        user_name_or_default = user_name or "User"
-        for from_id, from_name in active_characters:
-            state = db_get_relationship_state(chat_id, from_id, user_name_or_default)
-            if state:
-                entity_key = f"{from_name}→{user_name_or_default}"
-                relationship_states[entity_key] = {
-                    'trust': state['trust'],
-                    'emotional_bond': state['emotional_bond'],
-                    'conflict': state['conflict'],
-                    'power_dynamic': state['power_dynamic'],
-                    'fear_anxiety': state['fear_anxiety']
-                }
-    
-    # Use adaptive tracker's Tier 3 semantic filtering if available
-    if adaptive_tracker and relationship_states:
-        try:
-            relevant_dimensions = adaptive_tracker.get_relevant_dimensions(
-                current_text=current_text,
-                relationship_states=relationship_states
-            )
-            
-            # Generate templates only for relevant dimensions
-            for entity_key, relevant_dims in relevant_dimensions.items():
-                # Parse entity_key (format: "From→To")
-                parts = entity_key.split('→')
-                if len(parts) != 2:
-                    continue
-                char_from, char_to = parts[0], parts[1]
-                
-                # Get full state for score lookup
-                state = relationship_states.get(entity_key)
-                if not state:
-                    continue
-                
-                # Generate templates for each relevant dimension
-                lines_before = len(lines)
-                for dim in relevant_dims:
-                    score = state[dim]
-                    # Clamp score to valid range to prevent lookup failures
-                    score = max(0, min(100, score))
-                    for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
-                        if low <= score <= high:
-                            if templates:
-                                template = random.choice(templates)
-                                lines.append(template.format(from_=char_from, to=char_to))
-                            break  # Found matching range, stop searching
-                
-                # Only add period if this iteration added content
-                if len(lines) > lines_before:
-                    lines.append(".")
-            
-            if lines:
-                return "### Relationship Context:\n" + "\n".join(lines)
-            
-            # If adaptive filtering returned no relevant dimensions, return empty
-            return ""
-        
-        except Exception as e:
-            print(f"[ADAPTIVE_TRACKER] Tier 3 filtering failed, falling back: {e}")
-            # Fall through to legacy behavior
-    
-    # Fallback: Legacy behavior without semantic filtering
-    # For each active character, describe notable feelings
-    # Note: active_characters contains tuples of (entity_id, name)
-    for from_id, from_name in active_characters:
-        # Check toward other characters
-        for to_id, to_name in active_characters:
-            if from_id == to_id:
-                continue
-            
-            # Get relationship state using entity IDs
-            state = db_get_relationship_state(chat_id, from_id, to_id)
-            if not state:
-                continue
-            
-            # Find dimensions far from neutral (50 ± 15)
-            notable = []
-            dimensions = ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']
-            
-            for dim in dimensions:
-                score = state[dim]
-                # Clamp score to valid range to prevent lookup failures
-                score = max(0, min(100, score))
-                if abs(score - 50) > 15:
-                    notable.append((dim, score))
-            
-            # Sort by extremity, take top 2
-            notable.sort(key=lambda x: abs(x[1] - 50), reverse=True)
-            top_two = notable[:2]
-            
-            # Generate templates for top two dimensions
-            lines_before = len(lines)
-            for dim, score in top_two:
-                for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
-                    if low <= score <= high:
-                        if templates:
-                            template = random.choice(templates)
-                            lines.append(template.format(from_=from_name, to=to_name))
-                        break  # Found matching range, stop searching
-            
-            # Only add period if this iteration added content
-            if len(lines) > lines_before:
-                lines.append(".")
-    
-    # Also check toward user if user is active (fallback only)
-    if user_is_active and active_characters:
-        user_name_or_default = user_name or "User"
-        
-        for from_id, from_name in active_characters:
-            # Get relationship state using entity ID
-            state = db_get_relationship_state(chat_id, from_id, user_name_or_default)
-            if not state:
-                continue
-            
-            # Find dimensions far from neutral
-            notable = []
-            dimensions = ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']
-            
-            for dim in dimensions:
-                score = state[dim]
-                # Clamp score to valid range to prevent lookup failures
-                score = max(0, min(100, score))
-                if abs(score - 50) > 15:
-                    notable.append((dim, score))
-            
-            # Sort by extremity, take top 2
-            notable.sort(key=lambda x: abs(x[1] - 50), reverse=True)
-            top_two = notable[:2]
-            
-            # Generate templates for top two dimensions
-            lines_before = len(lines)
-            for dim, score in top_two:
-                for (low, high), templates in RELATIONSHIP_TEMPLATES[dim].items():
-                    if low <= score <= high:
-                        if templates:
-                            template = random.choice(templates)
-                            lines.append(template.format(from_=from_name, to=user_name_or_default))
-                        break  # Found matching range, stop searching
-            
-            # Only add period if this iteration added content
-            if len(lines) > lines_before:
-                lines.append(".")
-    
-    if lines:
-        return "### Relationship Context:\n" + "\n".join(lines)
-    
-    return ""
-
-
-# Global variable to store cleanup task
-cleanup_task = None
-
-
-async def analyze_and_update_relationships(chat_id: str, messages: list,
-                                      character_objs: list, user_name: str = None):
-    """
-    Analyze relationships using semantic embeddings.
-    Triggered at summarization boundary (every 10 messages).
-
-    CRITICAL: character_objs should be full character objects (not just names).
-    This function extracts entity IDs and names for proper relationship tracking.
-    
-    Note: Semantic scoring can be disabled by setting environment variable:
-    NEURALRP_DISABLE_SEMANTIC_SCORING=1
-    """
-    import os
-    USE_SEMANTIC_SCORING = os.environ.get('NEURALRP_DISABLE_SEMANTIC_SCORING', '0') != '1'
-
-    if not USE_SEMANTIC_SCORING:
-        print("[RELATIONSHIP] Semantic scoring disabled via environment variable, skipping")
-        return
-
-    if len(character_objs) < 1:
-        return
-
-    if adaptive_tracker is None:
-        print("[RELATIONSHIP] Adaptive tracker not initialized, skipping")
-        return
-
-    # Extract entity IDs and names from character objects
-    entity_map = {}  # entity_id -> name
-    name_map = {}    # name -> entity_id
-    for char_obj in character_objs:
-        entity_id = get_entity_id(char_obj)
-        name = get_character_name(char_obj)
-        entity_map[entity_id] = name
-        name_map[name] = entity_id
-
-    # Build entity list for relationship analysis
-    all_entity_ids = list(entity_map.keys())
-    user_entity_id = None
-
-    # Add user to entity list if provided
-    if user_name:
-        user_entity_id = "user_default"  # Standardized entity ID format
-        all_entity_ids.append(user_entity_id)
-        entity_map[user_entity_id] = user_entity_id
-        name_map[user_entity_id] = user_name  # Keep display name mapping
-
-    recent_speakers = set(m.speaker or m.role for m in messages[-10:])
-
-    for char_from_id in all_entity_ids:
-        char_from_name = entity_map.get(char_from_id, char_from_id)
-
-        if char_from_name not in recent_speakers and char_from_id not in recent_speakers:
-            continue
-
-        for char_to_id in all_entity_ids:
-            if char_from_id == char_to_id:
-                continue
-
-            char_to_name = entity_map.get(char_to_id, char_to_id)
-
-            if char_to_name not in recent_speakers and char_to_id not in recent_speakers:
-                continue
-
-            current_state = db_get_relationship_state(chat_id, char_from_id, char_to_id)
-
-            if not current_state:
-                current_state = {
-                    'trust': 50, 'emotional_bond': 50, 'conflict': 50,
-                    'power_dynamic': 50, 'fear_anxiety': 50
-                }
-
-            relationship_messages = []
-            for msg in messages[-10:]:
-                speaker = msg.speaker or msg.role
-                content = msg.content or ''
-
-                # Check if speaker is the character_from entity
-                if char_from_id in speaker or char_from_name in speaker:
-                    # Check if content mentions character_to entity
-                    if char_to_id.lower() in content.lower() or char_to_name.lower() in content.lower():
-                        relationship_messages.append(content)
-
-                    # Check for pronoun references
-                    if any(word in content.lower() for word in ['he', 'she', 'they', 'you']):
-                        relationship_messages.append(content)
-
-            if not relationship_messages:
-                continue
-
-            try:
-                new_scores = adaptive_tracker.analyze_conversation_scores(
-                    messages=relationship_messages,
-                    current_state=current_state
-                )
-
-                if new_scores is None:
-                    continue
-
-                if any(abs(new_scores[dim] - current_state[dim]) > 5
-                       for dim in ['trust', 'emotional_bond', 'conflict', 'power_dynamic', 'fear_anxiety']):
-
-                    db_update_relationship_state(
-                        chat_id=chat_id,
-                        character_from=char_from_id,
-                        character_to=char_to_id,
-                        scores=new_scores,
-                        last_message_id=messages[-1].id if messages else 0
-                    )
-
-                    print(f"[RELATIONSHIP] {char_from_name}→{char_to_name}: "
-                          f"trust={new_scores['trust']}, bond={new_scores['emotional_bond']}, "
-                          f"conflict={new_scores['conflict']}")
-
-            except Exception as e:
-                print(f"[RELATIONSHIP] Scoring failed for {char_from_name}→{char_to_name}: {e}")
-                continue
-
-
 # Global variable to store cleanup task
 cleanup_task = None
 
@@ -2013,20 +1660,65 @@ async def periodic_cleanup():
         try:
             await asyncio.sleep(300)  # Run every 5 minutes
             semantic_search_engine.cleanup_resources()
-            
-            # Clean up old change log entries every 24 hours (check every 5 min, run once per day)
-            # We use a simple counter to avoid checking too frequently
-            if not hasattr(periodic_cleanup, '_last_change_cleanup'):
-                periodic_cleanup._last_change_cleanup = 0
-            
-            periodic_cleanup._last_change_cleanup += 1
-            if periodic_cleanup._last_change_cleanup >= 288:  # 288 * 5 min = 24 hours
-                db_cleanup_old_changes(30)  # Keep 30 days of history
-                db_cleanup_old_metrics(7)   # Keep 7 days of performance metrics
-                periodic_cleanup._last_change_cleanup = 0
-                print("Periodic cleanup: Cleaned old change logs and metrics")
+
+            # Track cleanup counters
+            if not hasattr(periodic_cleanup, '_daily_counter'):
+                periodic_cleanup._daily_counter = 0
+            if not hasattr(periodic_cleanup, '_weekly_counter'):
+                periodic_cleanup._weekly_counter = 0
+
+            periodic_cleanup._daily_counter += 1
+            periodic_cleanup._weekly_counter += 1
+
+            # Every 24 hours (288 * 5 min = 1440 minutes)
+            if periodic_cleanup._daily_counter >= 288:
+                logger.info("[CLEANUP] Running daily maintenance...")
+
+                # Clean up old change log entries
+                change_log_days = CONFIG['retention']['change_log_days']
+                db_cleanup_old_changes(change_log_days)
+                logger.info(f"[CLEANUP] Cleaned change logs (kept {change_log_days} days)")
+
+                # Clean up old performance metrics
+                metrics_days = CONFIG['retention']['performance_metrics_days']
+                db_cleanup_old_metrics(metrics_days)
+                logger.info(f"[CLEANUP] Cleaned performance metrics (kept {metrics_days} days)")
+
+                # Clean up old summarized messages
+                summarized_days = CONFIG['retention']['summarized_messages_days']
+                deleted_summarized = db_cleanup_old_summarized_messages(summarized_days)
+                logger.info(f"[CLEANUP] Cleaned summarized messages (kept {summarized_days} days, deleted {deleted_summarized})")
+
+                # Clean up old autosaved chats
+                autosaved_days = CONFIG['retention']['autosaved_chat_days']
+                deleted_autosaved = db_cleanup_old_autosaved_chats(autosaved_days)
+                logger.info(f"[CLEANUP] Cleaned autosaved chats (kept {autosaved_days} days, deleted {deleted_autosaved})")
+
+                # Clean up unnamed chats (chats with default names)
+                unnamed_days = CONFIG['retention']['unnamed_chat_days']
+                deleted_unnamed = db_cleanup_old_unnamed_chats(unnamed_days)
+                logger.info(f"[CLEANUP] Cleaned unnamed chats (kept {unnamed_days} days, deleted {deleted_unnamed})")
+
+                # Reset daily counter
+                periodic_cleanup._daily_counter = 0
+
+            # Every 7 days (2016 * 5 min = 10080 minutes)
+            if periodic_cleanup._weekly_counter >= 2016:
+                logger.info("[CLEANUP] Running weekly database maintenance...")
+
+                # Run VACUUM to rebuild database and reclaim space
+                try:
+                    with get_connection() as conn:
+                        conn.execute("VACUUM")
+                    logger.info("[CLEANUP] Database VACUUM completed")
+                except Exception as e:
+                    logger.warning(f"[CLEANUP] VACUUM failed: {e}")
+
+                # Reset weekly counter
+                periodic_cleanup._weekly_counter = 0
+
         except Exception as e:
-            print(f"Periodic cleanup failed: {e}")
+            logger.error(f"[CLEANUP ERROR] Periodic cleanup failed: {e}", exc_info=True)
 
 # Helper functions for JSON sync
 def normalize_world_name(filename: str) -> str:
@@ -2441,36 +2133,36 @@ def import_chats_json_files():
 async def check_ai_services():
     """Check if KoboldCpp and Stable Diffusion are running on startup"""
     import httpx
-    
-    kobold_url = CONFIG.get("kobold_url", "http://127.0.0.1:5001")
-    sd_url = CONFIG.get("sd_url", "http://127.0.0.1:7861")
-    
+
+    kobold_url = CONFIG['kobold']['url']
+    sd_url = CONFIG['stable_diffusion']['url']
+
     # Check KoboldCpp
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(f"{kobold_url}/api/v1/model")
             if response.status_code == 200:
-                print(f"  [OK] KoboldCpp found at {kobold_url}")
+                logger.info(f"  [OK] KoboldCpp found at {kobold_url}")
             else:
-                print(f"  [WARN] KoboldCpp responded but may not be ready")
+                logger.warning(f"  [WARN] KoboldCpp responded but may not be ready")
     except Exception:
-        print(f"  [ERROR] KoboldCpp not found at {kobold_url}")
-        print(f"     [TIP] Start KoboldCpp with your model before chatting")
-        print(f"     [TIP] Download: https://github.com/LostRuins/koboldcpp")
-    
+        logger.warning(f"  [ERROR] KoboldCpp not found at {kobold_url}")
+        logger.warning(f"     [TIP] Start KoboldCpp with your model before chatting")
+        logger.warning(f"     [TIP] Download: https://github.com/LostRuins/koboldcpp")
+
     # Check Stable Diffusion
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
             response = await client.get(f"{sd_url}/sdapi/v1/samplers")
             if response.status_code == 200:
-                print(f"  [OK] Stable Diffusion found at {sd_url}")
+                logger.info(f"  [OK] Stable Diffusion found at {sd_url}")
             else:
-                print(f"  [WARN] Stable Diffusion responded but may not be ready")
+                logger.warning(f"  [WARN] Stable Diffusion responded but may not be ready")
     except Exception:
-        print(f"  [ERROR] Stable Diffusion not found at {sd_url}")
-        print(f"     [TIP] Start A1111 WebUI with --api flag for image generation")
-        print(f"     [TIP] Download: https://github.com/AUTOMATIC1111/stable-diffusion-webui")
-    
+        logger.warning(f"  [ERROR] Stable Diffusion not found at {sd_url}")
+        logger.warning(f"     [TIP] Start A1111 WebUI with --api flag for image generation")
+        logger.warning(f"     [TIP] Download: https://github.com/AUTOMATIC1111/stable-diffusion-webui")
+
     print()  # Empty line for readability
 
 
@@ -2478,46 +2170,57 @@ async def check_ai_services():
 @app.on_event("startup")
 async def startup_event():
     """Initialize resources when FastAPI app starts"""
-    global cleanup_task, adaptive_tracker
+    global cleanup_task, startup_time
+    startup_time = time.time()
     
     # Verify database integrity before proceeding
     if not verify_database_health():
-        print("[WARNING] Database health check failed - app may not function correctly")
-        print("   Try running: python migrate_to_sqlite.py")
-    
+        logger.warning("[WARNING] Database health check failed - app may not function correctly")
+        logger.warning("   Try running: python migrate_to_sqlite.py")
+
+    # Create daily backup if backup enabled
+    if CONFIG['retention']['backup_enabled']:
+        backup_type = CONFIG['retention']['backup_schedule']
+        if backup_type in ['daily', 'weekly']:
+            # Check if backup already exists today
+            import glob
+            today = datetime.now().strftime("%Y-%m-%d")
+            existing_backups = glob.glob(os.path.join(DATA_DIR, "backups", f"neuralrp_{today}_*.db*"))
+
+            if not existing_backups:
+                logger.info("Creating daily backup...")
+                create_backup("daily", compress=True)
+
+        # Rotate old backups
+        retention_days = CONFIG['retention']['backup_retention_days']
+        rotate_backups(retention_days)
+
     # Check for external AI services
-    print("\n[CHECK] Checking for AI services...")
+    logger.info("Checking for AI services...")
     await check_ai_services()
-    
+
     # Auto-import any new JSON files dropped into folders
-    print("Scanning for new JSON files to import...")
+    logger.info("Scanning for new JSON files to import...")
     auto_import_json_files()
-    
+
     # Populate FTS5 search index with existing messages (one-time migration)
-    print("Running FTS5 search index migration...")
+    logger.info("Running FTS5 search index migration...")
     migrate_populate_fts()
-    
+
     # Clean up old autosaved chats and empty chats on startup
-    print("Running chat cleanup on startup...")
+    logger.info("Running chat cleanup on startup...")
     old_chats = db_cleanup_old_autosaved_chats(days=7)
     empty_chats = db_cleanup_empty_chats()
-    
+
     # Load semantic search model before initializing adaptive tracker
-    print("Loading semantic search model...")
+    logger.info("Loading semantic search model...")
     if semantic_search_engine.load_model():
-        print("Semantic search model loaded successfully")
+        logger.info("Semantic search model loaded successfully")
     else:
-        print("Warning: Failed to load semantic search model - some features may be unavailable")
-    
-    # Initialize adaptive relationship tracker with shared semantic model
-    print("Initializing adaptive relationship tracker...")
-    if initialize_adaptive_tracker(semantic_search_engine):
-        print("[ADAPTIVE_TRACKER] Ready - Three-tier detection system active")
-    else:
-        print("[ADAPTIVE_TRACKER] Warning: Could not initialize - semantic model not loaded")
+        logger.warning("Failed to load semantic search model - some features may be unavailable")
 
     # Initialize snapshot feature (v1.9.0)
-    print("Initializing snapshot feature...")
+    logger.info("Initializing snapshot feature...")
     global snapshot_analyzer, prompt_builder, snapshot_http_client
     snapshot_http_client = httpx.AsyncClient(timeout=10.0)
     snapshot_analyzer = SnapshotAnalyzer(
@@ -2526,31 +2229,51 @@ async def startup_event():
         config=CONFIG
     )
     prompt_builder = SnapshotPromptBuilder()
-    print("[SNAPSHOT] Snapshot feature initialized")
+    logger.info("[SNAPSHOT] Snapshot feature initialized")
 
     # Migrate danbooru tags on first run
-    print("Checking danbooru tags migration...")
+    logger.info("Checking danbooru tags migration...")
     db_migrate_danbooru_tags()
 
     # Start periodic cleanup task when app starts
     cleanup_task = asyncio.create_task(periodic_cleanup())
-    print("Periodic cleanup task started")
+    logger.info("Periodic cleanup task started")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when the FastAPI app shuts down"""
     global cleanup_task, snapshot_http_client
+
+    print("[SHUTDOWN] Cleaning up resources...")
+
+    # Cancel cleanup task
     if cleanup_task:
-        # Cancel the cleanup task
         cleanup_task.cancel()
         try:
             await cleanup_task
         except asyncio.CancelledError:
-            print("Periodic cleanup task cancelled")
+            logger.info("[SHUTDOWN] Periodic cleanup task cancelled")
+
     # Close snapshot HTTP client
     if snapshot_http_client:
         await snapshot_http_client.aclose()
-        print("[SNAPSHOT] HTTP client closed")
+        logger.info("[SHUTDOWN] Snapshot HTTP client closed")
+
+    # Close database connections
+    logger.info("[SHUTDOWN] Closing database connections...")
+    try:
+        from app.database import close_connection, get_connection_stats
+
+        close_connection()
+
+        stats = get_connection_stats()
+        logger.info(f"[SHUTDOWN] Connection stats: {stats}")
+
+        logger.info("[SHUTDOWN] Database connection closed")
+    except Exception as e:
+        logger.warning(f"[SHUTDOWN] Error closing database: {e}")
+
+    print("[SHUTDOWN] Cleanup complete")
 
 def preprocess_world_info(world_info):
     """Pre-process world info for case-insensitive matching"""
@@ -2863,7 +2586,7 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     settings = request.settings
     system_prompt = settings.get("system_prompt", CONFIG["system_prompt"])
     user_persona = settings.get("user_persona", "")
-    user_name = settings.get("user_name", "")  # Get userName for relationships
+    user_name = settings.get("user_name", "")
     summary = request.summary or ""
     mode = request.mode or "narrator"
     
@@ -2884,8 +2607,7 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     is_narrator_mode = not request.characters
     
     # Collect active character names early for mode instruction
-    # ⚠️ CRITICAL: Always use get_character_name() for consistency with relationship tracking
-    # DO NOT: char['data']['name'] or name.split()[0] (first-name extraction breaks relationships)
+    # ⚠️ CRITICAL: Always use get_character_name() - DO NOT: char['data']['name'] or name.split()[0]
     active_names = []
     for char_obj in request.characters:
         active_names.append(get_character_name(char_obj))
@@ -3089,18 +2811,6 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     if canon_law_entries and world_reinforce_freq > 0 and should_show_canon_law(current_turn, world_reinforce_freq):
         full_prompt += "\n### Canon Law (World Rules):\n" + "\n".join(canon_law_entries) + "\n"
 
-    # === 8.5. RELATIONSHIP CONTEXT (character-to-character and character-to-user dynamics) ===
-    # Only inject if there are characters to have relationships
-    if request.chat_id and (request.characters or user_name):
-        relationship_context = get_relationship_context(
-            chat_id=request.chat_id,
-            character_objs=request.characters,  # Full character objects for entity ID extraction
-            user_name=user_name,
-            recent_messages=request.messages[-10:]  # Last 10 messages for relevance filtering
-        )
-
-        if relationship_context:
-            full_prompt += relationship_context + "\n"
 
     # === 9. CONTINUE HINT + LEAD-IN ===
     if is_single_char:
@@ -3262,7 +2972,7 @@ async def generate_scene_capsule(
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
-                f"{CONFIG['kobold_url']}/api/v1/generate",
+                f"{CONFIG['kobold']['url']}/api/v1/generate",
                 json={
                     "prompt": prompt,
                     "max_length": 200,
@@ -3324,7 +3034,7 @@ async def trigger_cast_change_summarization(
         existing_summary = chat.get('summary', '')
         new_summary = (existing_summary + "\n\n" + scene_capsule).strip()
         chat['summary'] = new_summary
-        chat['messages'] = [m.dict() for m in recent]
+        chat['messages'] = [m.model_dump() for m in recent]
         db_save_chat(chat_id, chat)
 
         logger.info(f"Cast-change summarization completed for chat {chat_id} ({len(old)} messages, truncated to {len(recent)} active)")
@@ -3384,7 +3094,7 @@ async def trigger_threshold_summarization(
         combined_capsules = "\n\n".join(capsules)
         new_summary = (existing_summary + "\n\n" + combined_capsules).strip()
         chat['summary'] = new_summary
-        chat['messages'] = [m.dict() for m in recent]
+        chat['messages'] = [m.model_dump() for m in recent]
         db_save_chat(chat_id, chat)
 
         logger.info(f"Threshold summarization completed for chat {chat_id} ({len(scenes)} scenes, {len(old)} messages, truncated to {len(recent)} active)")
@@ -3524,9 +3234,9 @@ async def call_llm_helper(system_prompt: str, user_prompt: str, max_tokens: int 
                 "temperature": 0.7,
                 "stop_sequence": ["###", "<|im_end|>", "\n\n\n", "User:", "Assistant:"]
             }
-            print(f"DEBUG LLM CALL: {KOBOLD_API_URL if 'KOBOLD_API_URL' in globals() else CONFIG['kobold_url']}/api/v1/generate")
+            print(f"DEBUG LLM CALL: {KOBOLD_API_URL if 'KOBOLD_API_URL' in globals() else CONFIG['kobold']['url']}/api/v1/generate")
             res = await client.post(
-                f"{CONFIG['kobold_url']}/api/v1/generate",
+                f"{CONFIG['kobold']['url']}/api/v1/generate",
                 json=payload,
                 timeout=120.0
             )
@@ -3665,11 +3375,6 @@ async def generate_card_field(req: CardGenRequest):
             # Update char_name with resolved name
             char_name = generated_name
             print(f"[NPC_CREATE] Final NPC name: {char_name}")
-            
-            # Generate unique entity_id for NPC
-            from app.database import generate_entity_id
-            entity_id = f"npc_{int(time.time())}_{generate_entity_id()}"
-            print(f"[NPC_CREATE] Step 5a: Generated unique entity_id: {entity_id}")
             
             print(f"[NPC_CREATE] Step 6: Starting LLM generation for character card")
             # Generate character card fields for NPC using LLM
@@ -4602,13 +4307,21 @@ async def check_kobold_health():
     start_time = time.time()
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(f"{CONFIG['kobold_url']}/api/v1/info")
+            # Use /api/latest/model endpoint which is more reliable than /api/v1/info
+            response = await client.get(f"{CONFIG['kobold']['url']}/api/latest/model")
             latency = int((time.time() - start_time) * 1000)
-            service_status["kobold"] = ServiceStatus(
-                status="connected",
-                details="KoboldCpp API responding",
-                latency_ms=latency
-            )
+            if response.status_code == 200:
+                service_status["kobold"] = ServiceStatus(
+                    status="connected",
+                    details="KoboldCpp API responding",
+                    latency_ms=latency
+                )
+            else:
+                service_status["kobold"] = ServiceStatus(
+                    status="disconnected",
+                    details=f"KoboldCpp returned status {response.status_code}",
+                    latency_ms=latency
+                )
             return service_status["kobold"]
     except httpx.TimeoutException:
         service_status["kobold"] = ServiceStatus(
@@ -4631,7 +4344,7 @@ async def check_sd_health():
     start_time = time.time()
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            response = await client.get(f"{CONFIG['sd_url']}/sdapi/v1/sd-models")
+            response = await client.get(f"{CONFIG['stable_diffusion']['url']}/sdapi/v1/sd-models")
             latency = int((time.time() - start_time) * 1000)
             service_status["sd"] = ServiceStatus(
                 status="connected",
@@ -4656,11 +4369,149 @@ async def check_sd_health():
 
 @app.get("/api/health/status")
 async def get_service_status():
-    """Get current status of all services"""
-    return {
-        "kobold": service_status["kobold"],
-        "sd": service_status["sd"]
-    }
+    """
+    Get comprehensive system status including:
+    - Service health (Kobold, SD)
+    - Database health (size, table counts, connections)
+    - Storage (disk space, data directory size)
+    - Maintenance status (backup, cleanup, vacuum)
+    - Application info (version, uptime)
+    """
+    try:
+        import shutil
+        import platform
+        from app.database import DB_PATH
+        from app.backup_manager import list_backups
+
+        # Service status
+        status = {
+            "services": {
+                "kobold": {
+                    "status": service_status["kobold"].status,
+                    "url": CONFIG['kobold']['url']
+                },
+                "sd": {
+                    "status": service_status["sd"].status,
+                    "url": CONFIG['stable_diffusion']['url']
+                }
+            },
+            "database": {},
+            "storage": {},
+            "maintenance": {},
+            "application": {}
+        }
+
+        # Database health
+        try:
+            db_size_bytes = os.path.getsize(DB_PATH)
+            db_size_mb = db_size_bytes / (1024 * 1024)
+
+            table_counts = {}
+            with get_connection() as conn:
+                cursor = conn.cursor()
+
+                tables = ['chats', 'messages', 'characters', 'chat_npcs',
+                          'world_entries', 'change_log',
+                          'performance_metrics', 'danbooru_tags']
+
+                for table in tables:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    table_counts[table] = count
+
+            status["database"] = {
+                "size_mb": round(db_size_mb, 2),
+                "path": DB_PATH,
+                "tables": table_counts
+            }
+
+        except Exception as e:
+            status["database"] = {
+                "error": str(e)
+            }
+
+        # Storage health
+        try:
+            disk_usage = shutil.disk_usage(DATA_DIR)
+            total_gb = disk_usage.total / (1024**3)
+            free_gb = disk_usage.free / (1024**3)
+            used_gb = disk_usage.used / (1024**3)
+            usage_percent = (used_gb / total_gb) * 100
+
+            # Calculate data directory size
+            data_size_bytes = 0
+            for dirpath, dirnames, filenames in os.walk(DATA_DIR):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if os.path.exists(fp):
+                        data_size_bytes += os.path.getsize(fp)
+
+            data_size_mb = data_size_bytes / (1024 * 1024)
+
+            status["storage"] = {
+                "disk_free_gb": round(free_gb, 2),
+                "disk_total_gb": round(total_gb, 2),
+                "disk_used_gb": round(used_gb, 2),
+                "disk_usage_percent": round(usage_percent, 2),
+                "data_dir_size_mb": round(data_size_mb, 2),
+                "data_dir_path": DATA_DIR
+            }
+
+        except Exception as e:
+            status["storage"] = {
+                "error": str(e)
+            }
+
+        # Maintenance status
+        try:
+            backups = list_backups()
+
+            status["maintenance"] = {
+                "backup_enabled": CONFIG['retention']['backup_enabled'],
+                "backup_count": len(backups),
+                "last_backup": backups[0]["date"] if backups else None,
+                "last_backup_size_mb": backups[0]["size_mb"] if backups else None,
+                "cleanup_status": "running",
+                "cleanup_last_run": getattr(periodic_cleanup, '_daily_counter', None),
+                "vacuum_interval_days": CONFIG['retention']['vacuum_interval_days']
+            }
+
+        except Exception as e:
+            status["maintenance"] = {
+                "error": str(e)
+            }
+
+        # Application info
+        try:
+            uptime_seconds = time.time() - startup_time if 'startup_time' in globals() else 0
+            uptime_str = f"{int(uptime_seconds // 3600)}h {int((uptime_seconds % 3600) // 60)}m"
+
+            status["application"] = {
+                "version": "2.0.0",
+                "uptime": uptime_str,
+                "uptime_seconds": round(uptime_seconds, 2),
+                "python_version": platform.python_version(),
+                "platform": platform.system(),
+                "log_level": CONFIG['server']['log_level']
+            }
+
+        except Exception as e:
+            status["application"] = {
+                "error": str(e)
+            }
+
+        return {
+            "success": True,
+            "status": status,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get system status: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @app.post("/api/health/test-all")
 async def test_all_services():
@@ -4692,7 +4543,7 @@ async def toggle_performance_mode(request: dict):
     """Enable or disable performance mode"""
     enabled = request.get("enabled", True)
     resource_manager.performance_mode_enabled = enabled
-    CONFIG["performance_mode_enabled"] = enabled
+    CONFIG["features"]["performance_mode_enabled"] = enabled
     return {"success": True, "enabled": enabled}
 
 @app.post("/api/performance/dismiss-hint")
@@ -4814,13 +4665,16 @@ async def chat(request: PromptRequest):
                         if npc_data:
                             # Normalize to ensure all V2 fields (including extensions.gender)
                             npc_data_normalized = normalize_character_v2({'data': npc_data['data']})['data']
+                            # Preserve is_active status from the character object being replaced
+                            existing_is_active = char.get('is_active')
                             request.characters[i] = {
                                 'name': npc_data['name'],
                                 'data': npc_data_normalized,
                                 '_filename': npc_data['_filename'],
                                 'entity_id': entity_id,
                                 'is_npc': True,
-                                'updated_at': npc_data.get('updated_at', 0)
+                                'updated_at': npc_data.get('updated_at', 0),
+                                'is_active': existing_is_active if existing_is_active is not None else True
                             }
                             npcs_updated += 1
 
@@ -4914,8 +4768,8 @@ async def chat(request: PromptRequest):
         ]
 
     # Check for summarization need
-    max_ctx = request.settings.get("max_context", CONFIG['max_context'])
-    threshold = request.settings.get("summarize_threshold", CONFIG['summarize_threshold'])
+    max_ctx = request.settings.get("max_context", CONFIG['context']['max_context'])
+    threshold = request.settings.get("summarize_threshold", CONFIG['context']['summarize_threshold'])
     
     current_request = request
     new_summary = request.summary or ""
@@ -4929,18 +4783,7 @@ async def chat(request: PromptRequest):
     # - Threshold: trigger_threshold_summarization() (scene grouping, multiple capsules)
     # Both run as asyncio.create_task() - non-blocking, best-effort
 
-    # === RELATIONSHIP ANALYSIS (Step 5 of relationship tracker) ===
-    # Trigger relationship analysis at summarization boundary
-    # Pass full character objects (not just names) for entity ID extraction
-    user_name = request.settings.get("user_name", "")
 
-    await analyze_and_update_relationships(
-        chat_id=current_request.chat_id,
-        messages=current_request.messages,
-        character_objs=request.characters,
-        user_name=user_name
-    )
-    
     # === SAVE METADATA UPDATES TO CHAT ===
     # Save updated character first turn numbers and cast tracking to chat metadata
     if request.chat_id and (character_first_turns or character_full_card_turns or cast_metadata_updates):
@@ -5027,7 +4870,7 @@ async def chat(request: PromptRequest):
     async def llm_operation():
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{CONFIG['kobold_url']}/api/v1/generate",
+                f"{CONFIG['kobold']['url']}/api/v1/generate",
                 json={
                     "prompt": prompt,
                     "max_length": max_len,
@@ -5040,11 +4883,15 @@ async def chat(request: PromptRequest):
             
             # Clean any reinforcement markers that may have leaked into the response
             if "results" in data and len(data["results"]) > 0:
-                data["results"][0]["text"] = clean_llm_response(data["results"][0]["text"])
+                original_text = data["results"][0]["text"]
+                cleaned_text = clean_llm_response(original_text)
+                print(f"[LLM DEBUG] Original: {repr(original_text[:200])}")
+                print(f"[LLM DEBUG] Cleaned: {repr(cleaned_text[:200])}")
+                data["results"][0]["text"] = cleaned_text
             
             # Wrap response to include potential state updates (summary/truncated messages)
             data["_updated_state"] = {
-                "messages": [m.dict() for m in current_request.messages],
+                "messages": [m.model_dump() for m in current_request.messages],
                 "summary": current_request.summary
             }
             # Include token count for frontend to use in SD optimization
@@ -5087,7 +4934,7 @@ async def chat(request: PromptRequest):
             # Include chat_id in response (frontend will handle autosave after adding AI message)
             data["_chat_id"] = current_request.chat_id
             data["_updated_state"] = {
-                "messages": [m.dict() for m in current_request.messages],
+                "messages": [m.model_dump() for m in current_request.messages],
                 "summary": current_request.summary
             }
 
@@ -5104,7 +4951,7 @@ async def chat(request: PromptRequest):
                 )
 
             # 2. Threshold-based summarization
-            max_context = request.settings.get('max_context', CONFIG['max_context'])
+            max_context = request.settings.get('max_context', CONFIG['context']['max_context'])
             all_messages_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in current_request.messages])
             all_messages_tokens = await get_token_count(all_messages_text)
             existing_summary_tokens = await get_token_count(current_request.summary or "")
@@ -5120,17 +4967,50 @@ async def chat(request: PromptRequest):
             updated_chat = db_get_chat(current_request.chat_id)
             if updated_chat:
                 data["_updated_state"]["summary"] = updated_chat.get('summary', '')
-                data["_updated_state"]["messages"] = [m.dict() for m in [ChatMessage(**msg) for msg in updated_chat.get('messages', [])]]
+                data["_updated_state"]["messages"] = [m.model_dump() for m in [ChatMessage(**msg) for msg in updated_chat.get('messages', [])]]
 
             return data
         except Exception as e:
             duration = time.time() - start_time
             performance_tracker.record_llm(duration, context_tokens=tokens)
-            return {"error": str(e)}
+            # Ensure _chat_id is always returned, even on error
+            error_chat_id = current_request.chat_id or f"new_chat_{int(time.time())}"
+            print(f"[ERROR] Exception in performance mode enabled path: {e}")
+            return {
+                "error": str(e),
+                "_chat_id": error_chat_id,
+                "_updated_state": {
+                    "messages": [m.model_dump() for m in current_request.messages],
+                    "summary": current_request.summary
+                }
+            }
     else:
         # Direct call when performance mode is disabled
         try:
             response = await llm_operation()
+
+            # Handle chat_id properly - only generate NEW if truly missing, not if invalid
+            if not current_request.chat_id:
+                # No chat_id at all - generate new one
+                current_request.chat_id = f"new_chat_{int(time.time())}"
+            else:
+                # Check if chat_id exists in database
+                try:
+                    existing_chat = db_get_chat(current_request.chat_id)
+                    if existing_chat is None:
+                        # chat_id was provided but doesn't exist in DB
+                        # This can happen after browser refresh with stale ID
+                        # Generate a new ID and log it
+                        new_id = f"new_chat_{int(time.time())}"
+                        print(f"Chat ID {current_request.chat_id} not found in DB, generating new: {new_id}")
+                        current_request.chat_id = new_id
+                except Exception as e:
+                    print(f"Error checking chat existence: {e}")
+                    # If check fails, generate new ID to be safe
+                    current_request.chat_id = f"new_chat_{int(time.time())}"
+
+            # Include chat_id in response (frontend will handle autosave after adding AI message)
+            response["_chat_id"] = current_request.chat_id
 
             # Phase 4: SYNCHRONOUS SUMMARIZATION (before return)
             # Both triggers independent - can run same turn
@@ -5145,7 +5025,7 @@ async def chat(request: PromptRequest):
                 )
 
             # 2. Threshold-based summarization
-            max_context = request.settings.get('max_context', CONFIG['max_context'])
+            max_context = request.settings.get('max_context', CONFIG['context']['max_context'])
             all_messages_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in current_request.messages])
             all_messages_tokens = await get_token_count(all_messages_text)
             ai_response_text = response.get("results", [{}])[0].get("text", "")
@@ -5167,7 +5047,17 @@ async def chat(request: PromptRequest):
 
             return response
         except Exception as e:
-            return {"error": str(e)}
+            # Ensure _chat_id is always returned, even on error
+            error_chat_id = current_request.chat_id or f"new_chat_{int(time.time())}"
+            print(f"[ERROR] Exception in performance mode disabled path: {e}")
+            return {
+                "error": str(e),
+                "_chat_id": error_chat_id,
+                "_updated_state": {
+                    "messages": [m.model_dump() for m in current_request.messages],
+                    "summary": current_request.summary
+                }
+            }
 
 @app.post("/api/extra/tokencount")
 async def proxy_tokencount(request: dict):
@@ -5224,8 +5114,9 @@ async def generate_image(params: SDParams):
 
     # Define the SD operation to be managed
     async def sd_operation():
-        # Apply context-aware preset if performance mode is enabled
-        if resource_manager.performance_mode_enabled:
+        # Apply context-aware preset if performance mode is enabled and not skipping preset
+        preset = None
+        if resource_manager.performance_mode_enabled and not params.skip_preset:
             preset = select_sd_preset(context_tokens)
             # Use preset values only if user hasn't changed from defaults
             final_steps = preset["steps"] if params.steps == 20 else params.steps
@@ -5235,7 +5126,7 @@ async def generate_image(params: SDParams):
             final_steps = params.steps
             final_width = params.width
             final_height = params.height
-        
+
         async with httpx.AsyncClient() as client:
             payload = {
                 "prompt": processed_prompt,
@@ -5247,10 +5138,11 @@ async def generate_image(params: SDParams):
                 "sampler_name": params.sampler_name,
                 "scheduler": params.scheduler
             }
-            print(f"SD Prompt Construction (preset applied: {preset if resource_manager.performance_mode_enabled else 'user'}): {processed_prompt}")
-            
+            preset_info = preset if preset else 'user'
+            print(f"SD Prompt Construction (preset applied: {preset_info}): {processed_prompt}")
+
             response = await client.post(
-                f"{CONFIG['sd_url']}/sdapi/v1/txt2img",
+                f"{CONFIG['stable_diffusion']['url']}/sdapi/v1/txt2img",
                 json=payload,
                 timeout=120.0
             )
@@ -5387,7 +5279,7 @@ async def infer_character_counts_from_conversation(
     Returns:
         Count tags string (e.g., "2girls, 1boy") or "" if inference fails
     """
-    if not http_client or not config.get('kobold_url'):
+    if not http_client or not config.get('kobold', {}).get('url'):
         print("[SNAPSHOT] LLM unavailable, cannot infer character counts")
         return ""
     
@@ -5416,7 +5308,7 @@ Answer:"""
 
     try:
         response = await http_client.post(
-            f"{config['kobold_url']}/api/v1/generate",
+            f"{config.get('kobold', {}).get('url', '')}/api/v1/generate",
             json={
                 "prompt": prompt,
                 "max_length": 30,
@@ -5425,9 +5317,10 @@ Answer:"""
             },
             timeout=15.0
         )
-        
+
         result = response.json().get('results', [{}])[0].get('text', '').strip()
         print(f"[SNAPSHOT] LLM inferred counts: {result}")
+
         
         include_user = chat_settings.get('include_user_in_snapshots', False)
         if include_user:
@@ -5485,8 +5378,8 @@ def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_ca
     
     for char_ref in active_chars[:max_chars]:
         if char_ref.startswith('npc_'):
-            # Load NPC from metadata
-            npc_data = localnpcs.get(char_ref, {})
+            # Load NPC from unified characters table (v1.12.0+)
+            npc_data = db_get_character(char_ref, chat_id=chat['id'])
             if not npc_data:
                 continue
             data = npc_data.get('data', {})
@@ -5500,19 +5393,16 @@ def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_ca
                 'danbooru_tag': extensions.get('danbooru_tag', '')
             }
             
-            # Add visual_canon data if requested (NEW)
+            # Add visual_canon data if requested (already mirrored by db_get_character)
             if include_visual_canon:
-                from app.database import db_get_npc_visual_canon
-                visual_canon = db_get_npc_visual_canon(chat['id'], char_ref)
-                if visual_canon:
-                    char_dict['visual_canon_id'] = visual_canon['visual_canon_id']
-                    char_dict['visual_canon_name'] = visual_canon['visual_canon_name']
-                    char_dict['visual_canon_tags'] = visual_canon['visual_canon_tags']
+                if extensions.get('visual_canon_id'):
+                    char_dict['visual_canon_id'] = extensions['visual_canon_id']
+                    char_dict['visual_canon_name'] = extensions.get('visual_canon_name', '')
+                    char_dict['visual_canon_tags'] = extensions.get('visual_canon_tags', '')
             
             chars_data.append(char_dict)
         else:
             # Load global character from database
-            from app.database import db_get_character
             char_data = db_get_character(char_ref)
             if not char_data:
                 continue
@@ -5744,11 +5634,6 @@ async def generate_chat_snapshot(request: SnapshotRequest):
                 'include_user': True
             }
             print(f"[SNAPSHOT DEBUG] user_data created: {user_data}")
-            user_data = {
-                'gender': chat_settings.get('user_gender', ''),
-                'danbooru_tag': chat_settings.get('user_danbooru_tag', ''),
-                'include_user': True
-            }
             print(f"[SNAPSHOT] Including user in snapshot: gender={user_data['gender']}")
         
         # Filter characters for danbooru tags and counting based on mode
@@ -5821,7 +5706,8 @@ async def generate_chat_snapshot(request: SnapshotRequest):
             cfg_scale=7.0,
             sampler_name='Euler a',
             scheduler='Automatic',
-            context_tokens=context_tokens
+            context_tokens=0,
+            skip_preset=True     # Always use Vision sequence dimensions
         )
 
         image_result = await generate_image(sd_params)
@@ -5876,13 +5762,6 @@ class SnapshotSettingsRequest(BaseModel):
     include_user_in_snapshots: bool = False
     user_gender: str = ""
     user_danbooru_tag: str = ""
-
-
-class SnapshotRegenerateRequest(BaseModel):
-    """Request model for regenerating snapshot."""
-    width: Optional[int] = None  # Image width
-    height: Optional[int] = None  # Image height
-    negative_prompt: Optional[str] = None  # Use manual generation negative prompt if provided
 
 
 @app.post("/api/chats/{chat_id}/snapshot-settings")
@@ -5944,171 +5823,7 @@ class SnapshotFavoriteRequest(BaseModel):
     width: int = 512
     height: int = 512
     note: Optional[str] = None
-
-
-@app.post("/api/chat/{chat_id}/snapshot/regenerate")
-async def regenerate_snapshot(chat_id: str, request: SnapshotRegenerateRequest):
-    """
-    Regenerate snapshot with variation mode enabled.
-
-    Uses variation mode scene analysis (no examples in LLM prompt) to generate
-    alternative interpretations of current scene, while maintaining the same
-    character tags, visual canon data, and user settings. Variation emerges
-    from lack of example priming, not from temperature changes.
-    """
-    try:
-        # Load chat
-        chat = db_get_chat(chat_id)
-        if not chat:
-            return {"error": "Chat not found"}
-
-        messages = chat.get('messages', [])
-
-        # RELOAD chat from database to get latest snapshot settings
-        # Settings may have been updated via /api/chats/{id}/snapshot-settings endpoint
-        chat = db_get_chat(chat_id)
-        if chat:
-            chat_settings = chat.get('metadata', {}).get('snapshot_settings', {})
-            print(f"[SNAPSHOT VARIATION] Chat reloaded from database, snapshot settings: {chat_settings}")
-        else:
-            chat_settings = {}
-            print(f"[SNAPSHOT VARIATION] Chat reload failed, using empty settings")
-
-        # Build user data for snapshot if enabled
-        user_data = None
-        include_user = chat_settings.get('include_user_in_snapshots', False)
-        if include_user:
-            user_data = {
-                'gender': chat_settings.get('user_gender', ''),
-                'danbooru_tag': chat_settings.get('user_danbooru_tag', ''),
-                'include_user': True
-            }
-            print(f"[SNAPSHOT VARIATION] Including user in variation: {user_data}")
-
-        # Extract active characters' gender and danbooru tags WITH visual canon data (NEW)
-        chars_data = get_active_characters_data(chat, max_chars=3, include_visual_canon=True)
-        
-        # Auto-count characters by gender
-        user_gender = user_data.get('gender') if user_data else None
-        count_tags = auto_count_characters_by_gender(chars_data, user_gender=user_gender, include_user=bool(user_data))
-        print(f"[SNAPSHOT VARIATION] Auto-counted: {count_tags}")
-
-        # Aggregate danbooru tags with gender override
-        character_tags = aggregate_danbooru_tags(chars_data, override_count=count_tags if count_tags else None)
-        print(f"[SNAPSHOT VARIATION] Aggregated tags: {character_tags}")
-        
-        # Extract character names for name-stripping (prevents name leakage to LLM)
-        character_names = [c.get('name', '') for c in chars_data if c.get('name')]
-
-        # Determine primary character for variation mode (default to first active character or narrator if no focus)
-        primary_char_name = None
-        primary_char_card = None
-        if character_names:
-            primary_char_name = character_names[0]  # Default to first character
-
-            for char_data in chars_data:
-                if char_data.get('name') == primary_char_name:
-                    # Parse PList-formatted description and personality
-                    description = char_data.get('description', '')
-                    personality = char_data.get('personality', '')
-
-                    # Extract traits from PList format
-                    desc_traits = parse_physical_body_plist(description)
-                    person_traits = parse_personality_plist(personality)
-
-                    # Build clean card
-                    desc_text = ', '.join(desc_traits) if desc_traits else description
-                    person_text = person_traits if person_traits else personality
-
-                    primary_char_card = desc_text + ' ' + person_text
-
-                    # Strip character names from description and personality
-                    primary_char_card = snapshot_analyzer._strip_character_names(primary_char_card, [primary_char_name])
-                    break
-
-        print(f"[SNAPSHOT VARIATION] Primary character: {primary_char_name}")
-
-        # Analyze scene using VARIATION mode (creative interpretation, temperature 0.8)
-        scene_analysis = await snapshot_analyzer.analyze_scene_variation(
-            messages, chat_id, character_names=character_names,
-            primary_character=primary_char_name,
-            primary_character_card=primary_char_card
-        )
-        
-        # Extract scene JSON for simplified prompt building
-        scene_json = scene_analysis.get('scene_json', {})
-        
-        # Build character tags list from aggregated tags
-        char_tags = []
-        if character_tags:
-            char_tags = [t.strip() for t in character_tags.split(',') if t.strip()]
-
-        # Build user tags list from user_data if present
-        user_tags = []
-        if user_data and user_data.get('danbooru_tag'):
-            user_tags = [t.strip() for t in user_data['danbooru_tag'].split(',') if t.strip()]
-
-        # Build prompt using simplified builder
-        positive_prompt, built_negative_prompt = prompt_builder.build_simple_prompt(
-            scene_json=scene_json,
-            character_tags=char_tags,
-            user_tags=user_tags,
-            character_count_tags=count_tags
-        )
-
-        # Use manual generation negative prompt if provided, otherwise use built negative prompt
-        negative_prompt = request.negative_prompt if request.negative_prompt else built_negative_prompt
-
-        # Generate image
-        sd_params = SDParams(
-            prompt=positive_prompt,
-            negative_prompt=negative_prompt,
-            steps=20,
-            width=request.width if request.width else 512,
-            height=request.height if request.height else 512,
-            cfg_scale=7.0,
-            sampler_name='Euler a',
-            scheduler='Automatic',
-            context_tokens=0
-        )
-
-        image_result = await generate_image(sd_params)
-
-        if "error" in image_result:
-            return {"error": image_result["error"]}
-
-        # Save to snapshot history
-        snapshot_data = {
-            "timestamp": int(time.time()),
-            "image_url": image_result["url"],
-            "prompt": positive_prompt,
-            "negative_prompt": negative_prompt,
-            "scene_analysis": scene_analysis,
-            "characters": [{"name": c["name"], "gender": c["gender"]} for c in chars_data],
-            "mode": "variation"
-        }
-
-        chat_metadata = chat.get('metadata', {})
-        if 'snapshot_history' not in chat_metadata:
-            chat_metadata['snapshot_history'] = []
-        chat_metadata['snapshot_history'].append(snapshot_data)
-        chat['metadata'] = chat_metadata
-
-        db_save_chat(chat_id, chat)
-
-        return {
-            "success": True,
-            "image_url": image_result["url"],
-            "prompt": positive_prompt,
-            "negative_prompt": negative_prompt,
-            "scene_analysis": scene_analysis,
-            "mode": "variation"
-        }
-
-    except Exception as e:
-        logger.error(f"Snapshot regeneration failed: {e}")
-        return {"error": str(e)}
-
+ 
 
 @app.post("/api/chat/{chat_id}/snapshot/favorite")
 async def add_snapshot_favorite(chat_id: str, request: SnapshotFavoriteRequest):
@@ -6351,7 +6066,6 @@ async def assign_visual_canon_character(filename: str, request: VisualCanonReque
             # Sync to JSON file
             import os
             import json
-            from app.database import sync_character_from_json
 
             file_path = os.path.join(DATA_DIR, "characters", filename)
             with open(file_path, "r", encoding="utf-8") as f:
@@ -6408,7 +6122,6 @@ async def reroll_visual_canon_character(filename: str):
             # Sync to JSON file
             import os
             import json
-            from app.database import sync_character_from_json
 
             file_path = os.path.join(DATA_DIR, "characters", filename)
             with open(file_path, "r", encoding="utf-8") as f:
@@ -7131,15 +6844,12 @@ async def list_chats():
                 try:
                     with open(file_path, "r", encoding="utf-8") as chat_file:
                         chat_data = json.load(chat_file)
-                        metadata = chat_data.get("metadata", {})
                         chats.append({
-                            "id": f.replace(".json", ""),
-                            "branch_name": metadata.get("branch_name")
+                            "id": f.replace(".json", "")
                         })
                 except:
                     chats.append({
-                        "id": f.replace(".json", ""),
-                        "branch_name": None
+                        "id": f.replace(".json", "")
                     })
         return chats
 
@@ -7293,263 +7003,6 @@ class NPCPromotionRequest(BaseModel):
     chat_id: str
     npc_id: str
 
-# Forking functionality
-class ForkRequest(BaseModel):
-    origin_chat_name: str
-    fork_from_message_id: int
-    branch_name: Optional[str] = None
-
-@app.post("/api/chats/fork")
-async def fork_chat(request: ForkRequest):
-    """
-    Fork a chat at a specific message.
-    v1.10.4: Complete transaction-based refactor with metadata remapping and validation.
-    """
-    origin_chat_name = request.origin_chat_name
-    fork_from_message_id = request.fork_from_message_id
-    branch_name = request.branch_name
-    branch_chat_id = None
-    
-    try:
-        # 1. Load origin chat
-        origin_chat = db_get_chat(origin_chat_name)
-        if not origin_chat:
-            raise HTTPException(status_code=404, detail="Origin chat not found")
-        
-        # 2. Find fork point and extract messages
-        messages = origin_chat.get('messages', [])
-        fork_index = None
-        for i, msg in enumerate(messages):
-            if msg.get('id') == fork_from_message_id:
-                fork_index = i
-                break
-        
-        if fork_index is None:
-            raise HTTPException(status_code=404, detail="Fork message not found")
-        
-        # 3. Generate branch chat ID
-        branch_chat_id = f"{origin_chat_name}_fork_{int(time.time())}"
-        
-        # 4. Prepare metadata and NPCs
-        branch_metadata = origin_chat.get("metadata", {}).copy()
-        localnpcs = branch_metadata.get("localnpcs", {}).copy()
-        
-        # 5. Remap NPC entity IDs for branch safety
-        entity_mapping = db_remap_entities_for_branch(
-            origin_chat_name,
-            branch_chat_id,
-            localnpcs  # modified in place
-        )
-        
-        print(f"[FORK] Entity mapping created with {len(entity_mapping)} NPCs remapped")
-        for old_id, new_id in entity_mapping.items():
-            print(f"[FORK]   {old_id} -> {new_id}")
-        
-        branch_metadata["localnpcs"] = localnpcs
-        
-        # 6. CRITICAL: Remap metadata entity IDs for characterCapsules
-        old_capsules = branch_metadata.get("characterCapsules", {})
-        if old_capsules:
-            new_capsules = {
-                entity_mapping.get(old_id, old_id): capsule 
-                for old_id, capsule in old_capsules.items()
-            }
-            branch_metadata["characterCapsules"] = new_capsules
-            print(f"[FORK] Remapped {len(old_capsules)} characterCapsules entries")
-        
-        # 7. CRITICAL: Remap metadata entity IDs for characterFirstTurns
-        old_turns = branch_metadata.get("characterFirstTurns", {})
-        if old_turns:
-            new_turns = {
-                entity_mapping.get(old_id, old_id): turn 
-                for old_id, turn in old_turns.items()
-            }
-            branch_metadata["characterFirstTurns"] = new_turns
-            print(f"[FORK] Remapped {len(old_turns)} characterFirstTurns entries")
-        
-        # 8. CRITICAL: Remap metadata entity IDs for cast tracking (Phase 2)
-        # previous_active_cast is a list of entity IDs that may contain NPCs
-        old_active_cast = branch_metadata.get("previous_active_cast", [])
-        if old_active_cast:
-            new_active_cast = [
-                entity_mapping.get(entity_id, entity_id) 
-                for entity_id in old_active_cast
-            ]
-            branch_metadata["previous_active_cast"] = new_active_cast
-            print(f"[FORK] Remapped {len(old_active_cast)} previous_active_cast entries")
-        
-        # previous_focus_character is a single entity ID (or None)
-        old_focus = branch_metadata.get("previous_focus_character")
-        if old_focus:
-            new_focus = entity_mapping.get(old_focus, old_focus)
-        branch_metadata["previous_focus_character"] = new_focus
-        print(f"[FORK] Remapped previous_focus_character: {old_focus} -> {new_focus}")
-        
-        # 9. Execute fork in single atomic transaction
-        branch_data = db_fork_chat_transaction(
-            origin_chat_id=origin_chat_name,
-            branch_chat_id=branch_chat_id,
-            fork_message_id=fork_from_message_id,
-            fork_index=fork_index,
-            origin_chat=origin_chat,
-            entity_mapping=entity_mapping,
-            localnpcs=localnpcs
-        )
-        
-        # 10. Update branch metadata with fork-specific info
-        branch_data['metadata'].update({
-            'origin_chat_id': origin_chat_name,
-            'origin_message_id': fork_from_message_id,
-            'branch_name': branch_name or f"Fork from message {fork_from_message_id}",
-            'created_at': time.time(),
-            'characterCapsules': branch_metadata.get("characterCapsules", {}),
-            'characterFirstTurns': branch_metadata.get("characterFirstTurns", {}),
-            'previous_active_cast': branch_metadata.get("previous_active_cast", []),      # Phase 2
-            'previous_focus_character': branch_metadata.get("previous_focus_character")     # Phase 2
-        })
-        
-        # 10. Save the final branch data
-        db_save_chat(branch_chat_id, branch_data, autosaved=True)
-        
-        # 11. Validation: Check for any "Unknown" entity references
-        validation_issues = []
-        for char_ref in branch_data.get('activeCharacters', []):
-            if char_ref.startswith('npc_') and char_ref not in entity_mapping.values():
-                validation_issues.append(f"NPC {char_ref} not found in entity mapping")
-        
-        if validation_issues:
-            print(f"[FORK WARNING] Validation issues detected:")
-            for issue in validation_issues:
-                print(f"[FORK WARNING]   - {issue}")
-        
-        print(f"[FORK SUCCESS] Created branch {branch_chat_id} from {origin_chat_name} at message {fork_from_message_id}")
-        print(f"[FORK SUCCESS] Remapped {len(entity_mapping)} NPC entity IDs, preserved {len(branch_metadata.get('characterCapsules', {}))} capsules")
-        
-        return JSONResponse({
-            "success": True,
-            "name": branch_chat_id,
-            "branch_name": branch_name,
-            "origin_chat_name": origin_chat_name,
-            "fork_from_message_id": fork_from_message_id,
-            "remapped_entities": len(entity_mapping),
-            "message": f"Forked chat with {len(entity_mapping)} entities remapped"
-        })
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        # Cleanup if branch was partially created
-        if branch_chat_id:
-            try:
-                # Check if chat exists and delete it
-                existing = db_get_chat(branch_chat_id)
-                if existing:
-                    db_delete_chat(branch_chat_id)
-                    print(f"[FORK CLEANUP] Deleted partial branch {branch_chat_id}")
-            except Exception as cleanup_error:
-                print(f"[FORK CLEANUP FAILED] {cleanup_error}")
-        
-        print(f"[FORK ERROR] Fork failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Fork failed: {str(e)}")
-
-@app.get("/api/chats/{name}/branches")
-async def get_chat_branches(name: str):
-    """Get all branches that originated from this chat."""
-    branches = []
-    chat_dir = os.path.join(DATA_DIR, "chats")
-    
-    for f in os.listdir(chat_dir):
-        if f.endswith(".json"):
-            file_path = os.path.join(chat_dir, f)
-            try:
-                with open(file_path, "r", encoding="utf-8") as chat_file:
-                    chat_data = json.load(chat_file)
-                    metadata = chat_data.get("metadata", {})
-                    
-                    # Check if this chat is a branch of the requested chat
-                    if metadata.get("origin_chat_id") == name:
-                        branches.append({
-                            "name": f.replace(".json", ""),
-                            "branch_name": metadata.get("branch_name", f.replace(".json", "")),
-                            "created_at": metadata.get("created_at", 0),
-                            "origin_message_id": metadata.get("origin_message_id")
-                        })
-            except Exception as e:
-                print(f"Failed to load chat {f}: {e}")
-                continue
-    
-    # Sort branches by creation time
-    branches.sort(key=lambda x: x["created_at"], reverse=True)
-    return branches
-
-@app.get("/api/chats/{name}/origin")
-async def get_chat_origin(name: str):
-    """Get origin information for a branch chat."""
-    file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
-    if not os.path.exists(file_path):
-        return {"success": False, "error": "Chat not found"}
-    
-    with open(file_path, "r", encoding="utf-8") as f:
-        chat_data = json.load(f)
-    
-    metadata = chat_data.get("metadata", {})
-    origin_chat_id = metadata.get("origin_chat_id")
-    origin_message_id = metadata.get("origin_message_id")
-    branch_name = metadata.get("branch_name")
-    
-    if not origin_chat_id:
-        return {"success": True, "is_branch": False}
-    
-    # Try to load origin chat to get more info
-    origin_file_path = os.path.join(DATA_DIR, "chats", f"{origin_chat_id}.json")
-    origin_info = None
-    
-    if os.path.exists(origin_file_path):
-        try:
-            with open(origin_file_path, "r", encoding="utf-8") as origin_file:
-                origin_data = json.load(origin_file)
-                origin_info = {
-                    "name": origin_chat_id,
-                    "branch_name": branch_name,
-                    "created_at": metadata.get("created_at"),
-                    "origin_message_id": origin_message_id
-                }
-        except:
-            pass
-    
-    return {
-        "success": True, 
-        "is_branch": True,
-        "origin": origin_info
-    }
-
-@app.put("/api/chats/{name}/rename-branch")
-async def rename_branch(name: str, request: dict):
-    """Rename a branch chat."""
-    branch_name = request.get("branch_name")
-    if not branch_name:
-        return {"success": False, "error": "Branch name is required"}
-    
-    file_path = os.path.join(DATA_DIR, "chats", f"{name}.json")
-    if not os.path.exists(file_path):
-        return {"success": False, "error": "Chat not found"}
-    
-    with open(file_path, "r", encoding="utf-8") as f:
-        chat_data = json.load(f)
-    
-    # Ensure metadata exists
-    if "metadata" not in chat_data:
-        chat_data["metadata"] = {}
-    
-    chat_data["metadata"]["branch_name"] = branch_name
-    
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(chat_data, f, indent=2, ensure_ascii=False)
-    
-    return {"success": True, "branch_name": branch_name}
-
 @app.put("/api/chats/{chat_id}/npcs/{npc_id}")
 async def update_npc(chat_id: str, npc_id: str, request: Request):
     """
@@ -7677,7 +7130,6 @@ async def promote_npc_to_global(chat_id: str, npc_id: str):
             return {"success": False, "error": "Chat not found"}
         
         # 2. Get NPC from database OR metadata
-        from urllib.parse import unquote
         filename = unquote(npc_id)
 
         db_npcs = db_get_chat_npcs(chat_id)
@@ -7694,7 +7146,7 @@ async def promote_npc_to_global(chat_id: str, npc_id: str):
 
             if filename in localnpcs:
                 metadata_npc = localnpcs[filename]
-                npc_data = {...}  # build from localnpcs
+                npc_data = metadata_npc  # build from localnpcs
                 print(f"[NPC_PROMOTE] NPC {filename} found in metadata, proceeding with promotion")
 
         if not npc_data:
@@ -8326,7 +7778,7 @@ async def inpaint_image(request: InpaintRequest):
         # Call SD API
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{CONFIG['sd_url']}/sdapi/v1/img2img",
+                f"{CONFIG['stable_diffusion']['url']}/sdapi/v1/img2img",
                 json=payload,
                 timeout=120.0
             )
@@ -8511,7 +7963,7 @@ async def get_search_filters():
             "success": True,
             "filters": {
                 "speakers": speakers,
-                "chats": [{"id": c['id'], "name": c.get('branch_name') or c['id']} for c in chats]
+                "chats": [{"id": c['id'], "name": c['id']} for c in chats]
             }
         }
     
@@ -9156,6 +8608,280 @@ async def autosummarize_selection(chat_id: str, request: dict):
         return {"success": False, "error": str(e)}
 
 
+# ============================================================================
+# BACKUP MANAGEMENT ENDPOINTS (v1.13.0)
+# ============================================================================
+
+@app.post("/api/system/backup")
+async def create_manual_backup():
+    """Create a manual database backup."""
+    try:
+        backup_path = create_backup("manual", compress=True)
+        if backup_path:
+            return {
+                "success": True,
+                "filename": os.path.basename(backup_path),
+                "path": backup_path
+            }
+        else:
+            return {"success": False, "error": "Failed to create backup"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/system/backups")
+async def list_all_backups():
+    """List all available backups."""
+    try:
+        backups = list_backups()
+        return {
+            "success": True,
+            "backups": backups,
+            "count": len(backups)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/api/system/backups/{filename}")
+async def delete_backup(filename: str):
+    """Delete a specific backup."""
+    try:
+        from app.backup_manager import BACKUP_DIR
+        backup_path = os.path.join(BACKUP_DIR, filename)
+
+        if not os.path.exists(backup_path):
+            return {"success": False, "error": "Backup not found"}
+
+        os.remove(backup_path)
+        return {
+            "success": True,
+            "message": f"Deleted backup: {filename}"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/system/backups/restore/{filename}")
+async def restore_from_backup(filename: str):
+    """
+    Restore database from backup.
+
+    WARNING: This replaces the current database!
+    Creates an emergency backup before restoring.
+    """
+    try:
+        from app.backup_manager import BACKUP_DIR, restore_backup
+        backup_path = os.path.join(BACKUP_DIR, filename)
+
+        success = restore_backup(backup_path)
+
+        if success:
+            return {
+                "success": True,
+                "message": f"Database restored from {filename}"
+            }
+        else:
+            return {"success": False, "error": "Restore failed"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/system/status")
+async def get_system_status():
+    """
+    Get comprehensive system status including:
+    - Service health (Kobold, SD)
+    - Database health (size, table counts, connections)
+    - Storage (disk space, data directory size)
+    - Maintenance status (backup, cleanup, vacuum)
+    - Application info (version, uptime)
+    """
+    try:
+        import shutil
+        import platform
+
+        status = {
+            "services": {},
+            "database": {},
+            "storage": {},
+            "maintenance": {},
+            "application": {}
+        }
+
+        # Service status
+        status["services"] = {
+            "kobold": {
+                "status": service_status["kobold"].status,
+                "url": CONFIG['kobold']['url']
+            },
+            "sd": {
+                "status": service_status["sd"].status,
+                "url": CONFIG['stable_diffusion']['url']
+            }
+        }
+
+        # Database health
+        try:
+            from app.database import DB_PATH, get_connection, get_connection_stats
+
+            db_size_bytes = os.path.getsize(DB_PATH)
+            db_size_mb = db_size_bytes / (1024 * 1024)
+
+            table_counts = {}
+            with get_connection() as conn:
+                cursor = conn.cursor()
+
+                tables = ['chats', 'messages', 'characters', 'chat_npcs',
+                          'world_entries', 'change_log',
+                          'performance_metrics', 'danbooru_tags']
+
+                for table in tables:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    table_counts[table] = count
+
+            status["database"] = {
+                "size_mb": round(db_size_mb, 2),
+                "path": DB_PATH,
+                "tables": table_counts,
+                "connection_stats": get_connection_stats()
+            }
+
+        except Exception as e:
+            status["database"] = {
+                "error": str(e)
+            }
+
+        # Storage health
+        try:
+            disk_usage = shutil.disk_usage(DATA_DIR)
+            total_gb = disk_usage.total / (1024**3)
+            free_gb = disk_usage.free / (1024**3)
+            used_gb = disk_usage.used / (1024**3)
+            usage_percent = (used_gb / total_gb) * 100
+
+            # Calculate data directory size
+            data_size_bytes = 0
+            for dirpath, dirnames, filenames in os.walk(DATA_DIR):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if os.path.exists(fp):
+                        data_size_bytes += os.path.getsize(fp)
+
+            data_size_mb = data_size_bytes / (1024 * 1024)
+
+            status["storage"] = {
+                "disk_free_gb": round(free_gb, 2),
+                "disk_total_gb": round(total_gb, 2),
+                "disk_used_gb": round(used_gb, 2),
+                "disk_usage_percent": round(usage_percent, 2),
+                "data_dir_size_mb": round(data_size_mb, 2),
+                "data_dir_path": DATA_DIR
+            }
+
+        except Exception as e:
+            status["storage"] = {
+                "error": str(e)
+            }
+
+        # Maintenance status
+        try:
+            backups = list_backups()
+
+            status["maintenance"] = {
+                "backup_enabled": CONFIG['retention']['backup_enabled'],
+                "backup_count": len(backups),
+                "last_backup": backups[0]["date"] if backups else None,
+                "last_backup_size_mb": backups[0]["size_mb"] if backups else None,
+                "cleanup_status": "running" if cleanup_task else "not running",
+                "cleanup_last_run": getattr(periodic_cleanup, '_last_run', None),
+                "vacuum_interval_days": CONFIG['retention']['vacuum_interval_days']
+            }
+
+        except Exception as e:
+            status["maintenance"] = {
+                "error": str(e)
+            }
+
+        # Application info
+        try:
+            uptime_seconds = time.time() - startup_time
+            uptime_str = f"{int(uptime_seconds // 3600)}h {int((uptime_seconds % 3600) // 60)}m"
+
+            status["application"] = {
+                "version": "2.0.0",
+                "uptime": uptime_str,
+                "uptime_seconds": round(uptime_seconds, 2),
+                "python_version": platform.python_version(),
+                "platform": platform.system(),
+                "log_level": CONFIG['server']['log_level']
+            }
+
+        except Exception as e:
+            status["application"] = {
+                "error": str(e)
+            }
+
+        return {
+            "success": True,
+            "status": status,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get system status: {e}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+def is_port_in_use(port: int, host: str = '0.0.0.0') -> bool:
+    """Check if a port is already in use on specified host."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return False
+        except OSError:
+            return True
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import socket
+    
+    parser = argparse.ArgumentParser(description='NeuralRP - Roleplay Platform')
+    parser.add_argument('--host', type=str, default=None, help='Host to bind to (overrides config)')
+    parser.add_argument('--port', type=int, default=None, help='Port to bind to (overrides config)')
+    args = parser.parse_args()
+    
+    host = args.host if args.host is not None else CONFIG['server']['host']
+    
+    # Build list of ports to try
+    if args.port is not None:
+        # User explicitly specified a port - use only that port
+        ports_to_try = [args.port]
+    else:
+        # Use configured primary port plus fallbacks
+        ports_to_try = [CONFIG['server']['port']] + CONFIG.get('server', {}).get('fallback_ports', [8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008, 8009, 8010])
+    
+    # Try each port in sequence
+    for port in ports_to_try:
+        if is_port_in_use(port, host):
+            logger.warning(f"Port {port} is in use, trying next available port...")
+            continue
+        
+        logger.info(f"Starting server on {host}:{port}")
+        logger.info(f"Access NeuralRP at: http://{host}:{port}/")
+        uvicorn.run(
+            app,
+            host=host,
+            port=port
+        )
+    
+    # No available port found
+    logger.error(f"Could not find an available port. Tried: {ports_to_try}")
+    logger.error("Please stop the conflicting process or specify a different port with --port")
+    raise OSError(f"All ports busy: {ports_to_try}")

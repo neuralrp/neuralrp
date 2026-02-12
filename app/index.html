@@ -323,15 +323,10 @@
                                 class="text-[9px] font-black uppercase tracking-widest text-slate-500 border-b border-slate-700 pb-1">
                                 Main Timelines</div>
                             <template x-for="chat in savedChats" :key="chat.id">
-                                <div class="group flex items-center gap-2 p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent transition-all"
-                                    :class="isBranch(chat.id) ? 'opacity-75' : ''">
+                                <div class="group flex items-center gap-2 p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent transition-all">
                                     <div @click="loadChat(chat.id)" class="flex-1 min-w-0">
                                         <div class="font-bold text-sm truncate"
-                                            x-text="chat.branch_name || getDisplayName(chat.id)"></div>
-                                        <template x-if="isBranch(chat.id)">
-                                            <div class="text-[9px] text-slate-500 truncate"
-                                                x-text="'Branch of ' + getBranchOrigin(chat.id)"></div>
-                                        </template>
+                                            x-text="getDisplayName(chat.id)"></div>
                                     </div>
                                     <div class="flex gap-1">
                                         <button @click="deleteChat(chat.id)"
@@ -342,39 +337,8 @@
                                 </div>
                             </template>
                         </div>
-
-                        <!-- Branches Section -->
-                        <template x-if="currentChatBranches.length > 0">
-                            <div class="space-y-2">
-                                <div
-                                    class="text-[9px] font-black uppercase tracking-widest text-slate-500 border-b border-slate-700 pb-1">
-                                    Active Branches</div>
-                                <template x-for="branch in currentChatBranches" :key="branch.name">
-                                    <div
-                                        class="group flex items-center gap-2 p-3 bg-slate-700/30 hover:bg-slate-700/60 rounded-xl cursor-pointer border border-transparent transition-all">
-                                        <div @click="loadChat(branch.name)" class="flex-1 min-w-0">
-                                            <div class="font-bold text-sm truncate"
-                                                x-text="branch.branch_name || branch.name"></div>
-                                            <div class="text-[9px] text-slate-500 truncate"
-                                                x-text="'Created ' + formatTime(branch.createdat)"></div>
-                                        </div>
-                                        <div class="flex gap-1">
-                                            <button @click="renameBranchDialog(branch)"
-                                                class="hidden group-hover:flex w-6 h-6 rounded-lg bg-slate-800 hover:bg-yellow-600 text-white items-center justify-center transition-all"
-                                                title="Rename Branch">
-                                                <i class="fa-solid fa-pen text-[10px]"></i>
-                                            </button>
-                                            <button @click="deleteChat(branch.name)"
-                                                class="hidden group-hover:flex w-6 h-6 rounded-lg bg-slate-800 hover:bg-red-600 text-white items-center justify-center transition-all">
-                                                <i class="fa-solid fa-trash text-[10px]"></i>
-                                            </button>
-                        </div>
                     </div>
-                </template>
-            </div>
-        </template>
-    </div>
-</template>
+                            </template>
 
                 <!-- Favorites Viewer Sidebar -->
                 <template x-if="showSidebar === 'favorites'">
@@ -1652,7 +1616,7 @@
                                 class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-blue-500/30">
                                 <option value="">All Chats</option>
                                 <template x-for="chat in savedChats" :key="chat.id">
-                                    <option :value="chat.id" x-text="chat.branch_name || getDisplayName(chat.id)">
+                                    <option :value="chat.id" x-text="getDisplayName(chat.id)">
                                     </option>
                                 </template>
                             </select>
@@ -1713,10 +1677,6 @@
                                             x-text="result.speaker || result.role"></div>
                                         <div class="text-[9px] text-slate-500"
                                             x-text="formatDate(result.timestamp * 1000)"></div>
-                                    </div>
-                                    <div x-show="result.branch_name"
-                                        class="text-[9px] text-green-500 uppercase font-bold">
-                                        📍 <span x-text="result.branch_name"></span>
                                     </div>
                                 </div>
                                 <div class="text-xs text-slate-400 leading-relaxed"
@@ -1863,11 +1823,6 @@
                                                 <i class="fa-solid fa-rotate text-[8px]"></i>
                                             </button>
                                         </template>
-                                        <button @click="openForkDialog(msg.id)"
-                                            class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50"
-                                            title="Fork from here">
-                                            <i class="fa-solid fa-code-branch text-[8px]"></i>
-                                        </button>
                                         <button
                                             @click="editingMessageId = msg.id; editBuffer = msg.content; editingWidth = $el.closest('.max-w-\\[85\\%\\]').offsetWidth + 'px'"
                                             class="w-6 h-6 rounded-full bg-slate-700 hover:bg-blue-600 text-white flex items-center justify-center shadow-lg border border-slate-600 border-opacity-50">
@@ -1999,7 +1954,7 @@
                                                             <button @click="regenerateSnapshot()"
                                                                     class="regenerate-btn"
                                                                     :disabled="isGeneratingSnapshot"
-                                                                    title="Regenerate with variation mode">
+                                                                    title="Regenerate">
                                                                 <i class="fa-solid fa-rotate" :class="{ 'regenerating': isGeneratingSnapshot }"></i>
                                                             </button>
 
@@ -2221,42 +2176,6 @@
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Fork Dialog Modal -->
-    <div x-show="showForkDialog"
-        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak
-        x-transition>
-        <div class="bg-slate-900 border border-slate-700 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden">
-            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
-                <h2 class="text-xs font-black uppercase tracking-widest text-blue-400">Create Branch</h2>
-                <button @click="showForkDialog = false" class="text-slate-400 hover:text-white"><i
-                        class="fa-solid fa-xmark"></i></button>
-            </div>
-            <div class="p-6 space-y-4">
-                <div class="space-y-2">
-                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">Branch Name</label>
-                    <input x-model="forkBranchName"
-                        class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500/30"
-                        placeholder="e.g. 'Accepted the deal' or 'Refused the deal'">
-                </div>
-                <div class="text-[9px] text-slate-500 leading-relaxed">
-                    <p class="font-bold mb-1">Forking creates a new independent chat session</p>
-                    <p>This branch will start from the selected message and maintain all current context (characters,
-                        world info, settings).</p>
-                </div>
-            </div>
-            <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
-                <button @click="createFork()"
-                    class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg shadow-blue-900/20 transition-all"
-                    :disabled="!forkBranchName || isForking">
-                    <span x-show="!isForking">Create Branch</span>
-                    <span x-show="isForking">Creating...</span>
-                </button>
-                <button @click="showForkDialog = false"
-                    class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Cancel</button>
             </div>
         </div>
     </div>
@@ -2886,79 +2805,8 @@
                                             </template>
                                         </div>
                                     </div>
-                                    
-                                    <!-- Rename Branch Dialog -->
-                                    <div x-show="showRenameDialog"
-                                        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak
-                                        x-transition>
-                                        <div class="bg-slate-900 border border-slate-700 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden">
-                                            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
-                                                <h2 class="text-xs font-black uppercase tracking-widest text-blue-400">Rename Branch</h2>
-                                                <button @click="showRenameDialog = false" class="text-slate-400 hover:text-white"><i
-                                                        class="fa-solid fa-xmark"></i></button>
-                                            </div>
-                                            <div class="p-6 space-y-4">
-                                                <div class="space-y-2">
-                                                    <label class="text-[10px] text-slate-500 uppercase font-black tracking-widest">New Branch Name</label>
-                                                    <input x-model="renameBranchName"
-                                                        class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500/30"
-                                                        placeholder="Enter new branch name">
-                                                </div>
-                                            </div>
-                                            <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
-                                                <button @click="renameBranch()"
-                                                    class="flex-1 bg-yellow-600 hover:bg-yellow-500 text-white py-3 rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg shadow-yellow-900/20 transition-all"
-                                                    :disabled="!renameBranchName || isRenaming">
-                                                    <span x-show="!isRenaming">Rename</span>
-                                                    <span x-show="isRenaming">Renaming...</span>
-                                                </button>
-                                                <button @click="showRenameDialog = false"
-                                                    class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Cancel</button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- Branch Management Dialog -->
-                                    <div x-show="showBranchDialog"
-                                        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak
-                                        x-transition>
-                                        <div
-                                            class="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
-                                            <div class="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
-                                                <h2 class="text-xs font-black uppercase tracking-widest text-blue-400">Branch Management</h2>
-                                                <button @click="showBranchDialog = false" class="text-slate-400 hover:text-white"><i
-                                                        class="fa-solid fa-xmark"></i></button>
-                                            </div>
-                                            <div class="flex-1 overflow-y-auto p-6 space-y-4">
-                                                <div class="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Active Branches</div>
-                                                <template x-if="currentChatBranches.length === 0">
-                                                    <div class="text-[10px] text-slate-500 text-center py-8">No branches found for this chat.</div>
-                                                </template>
-                                                <template x-for="branch in currentChatBranches" :key="branch.name">
-                                                    <div class="flex items-center justify-between p-3 bg-slate-800 rounded-xl border border-slate-700/50">
-                                                        <div class="flex-1">
-                                                            <div class="font-bold text-sm" x-text="branch.branch_name || branch.name"></div>
-                                                            <div class="text-[9px] text-slate-500" x-text="'Created ' + formatTime(branch.createdat)"></div>
-                                                        </div>
-                                                        <div class="flex gap-2">
-                                                            <button @click="loadChat(branch.name)"
-                                                                class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Switch</button>
-                                                            <button @click="renameBranchDialog(branch)"
-                                                                class="px-3 py-1 bg-yellow-600 hover:bg-yellow-500 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Rename</button>
-                                                            <button @click="deleteChat(branch.name)"
-                                                                class="px-3 py-1 bg-red-600 hover:bg-red-500 text-white text-[10px] font-black uppercase tracking-widest rounded-lg">Delete</button>
-                                                        </div>
-                                                    </div>
-                                                </template>
-                                            </div>
-                                            <div class="p-4 border-t border-slate-700 bg-slate-800/30 flex gap-3">
-                                                <button @click="showBranchDialog = false"
-                                                    class="px-6 bg-slate-700 hover:bg-slate-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all">Close</button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- Chat Settings Modal -->
+                                     
+                                     <!-- Chat Settings Modal -->
                                     <div x-show="showChatSettings"
                                         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm" x-cloak
                                         x-transition>
@@ -3307,17 +3155,6 @@
             brushCursorX: 0,
             brushCursorY: 0,
 
-            // Fork/Branch state
-            showForkDialog: false,
-            forkBranchName: '',
-            forkMessageId: null,
-            isForking: false,
-            showBranchDialog: false,
-            currentChatBranches: [],
-            showRenameDialog: false,
-            renameBranchName: '',
-            isRenaming: false,
-            currentBranchToRename: null,
             currentChatName: '',
 
             // NPC Creation
@@ -4338,14 +4175,9 @@
                         }
                     }
                     
-                    // Preserve metadata to prevent NPC bleeding between forked chats
                     this.currentChatMetadata = d.metadata || {};
-                    
-                    this.showForkDialog = false;
-                    this.showBranchDialog = false;
-                    this.showRenameDialog = false;
                     this.showSidebar = 'none';
-
+                    
                     this.scrollToBottom();
                     this.updateTokenCount();
 
@@ -5554,88 +5386,8 @@
             },
 
             // ========== FORKING / BRANCHING ==========
-            openForkDialog(msgId) {
-                this.forkBranchName = '';
-                this.isForking = false;
-                this.showForkDialog = true;
-                this.forkMessageId = msgId;
-
-                const msg = this.messages.find(m => m.id === msgId);
-                if (msg && msg.content) {
-                    const preview = msg.content.length > 30 ? msg.content.substring(0, 27) + '...' : msg.content;
-                    const timestamp = new Date().toLocaleString();
-                    this.forkBranchName = `Fork from ${timestamp} - "${preview}"`;
-                }
-            },
-
-            async createFork() {
-                if (!this.forkBranchName || this.isForking) return;
-                this.isForking = true;
-
-                try {
-                    const res = await axios.post('/api/chats/fork', {
-                        origin_chat_name: this.currentChatName || 'current',
-                        fork_from_message_id: this.forkMessageId,
-                        branch_name: this.forkBranchName
-                    });
-
-                    if (res.data.success) {
-                        alert(`Branch "${this.forkBranchName}" created!`);
-                        this.showForkDialog = false;
-                        await this.fetchChats();
-                        this.loadChat(res.data.name);
-                    } else {
-                        alert(`Failed to create branch: ${res.data.error}`);
-                    }
-                } catch (e) {
-                    console.error('Fork creation failed', e);
-                    alert('Failed to create branch.');
-                } finally {
-                    this.isForking = false;
-                }
-            },
-
-            renameBranchDialog(branch) {
-                this.renameBranchName = branch.branch_name || branch.name;
-                this.currentBranchToRename = branch;
-                this.showRenameDialog = true;
-            },
-
-            async renameBranch() {
-                if (!this.renameBranchName || this.isRenaming) return;
-                this.isRenaming = true;
-
-                try {
-                    const res = await axios.put(`/api/chats/${this.currentBranchToRename.name}/rename-branch`, {
-                        branch_name: this.renameBranchName
-                    });
-
-                    if (res.data.success) {
-                        alert('Branch renamed!');
-                        this.showRenameDialog = false;
-                        await this.fetchChats();
-                    } else {
-                        alert(`Failed to rename: ${res.data.error}`);
-                    }
-                } catch (e) {
-                    console.error('Branch rename failed', e);
-                    alert('Failed to rename branch.');
-                } finally {
-                    this.isRenaming = false;
-                }
-            },
-
-            isBranch(chatName) {
-                return chatName.includes('_fork_');
-            },
-
             getDisplayName(chatName) {
                 return chatName;
-            },
-
-            getBranchOrigin(chatName) {
-                const match = chatName.match(/^(.+)_fork_\d+$/);
-                return match ? match[1] : 'Unknown';
             },
 
             // ========== WORLD INFO ==========
@@ -6957,9 +6709,11 @@
                 this.isGeneratingSnapshot = true;
 
                 try {
-                    const response = await axios.post(`/api/chat/${this.currentChatId}/snapshot/regenerate`, {
+                    const response = await axios.post('/api/chat/snapshot', {
+                        chat_id: this.currentChatId,
                         width: this.sdParams.width,
                         height: this.sdParams.height,
+                        mode: this.selectedMode,
                         negative_prompt: this.sdParams.negative_prompt || ''
                     });
 
@@ -6968,29 +6722,17 @@
                         return;
                     }
 
-                    const newSnapshot = {
-                        timestamp: Date.now() / 1000,
-                        image_url: response.data.image_url,
-                        prompt: response.data.prompt,
-                        negative_prompt: response.data.negative_prompt,
-                        scene_analysis: response.data.scene_analysis,
-                        character_ref: response.data.character_ref,
-                        mode: 'variation',
-                        is_favorite: false,
-                        favorite_id: null
-                    };
-
                     this.messages.push({
                         id: Date.now(),
                         role: 'assistant',
                         speaker: 'Visual System',
                         content: '',
-                        snapshot: newSnapshot,
+                        snapshot: response.data,
                         showDetails: false,
                         favoriteMenuVisible: false
                     });
 
-                    console.log('[SNAPSHOT] Regenerated with variation mode:', response.data);
+                    console.log('[SNAPSHOT] Regenerated:', response.data);
 
                 } catch (e) {
                     console.error('[SNAPSHOT] Regeneration error:', e);

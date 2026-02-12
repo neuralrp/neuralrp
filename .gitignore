@@ -1,15 +1,10 @@
 # ============================================
 # PERSONAL DATA - NEVER COMMIT
 # ============================================
-# SQLite databases (main personal data storage)
-app/data/neuralrp.db
-app/data/*.db
-app/data/*.db-shm
-app/data/*.db-wal
-
-# Embeddings and ML data
-app/data/embeddings.pkl
-app/data/*.pkl
+# Ignore all app/data/ except .gitkeep files and tag_list.txt
+app/data/*
+!app/data/**/.gitkeep
+!app/data/danbooru/tag_list.txt
 
 # Generated images and metadata
 app/images/*.png
@@ -18,23 +13,7 @@ app/images/*.jpeg
 app/images/*.gif
 app/images/*.webp
 app/images/image_metadata.json
-
-# Legacy JSON data (pre-SQLite migration)
-app/data/characters/*.json
-app/data/worldinfo/*.json
-app/data/chats/*.json
-
-# Keep .gitkeep files to preserve folder structure
-!app/data/.gitkeep
-!app/data/chats/.gitkeep
-!app/data/characters/.gitkeep
-!app/data/worldinfo/.gitkeep
 !app/images/.gitkeep
-
-# Danbooru data
-app/data/danbooru/book1.xlsx
-!app/data/danbooru/.gitkeep
-!app/data/danbooru/tag_list.txt
 
 # ============================================
 # PYTHON
@@ -108,6 +87,7 @@ CHARACTER_INJECTION_FIX.md
 Migrations.md
 SNAPSHOT_SEMANTIC_SEARCH.md
 demo_snapshot_semantic_search.py
+.opencode/
 
 # ============================================
 # CACHE DATABASES

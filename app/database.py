@@ -23,13 +23,26 @@ DB_PATH = os.path.join(BASE_DIR, "app", "data", "neuralrp.db")
 # Thread-local storage for connections
 _thread_local = threading.local()
 
+# Connection tracking for monitoring
+_connection_stats = {
+    "created": 0,
+    "closed": 0,
+    "active": 0
+}
+
 
 @contextmanager
 def get_connection():
     """Get a thread-safe database connection with context manager."""
+    global _connection_stats
+
     if not hasattr(_thread_local, 'connection') or _thread_local.connection is None:
         _thread_local.connection = sqlite3.connect(DB_PATH, check_same_thread=False)
         _thread_local.connection.row_factory = sqlite3.Row
+
+        # Track connection creation
+        _connection_stats["created"] += 1
+        _connection_stats["active"] += 1
 
         # CRITICAL: Ensure data flushes to disk
         _thread_local.connection.execute("PRAGMA synchronous = FULL")  # Safest mode
@@ -38,7 +51,7 @@ def get_connection():
         # Enable extension loading for sqlite-vec
         try:
             _thread_local.connection.enable_load_extension(True)
-            
+
             # Load sqlite-vec extension using sqlite_vec module (more reliable)
             try:
                 import sqlite_vec
@@ -53,12 +66,33 @@ def get_connection():
 
         # Enable foreign keys
         _thread_local.connection.execute("PRAGMA foreign_keys = ON")
-    
+
     try:
         yield _thread_local.connection
     except Exception as e:
         _thread_local.connection.rollback()
         raise e
+
+
+def close_connection():
+    """Explicitly close the current thread-local connection."""
+    global _connection_stats
+
+    if hasattr(_thread_local, 'connection') and _thread_local.connection is not None:
+        try:
+            _thread_local.connection.close()
+            _thread_local.connection = None
+
+            _connection_stats["closed"] += 1
+            _connection_stats["active"] -= 1
+
+        except Exception as e:
+            print(f"[DB WARNING] Error closing connection: {e}")
+
+
+def get_connection_stats() -> dict:
+    """Get connection statistics for monitoring."""
+    return _connection_stats.copy()
 
 
 
@@ -260,43 +294,6 @@ def init_db():
             ON change_log(timestamp DESC)
         """)
         
-        # Relationship state tracking table (for relationship tracking feature)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS relationship_states (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT NOT NULL,
-                character_from TEXT NOT NULL,
-                character_to TEXT NOT NULL,
-                
-                -- Five core dimensions (0-100 scale)
-                trust INTEGER DEFAULT 50,
-                emotional_bond INTEGER DEFAULT 50,
-                conflict INTEGER DEFAULT 50,
-                power_dynamic INTEGER DEFAULT 50,
-                fear_anxiety INTEGER DEFAULT 50,
-                
-                -- Metadata
-                last_updated INTEGER,
-                last_analyzed_message_id INTEGER,
-                interaction_count INTEGER DEFAULT 0,
-                history TEXT,
-                
-                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE,
-                UNIQUE(chat_id, character_from, character_to)
-            )
-        """)
-        
-        # Performance indexes for relationship_states
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_relationship_states_chat
-            ON relationship_states(chat_id)
-        ''')
-        
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_relationship_states_chars
-            ON relationship_states(character_from, character_to)
-        ''')
-        
         # Chat-scoped NPC table (Phase 2.1)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_npcs (
@@ -339,29 +336,6 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_chat_npcs_entity_id
             ON chat_npcs(entity_id)
         ''')
-        
-        # Entities table for unified entity ID management (v1.5.1+)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS entities (
-                entity_id TEXT PRIMARY KEY,
-                entity_type TEXT NOT NULL,  -- 'character', 'npc', 'user'
-                name TEXT NOT NULL,
-                chat_id TEXT NOT NULL,
-                first_seen INTEGER NOT NULL,
-                last_seen INTEGER NOT NULL,
-                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-            )
-        """)
-        
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_entities_chat 
-            ON entities(chat_id)
-        """)
-        
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_entities_type 
-            ON entities(entity_type)
-        """)
         
         # Character tags table (junction table for many-to-many relationship)
         cursor.execute("""
@@ -1489,43 +1463,6 @@ def db_get_chat(chat_id: str, include_summarized: bool = False) -> Optional[Dict
         }
 
 
-def db_create_empty_chat(chat_id: str, branch_name: Optional[str] = None) -> bool:
-    """Create an empty chat record in the database.
-    
-    Used by fork_chat() to ensure chat exists before inserting entities
-    (prevents foreign key constraint violation).
-    
-    Args:
-        chat_id: Unique identifier for the chat
-        branch_name: Optional branch name for the chat
-    
-    Returns:
-        bool: True if chat created successfully, False otherwise
-    """
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            
-            timestamp = int(time.time())
-            
-            cursor.execute("""
-                INSERT OR IGNORE INTO chats 
-                (id, branch_name, summary, metadata, created_at, autosaved)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (chat_id, branch_name, '', '{}', timestamp, False))
-            
-            conn.commit()
-            
-            if cursor.rowcount > 0:
-                print(f"[DB] Created empty chat record: {chat_id}")
-                return True
-            else:
-                print(f"[DB] Chat {chat_id} already exists")
-                return False
-    except Exception as e:
-        print(f"[DB] Error creating empty chat {chat_id}: {e}")
-        return False
-
 
 def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> Dict[str, int]:
     """Save or update a chat session with all messages using soft delete.
@@ -1572,21 +1509,9 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
             metadata["activeCharacters"] = data.get("activeCharacters", metadata.get("activeCharacters", []))
             metadata["activeWI"] = data.get("activeWI", metadata.get("activeWI"))
             metadata["settings"] = data.get("settings", metadata.get("settings", {}))
-            
-            # Validate fork isolation to prevent NPC bleeding between forked and original chats
-            incoming_metadata = data.get("metadata", {})
-            origin_chat_id = metadata.get("origin_chat_id")
-            incoming_origin = incoming_metadata.get("origin_chat_id")
-            
-            if origin_chat_id and incoming_origin and incoming_origin != origin_chat_id:
-                # This chat is a fork, but incoming metadata references different origin
-                # This indicates cross-contamination (e.g., forked chat data saved to original)
-                print(f"[FORK VALIDATION] Blocked save: metadata origin mismatch")
-                print(f"  Expected origin: {origin_chat_id}")
-                print(f"  Incoming origin: {incoming_origin}")
-                raise ValueError(f"Cannot save fork metadata to different chat (origin mismatch)")
-            
+             
             # Preserve localnpcs for NPC metadata
+            incoming_metadata = data.get("metadata", {})
             metadata["localnpcs"] = incoming_metadata.get("localnpcs", metadata.get("localnpcs", {}))
             # Preserve snapshot_settings for snapshot feature
             metadata["snapshot_settings"] = incoming_metadata.get("snapshot_settings", metadata.get("snapshot_settings", {}))
@@ -1801,9 +1726,64 @@ def db_cleanup_empty_chats() -> int:
             if deleted_count > 0:
                 print(f"Cleaned up {deleted_count} empty chats")
             
-            return deleted_count
+        return deleted_count
     except Exception as e:
         print(f"Error cleaning up empty chats: {e}")
+        return 0
+
+
+def db_cleanup_old_unnamed_chats(days: int = 30) -> int:
+    """
+    Delete chats with default/unnamed names older than specified days.
+
+    Unnamed chats are defined as:
+    - Chats with no custom name (uses default UUID or "New Chat" style names)
+    - Chats never explicitly renamed by user
+
+    Args:
+        days: Delete chats older than N days
+
+    Returns:
+        Number of chats deleted
+    """
+    cutoff_timestamp = int(time.time()) - (days * 86400)
+
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Find matching chats with UUID-like names or default patterns
+            cursor.execute("""
+                SELECT id, branch_name
+                FROM chats
+                WHERE (
+                    branch_name REGEXP '^[a-f0-9-]+$'
+                    OR branch_name REGEXP '^New Chat\\d*$'
+                    OR branch_name REGEXP '^Untitled\\d*$'
+                )
+                AND created_at < ?
+                AND autosaved = 1
+            """, (cutoff_timestamp,))
+
+            unnamed_chats = cursor.fetchall()
+            deleted_count = 0
+
+            for chat in unnamed_chats:
+                chat_id = chat['id']
+                branch_name = chat['branch_name']
+
+                # Delete chat and associated messages
+                if db_delete_chat(chat_id):
+                    deleted_count += 1
+                    print(f"[CLEANUP] Deleted unnamed chat: {chat_id} ({branch_name})")
+
+            if deleted_count > 0:
+                print(f"[CLEANUP] Cleaned {deleted_count} unnamed chats (older than {days} days)")
+
+            return deleted_count
+
+    except Exception as e:
+        print(f"[CLEANUP ERROR] Failed to clean unnamed chats: {e}")
         return 0
 
 
@@ -2482,27 +2462,6 @@ def db_cleanup_old_metrics(days: int = 7) -> bool:
 # ============================================================================
 # CHANGE LOG OPERATIONS (v1.5.1 - Undo/Redo Foundation)
 # ============================================================================
-
-# Significant chat operations that warrant logging (not every message save)
-SIGNIFICANT_CHAT_OPERATIONS = {
-    'DELETE',
-    'CREATE_BRANCH',
-    'RENAME',
-    'CLEAR',
-    'ADD_CHARACTER',
-    'REMOVE_CHARACTER',
-    'MANUAL_SUMMARIZE'
-}
-
-
-def should_log_chat_change(operation: str) -> bool:
-    """Determine if a chat operation is significant enough to log.
-    
-    We don't log every message save (too frequent), only structural changes
-    that users might want to undo.
-    """
-    return operation in SIGNIFICANT_CHAT_OPERATIONS
-
 
 def log_change(entity_type: str, entity_id: str, operation: str, 
                old_data: Any = None, new_data: Any = None) -> bool:
@@ -3356,614 +3315,6 @@ def verify_database_health() -> bool:
         return False
 
 
-# ============================================================================
-# RELATIONSHIP STATE OPERATIONS
-# ============================================================================
-
-def db_get_relationship_state(chat_id: str, entity_from: str, entity_to: str) -> Optional[Dict[str, Any]]:
-    """Get relationship state for a specific directional pair using entity IDs.
-    
-    Args:
-        chat_id: Chat ID
-        entity_from: Entity ID for source entity
-        entity_to: Entity ID for target entity
-    
-    Returns:
-        Relationship state dict or None if not found
-    """
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT * FROM relationship_states
-            WHERE chat_id = ? AND character_from = ? AND character_to = ?
-        ''', (chat_id, entity_from, entity_to))
-        row = cursor.fetchone()
-        return dict(row) if row else None
-
-
-def db_get_relationship_state_by_names(chat_id: str, name_from: str, name_to: str) -> Optional[Dict[str, Any]]:
-    """Get relationship state by character names (converts to entity IDs internally).
-    
-    Args:
-        chat_id: Chat ID
-        name_from: Character name for source
-        name_to: Character name for target
-    
-    Returns:
-        Relationship state dict or None if not found
-    """
-    entity_from = db_get_entity_id_by_name(chat_id, name_from, 'character')
-    entity_to = db_get_entity_id_by_name(chat_id, name_to, 'character')
-    
-    if not entity_from or not entity_to:
-        return None
-    
-    return db_get_relationship_state(chat_id, entity_from, entity_to)
-
-
-def db_get_all_relationship_states(chat_id: str) -> List[Dict[str, Any]]:
-    """Get all relationship states for a chat."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT * FROM relationship_states WHERE chat_id = ?
-            ORDER BY last_updated DESC
-        ''', (chat_id,))
-        return [dict(row) for row in cursor.fetchall()]
-
-
-def db_update_relationship_state(chat_id: str, character_from: str, character_to: str, 
-                             scores: dict, last_message_id: int) -> bool:
-    """Update or insert relationship state with history tracking."""
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            existing = db_get_relationship_state(chat_id, character_from, character_to)
-            
-            # Update history (keep last 20 snapshots)
-            history = []
-            if existing and existing.get('history'):
-                history = json.loads(existing['history'])
-            
-            history.append({
-                'message_id': last_message_id,
-                'timestamp': time.time(),
-                'trust': scores['trust'],
-                'emotional_bond': scores['emotional_bond'],
-                'conflict': scores['conflict'],
-                'power_dynamic': scores['power_dynamic'],
-                'fear_anxiety': scores['fear_anxiety']
-            })
-            history = history[-20:]  # Keep only last 20
-            
-            if existing:
-                cursor.execute('''
-                    UPDATE relationship_states
-                    SET trust = ?, emotional_bond = ?, conflict = ?, 
-                        power_dynamic = ?, fear_anxiety = ?,
-                        last_updated = ?, last_analyzed_message_id = ?,
-                        interaction_count = interaction_count + 1,
-                        history = ?
-                    WHERE chat_id = ? AND character_from = ? AND character_to = ?
-                ''', (
-                    scores['trust'], scores['emotional_bond'], scores['conflict'],
-                    scores['power_dynamic'], scores['fear_anxiety'],
-                    time.time(), last_message_id, json.dumps(history),
-                    chat_id, character_from, character_to
-                ))
-            else:
-                cursor.execute('''
-                    INSERT INTO relationship_states
-                    (chat_id, character_from, character_to, trust, emotional_bond, 
-                     conflict, power_dynamic, fear_anxiety, last_updated, 
-                     last_analyzed_message_id, interaction_count, history)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-                ''', (
-                    chat_id, character_from, character_to,
-                    scores['trust'], scores['emotional_bond'], scores['conflict'],
-                    scores['power_dynamic'], scores['fear_anxiety'],
-                    time.time(), last_message_id, json.dumps(history)
-                ))
-            
-            conn.commit()
-            return True
-    except Exception as e:
-        print(f"[RELATIONSHIP_DB] Failed to update {character_from}→{character_to}: {e}")
-        return False
-
-
-def db_copy_relationship_states_for_branch(origin_chat_id: str, branch_chat_id: str, 
-                                       fork_message_id: int) -> int:
-    """Copy relationship states to branch at fork-point state."""
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT character_from, character_to, 
-                       trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
-                       history
-                FROM relationship_states
-                WHERE chat_id = ?
-            ''', (origin_chat_id,))
-            
-            origin_states = cursor.fetchall()
-            copied_count = 0
-            
-            for state in origin_states:
-                history = json.loads(state['history']) if state['history'] else []
-                
-                # Find snapshot at or before fork point
-                fork_point_state = None
-                for snapshot in history:
-                    if snapshot.get('message_id', 0) <= fork_message_id:
-                        fork_point_state = snapshot
-                    else:
-                        break
-                
-                # Use fork point state or current state
-                if fork_point_state:
-                    values = (
-                        fork_point_state['trust'],
-                        fork_point_state['emotional_bond'],
-                        fork_point_state['conflict'],
-                        fork_point_state['power_dynamic'],
-                        fork_point_state['fear_anxiety']
-                    )
-                else:
-                    values = (
-                        state['trust'], state['emotional_bond'], state['conflict'],
-                        state['power_dynamic'], state['fear_anxiety']
-                    )
-                
-                new_history = [{
-                    'message_id': fork_message_id,
-                    'timestamp': time.time(),
-                    'trust': values[0],
-                    'emotional_bond': values[1],
-                    'conflict': values[2],
-                    'power_dynamic': values[3],
-                    'fear_anxiety': values[4],
-                    'note': 'Branch point'
-                }]
-                
-                cursor.execute('''
-                    INSERT INTO relationship_states
-                    (chat_id, character_from, character_to, 
-                     trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
-                     last_updated, last_analyzed_message_id, interaction_count, history)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-                ''', (
-                    branch_chat_id, state['character_from'], state['character_to'],
-                    *values, time.time(), fork_message_id, json.dumps(new_history)
-                ))
-                copied_count +=1
-            
-            conn.commit()
-            return copied_count
-    except Exception as e:
-        print(f"[RELATIONSHIP_DB] Failed to copy states for branch {branch_chat_id}: {e}")
-        return 0
-
-
-def db_fork_chat_transaction(
-    origin_chat_id: str,
-    branch_chat_id: str,
-    fork_message_id: int,
-    fork_index: int,
-    origin_chat: dict,
-    entity_mapping: Dict[str, str],
-    localnpcs: Dict[str, Any]
-) -> dict:
-    """
-    Execute complete fork operation in single transaction.
-    
-    Args:
-        origin_chat_id: Original chat ID
-        branch_chat_id: New branch chat ID  
-        fork_message_id: Message ID where fork occurred
-        fork_index: Array index where fork occurred
-        origin_chat: Complete origin chat data
-        entity_mapping: Maps old_entity_id -> new_entity_id for NPCs
-        localnpcs: NPCs dictionary with updated entity IDs
-    
-    Returns:
-        Branch chat data dict or raises exception on failure
-    
-    Raises:
-        Exception: If any database operation fails (transaction is rolled back)
-    """
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Start transaction
-            cursor.execute('BEGIN TRANSACTION')
-            
-            try:
-                # 1. Create branch chat record
-                cursor.execute('''
-                    INSERT INTO chats (id, branch_name, metadata, created_at, autosaved)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (
-                    branch_chat_id,
-                    branch_chat_id,
-                    json.dumps({}),
-                    time.time(),
-                    1
-                ))
-                
-                # 2. Copy NPCs from characters table to new branch with remapped filenames
-                cursor.execute('''
-                    SELECT filename, name, data, danbooru_tag, visual_canon_id, visual_canon_tags,
-                           created_at, updated_at
-                    FROM characters
-                    WHERE chat_id = ?
-                ''', (origin_chat_id,))
-
-                npcs = cursor.fetchall()
-                for npc in npcs:
-                    old_filename = npc['filename']
-                    # Generate new filename for forked NPC to avoid collisions
-                    # Format: npc_{name}_{branch_timestamp}_{index}.json
-                    safe_name = npc['name'].lower().replace(' ', '_').replace("'", '')
-                    new_filename = f"npc_{safe_name}_{int(time.time())}_{random.randint(0, 9999)}.json"
-
-                    # Update entity mapping with old -> new filename
-                    entity_mapping[old_filename] = new_filename
-
-                    # Insert NPC into characters table for branch chat
-                    cursor.execute('''
-                        INSERT INTO characters
-                        (filename, name, data, chat_id, danbooru_tag,
-                         visual_canon_id, visual_canon_tags, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        new_filename,
-                        npc['name'],
-                        npc['data'],
-                        branch_chat_id,
-                        npc['danbooru_tag'],
-                        npc['visual_canon_id'],
-                        npc['visual_canon_tags'],
-                        int(time.time()),
-                        int(time.time())
-                    ))
-
-                    # Register entity for branch chat
-                    cursor.execute('''
-                        INSERT INTO entities
-                        (entity_id, entity_type, name, chat_id, first_seen, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (
-                        new_filename,
-                        'npc',
-                        npc['name'],
-                        branch_chat_id,
-                        int(time.time()),
-                        int(time.time())
-                    ))
-
-                # 3. Copy relationship states with remapped entity IDs
-                cursor.execute('''
-                    SELECT character_from, character_to, 
-                           trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
-                           interaction_count, history
-                    FROM relationship_states 
-                    WHERE chat_id = ?
-                ''', (origin_chat_id,))
-                
-                relationships = cursor.fetchall()
-                for state in relationships:
-                    # Remap entity IDs
-                    from_entity = entity_mapping.get(state['character_from'], state['character_from'])
-                    to_entity = entity_mapping.get(state['character_to'], state['character_to'])
-                    
-                    # Parse history to find state at fork point
-                    history = json.loads(state['history']) if state['history'] else []
-                    fork_point_snapshot = None
-                    
-                    for snapshot in history:
-                        if snapshot.get('message_id', 0) <= fork_message_id:
-                            fork_point_snapshot = snapshot
-                        else:
-                            break
-                    
-                    # Use fork point state or current state
-                    if fork_point_snapshot:
-                        values = (
-                            fork_point_snapshot['trust'],
-                            fork_point_snapshot['emotional_bond'],
-                            fork_point_snapshot['conflict'],
-                            fork_point_snapshot['power_dynamic'],
-                            fork_point_snapshot['fear_anxiety']
-                        )
-                    else:
-                        values = (
-                            state['trust'],
-                            state['emotional_bond'],
-                            state['conflict'],
-                            state['power_dynamic'],
-                            state['fear_anxiety']
-                        )
-                    
-                    # Create new history starting at fork point
-                    new_history = [{
-                        'message_id': fork_message_id,
-                        'timestamp': time.time(),
-                        'trust': values[0],
-                        'emotional_bond': values[1],
-                        'conflict': values[2],
-                        'power_dynamic': values[3],
-                        'fear_anxiety': values[4],
-                        'note': 'Branch fork point'
-                    }]
-                    
-                    # CRITICAL: Preserve interaction_count from origin
-                    cursor.execute('''
-                        INSERT INTO relationship_states
-                        (chat_id, character_from, character_to, 
-                         trust, emotional_bond, conflict, power_dynamic, fear_anxiety,
-                         last_updated, last_analyzed_message_id, interaction_count, history)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        branch_chat_id, from_entity, to_entity,
-                        *values,
-                        time.time(), fork_message_id, state['interaction_count'], json.dumps(new_history)
-                    ))
-                
-                # Commit transaction
-                conn.commit()
-                
-                # 4. Prepare branch data for return
-                branch_messages = origin_chat.get('messages', [])[:fork_index + 1] if origin_chat.get('messages') else []
-                
-                # Prepare metadata
-                branch_metadata = origin_chat.get('metadata', {}).copy()
-                branch_metadata['localnpcs'] = localnpcs.copy()
-                
-                # Assemble branch data
-                branch_data = {
-                    'id': branch_chat_id,
-                    'name': branch_chat_id,
-                    'messages': branch_messages,
-                    'summary': origin_chat.get('summary', ''),
-                    'activeCharacters': origin_chat.get('activeCharacters', []),
-                    'activeWI': origin_chat.get('activeWI'),
-                    'settings': origin_chat.get('settings', {}).copy(),
-                    'metadata': {
-                        **branch_metadata,
-                        'origin_chat_id': origin_chat_id,
-                        'origin_message_id': fork_message_id,
-                        'created_at': time.time()
-                    }
-                }
-                
-                # Update activeCharacters with new NPC entity IDs
-                updated_active_chars = []
-                for char_ref in branch_data['activeCharacters']:
-                    if char_ref in entity_mapping:
-                        updated_active_chars.append(entity_mapping[char_ref])
-                    else:
-                        updated_active_chars.append(char_ref)
-                branch_data['activeCharacters'] = updated_active_chars
-                
-                return branch_data
-                
-            except Exception as e:
-                # Rollback on any error
-                conn.rollback()
-                raise e
-                
-    except Exception as e:
-        print(f"[FORK TRANSACTION] Transaction failed: {e}")
-        raise
-
-
-# ============================================================================
-# ENTITY OPERATIONS (v1.5.1+ - NPC and Entity Management)
-# ============================================================================
-
-def generate_entity_id() -> str:
-    """Generate a unique ID for entities."""
-    import uuid
-    return uuid.uuid4().hex[:12]
-
-
-def db_entity_table_exists() -> bool:
-    """Check if entities table exists.
-    
-    Returns:
-        True if entities table exists, False otherwise
-    """
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='entities'
-            """)
-            return cursor.fetchone() is not None
-    except Exception as e:
-        return False
-
-
-def db_create_entity(chat_id: str, entity_id: str, name: str, 
-                     entity_type: str = 'npc') -> bool:
-    """Create or update an entity record.
-    
-    Args:
-        chat_id: Chat ID (None for global entities)
-        entity_id: Unique entity ID (e.g., 'npc_abc123', 'char_xyz789')
-        name: Entity name
-        entity_type: Entity type ('character', 'npc', 'user')
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        timestamp = int(time.time())
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR REPLACE INTO entities 
-                (entity_id, entity_type, name, chat_id, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (entity_id, entity_type, name, chat_id, timestamp, timestamp))
-            conn.commit()
-            return True
-    except Exception as e:
-        return False
-
-
-def db_get_or_create_entity(chat_id: str, name: str, 
-                             entity_type: str = 'npc') -> str:
-    """Get existing entity or create new one, returns entity_id.
-    
-    Args:
-        chat_id: Chat ID
-        name: Entity name
-        entity_type: Entity type ('character', 'npc', 'user')
-    
-    Returns:
-        Entity ID string
-    """
-    # Graceful degradation: if table doesn't exist, use simple ID
-    if not db_entity_table_exists():
-        return f"{entity_type}_{name.replace(' ', '_').lower()}"
-    
-    # Try to find existing entity
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT entity_id FROM entities
-            WHERE chat_id = ? AND name = ? AND entity_type = ?
-        """, (chat_id, name, entity_type))
-        row = cursor.fetchone()
-        if row:
-            # Update last_seen
-            cursor.execute("""
-                UPDATE entities SET last_seen = ?
-                WHERE entity_id = ?
-            """, (int(time.time()), row['entity_id']))
-            conn.commit()
-            return row['entity_id']
-    
-    # Create new entity
-    entity_id = f"{entity_type}_{generate_entity_id()}"
-    db_create_entity(chat_id, entity_id, name, entity_type)
-    return entity_id
-
-
-def db_get_entity_info(entity_id: str) -> Optional[Dict[str, Any]]:
-    """Get entity information.
-    
-    Args:
-        entity_id: Unique entity ID
-    
-    Returns:
-        Entity info dictionary or None if not found
-    """
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT entity_id, entity_type, name, chat_id, first_seen, last_seen
-            FROM entities WHERE entity_id = ?
-        """, (entity_id,))
-        row = cursor.fetchone()
-        return dict(row) if row else None
-
-
-def db_get_chat_entities(chat_id: str) -> List[Dict[str, Any]]:
-    """Get all entities for a chat.
-    
-    Args:
-        chat_id: Chat ID
-    
-    Returns:
-        List of entity dictionaries
-    """
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT entity_id, entity_type, name, first_seen, last_seen
-            FROM entities WHERE chat_id = ?
-            ORDER BY first_seen ASC
-        """, (chat_id,))
-        return [dict(row) for row in cursor.fetchall()]
-
-
-def db_get_entity_id_by_name(chat_id: str, name: str, 
-                             entity_type: str = 'npc') -> Optional[str]:
-    """Get entity ID by name and type.
-    
-    Args:
-        chat_id: Chat ID
-        name: Entity name
-        entity_type: Entity type ('character', 'npc', 'user')
-    
-    Returns:
-        Entity ID string or None if not found
-    """
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT entity_id FROM entities
-            WHERE chat_id = ? AND name = ? AND entity_type = ?
-        """, (chat_id, name, entity_type))
-        row = cursor.fetchone()
-        return row['entity_id'] if row else None
-
-
-from typing import Dict, Any
-
-def db_remap_entities_for_branch(
-    origin_chat_id: str,
-    branch_chat_id: str,
-    localnpcs: Dict[str, Any],
-) -> Dict[str, str]:
-    """
-    Create new entity IDs for NPCs in a forked branch.
-
-    Args:
-        origin_chat_id: Original chat ID
-        branch_chat_id: New branch chat ID
-        localnpcs: NPCs from chat metadata (will be modified in place)
-
-    Returns:
-        entity_mapping: Dict mapping old_entity_id -> new_entity_id
-    """
-    entity_mapping: Dict[str, str] = {}
-    timestamp = int(time.time())
-    base_timestamp = int(time.time() * 1000)
-
-    with get_connection() as conn:
-        cursor = conn.cursor()
-
-        for i, (old_npc_id, npc_data) in enumerate(localnpcs.items()):
-            # Generate new entity ID for this branch (with index to prevent collision)
-            new_entity_id = f"npc_{branch_chat_id}_{base_timestamp}_{i}"
-
-            # Register new entity in entities table
-            cursor.execute(
-                """
-                INSERT INTO entities 
-                (entity_id, entity_type, name, chat_id, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (new_entity_id, "npc", npc_data["name"], branch_chat_id, timestamp, timestamp),
-            )
-
-            # Update NPC data with new entity ID
-            npc_data["entity_id"] = new_entity_id
-
-            # Track mapping for relationship state copying
-            entity_mapping[old_npc_id] = new_entity_id
-
-        conn.commit()
-
-    return entity_mapping
-
-
 
 # ============================================================================
 # NPC OPERATIONS (Phase 2.2 - Chat-scoped NPC Management)
@@ -4010,18 +3361,7 @@ def db_create_npc(chat_id: str, npc_data: Dict) -> Tuple[bool, Optional[str], Op
             """, (filename, name, json.dumps(save_data, ensure_ascii=False), chat_id,
                    danbooru_tag, visual_canon_id, visual_canon_tags,
                    int(time.time()), int(time.time())))
-            
-            # Register in entities table
-            try:
-                db_create_entity(
-                    chat_id=chat_id,
-                    entity_id=filename,
-                    name=name,
-                    entity_type="npc",
-                )
-            except Exception as e:
-                pass  # Entity creation failed, but NPC is created
-            
+
             conn.commit()
             
             return True, filename, None
@@ -4167,7 +3507,7 @@ def db_create_npc_with_entity_id(chat_id: str, entity_id: str, npc_data: Dict) -
 
     Args:
         chat_id: Chat ID
-        entity_id: Existing filename to use (preserves relationships)
+        entity_id: Existing filename to use (preserves character identity)
         npc_data: Character data dictionary
 
     Returns:
@@ -4192,7 +3532,7 @@ def db_create_npc_with_entity_id(chat_id: str, entity_id: str, npc_data: Dict) -
             extensions = npc_data.get('data', {}).get('extensions', {})
             danbooru_tag = extensions.get('danbooru_tag', '')
 
-            # Insert with provided filename
+             # Insert with provided filename
             cursor.execute(
                 """
                 INSERT INTO characters
@@ -4210,100 +3550,12 @@ def db_create_npc_with_entity_id(chat_id: str, entity_id: str, npc_data: Dict) -
                 ),
             )
 
-            # Register in entities table
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO entities
-                (entity_id, entity_type, name, chat_id, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    filename,
-                    "npc",
-                    name,
-                    chat_id,
-                    int(time.time()),
-                    int(time.time())
-                )
-            )
-            
             conn.commit()
             return True, None
             
     except Exception as e:
         return False, str(e)
 
-
-def db_promote_npc_to_character(chat_id: str, filename: str) -> Optional[str]:
-    """
-    Promote NPC to global character by setting chat_id to NULL.
-    Returns new global filename, or None on failure.
-    Also stores promotion history in character's extensions.
-    """
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-
-            # Get NPC data
-            cursor.execute('''
-                SELECT data, name FROM characters
-                WHERE chat_id = ? AND filename = ?
-            ''', (chat_id, filename))
-
-            row = cursor.fetchone()
-            if not row:
-                return None
-
-            npc_data = json.loads(row['data'])
-            npc_name = row['name']
-
-            # Add promotion history to character extensions
-            if 'extensions' not in npc_data:
-                npc_data['extensions'] = {}
-
-            npc_data['extensions']['promotion_history'] = {
-                'origin_chat': chat_id,
-                'promoted_at': int(time.time()),
-                'original_filename': filename
-            }
-
-            # Generate global filename (remove npc_ prefix)
-            global_filename = f"{npc_name.lower().replace(' ', '_')}.json"
-
-            # Check for filename collision
-            counter = 1
-            while True:
-                cursor.execute("SELECT id FROM characters WHERE filename = ? AND chat_id IS NULL",
-                             (global_filename,))
-                if not cursor.fetchone():
-                    break
-                global_filename = f"{npc_name.lower().replace(' ', '_')}_{counter}.json"
-                counter += 1
-
-            # Update the character to be global (set chat_id to NULL)
-            cursor.execute("""
-                UPDATE characters
-                SET chat_id = NULL, filename = ?, name = ?, data = ?, updated_at = ?
-                WHERE filename = ? AND chat_id = ?
-            """, (global_filename, npc_name, json.dumps(npc_data, ensure_ascii=False), int(time.time()),
-                   filename, chat_id))
-
-            # Update entities table with new filename
-            cursor.execute("""
-                UPDATE entities
-                SET entity_id = ?
-                WHERE entity_id = ?
-            """, (global_filename, filename))
-
-            conn.commit()
-
-            print(f"[NPC] Promoted '{npc_name}' to character: {global_filename}")
-            return global_filename
-    except Exception as e:
-        print(f"[NPC] Error promoting NPC: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, Optional[str], Optional[str]]:
     """
@@ -4351,7 +3603,7 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                     conn.rollback()
                     return False, None, "NPC name already exists in this chat"
                 
-                # Insert NPC into characters table
+                 # Insert NPC into characters table
                 extensions = npc_data.get('data', {}).get('extensions', {})
                 danbooru_tag = extensions.get('danbooru_tag', '')
                 cursor.execute(
@@ -4369,23 +3621,6 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                         int(time.time()),
                         int(time.time()),
                     ),
-                )
-                
-                # Register in entities table
-                cursor.execute(
-                    """
-                    INSERT OR REPLACE INTO entities 
-                    (entity_id, entity_type, name, chat_id, first_seen, last_seen)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        filename,
-                        "npc",
-                        name,
-                        chat_id,
-                        int(time.time()),
-                        int(time.time())
-                    )
                 )
                 
                 # Load existing chat metadata
@@ -4466,82 +3701,6 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                 
     except Exception as e:
         return False, None, f"Unexpected error: {str(e)}"
-
-
-# ============================================================================
-# FILTERED RELATIONSHIP CONTEXT (v1.6.1 - Adaptive Tier 3)
-# ============================================================================
-
-def get_relationship_context_filtered(
-    chat_id: str,
-    current_text: str,
-    relationship_states: Dict[str, Dict[str, float]],
-    relationship_templates: Dict[str, Dict[Tuple[int, int], List[str]]]
-) -> str:
-    """
-    Generate filtered relationship context for prompt injection using adaptive Tier 3.
-    
-    Only includes dimensions that are BOTH:
-    1. Deviating from neutral (score > 15 points from 50)
-    2. Semantically relevant to current conversation (similarity > 0.35)
-    
-    This reduces prompt bloat by excluding neutral or irrelevant relationships.
-    
-    Args:
-        chat_id: Chat ID
-        current_text: Current turn's message text
-        relationship_states: Dict of {from_entity: {dimension: score}}
-        relationship_templates: Template dictionary (same format as get_relationship_context in main.py)
-    
-    Returns:
-        Formatted relationship context string or empty string if no relevant relationships
-    """
-    import random
-    
-    if not current_text or not relationship_states:
-        return ""
-    
-    lines = []
-    
-    # Filter: Only include dimensions that deviate from neutral (>15 points from 50)
-    # AND are semantically relevant to current conversation
-    # Note: This filtering is handled by adaptive_tracker.get_relevant_dimensions()
-    # in the relationship_tracker module
-    
-    # For each relationship pair that deviates from neutral
-    for from_entity, dimensions in relationship_states.items():
-        # Skip if no dimensions deviate from neutral
-        non_neutral_dims = [
-            dim for dim, score in dimensions.items()
-            if abs(score - 50) > 15
-        ]
-        
-        if not non_neutral_dims:
-            continue
-        
-        # Only include top 2 most extreme dimensions
-        non_neutral_dims.sort(key=lambda x: abs(dimensions[x[1]] - 50), reverse=True)
-        top_two = non_neutral_dims[:2]
-        
-        # Generate templates for top two dimensions
-        for dim in top_two:
-            score = dimensions[dim]
-            templates = relationship_templates.get(dim, {})
-            
-            # Find matching template range
-            for (low, high), template_list in templates.items():
-                if low <= score <= high and template_list:
-                    if templates:
-                        template = random.choice(templates)
-                        lines.append(template.format(from_=from_entity, to=to_entity))
-            
-        if lines:
-            lines.append(".")
-    
-    if lines:
-        return "### Relationship Context:\n" + "\n".join(lines)
-    
-    return ""
 
 
 # ============================================================================

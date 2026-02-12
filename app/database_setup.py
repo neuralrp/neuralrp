@@ -30,7 +30,7 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Schema version - increment when making schema changes
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
@@ -84,8 +84,7 @@ def setup_database(database_path: str = "app/data/neuralrp.db") -> bool:
         _create_character_tags_table(c)
         _create_world_tags_table(c)
         _create_chat_npcs_table(c)
-        _create_relationship_states_table(c)
-        _create_entities_table(c)
+
         _create_danbooru_tags_table(c)
         _create_sd_favorites_table(c)
         _create_change_log_table(c)
@@ -230,6 +229,16 @@ def _apply_migrations(c, from_version: int, to_version: int):
         # so we rely on application-level uniqueness checks
 
         print("[MIGRATION] v1.12.0 NPC unification complete")
+
+    # Migration 6 → 7 (v2.0.0: Remove relationship system)
+    if from_version < 7:
+        print("[MIGRATION] Applying v2.0.0 relationship removal...")
+
+        # Drop relationship tables (data is not preserved)
+        _drop_table_if_exists(c, "relationship_states")
+        _drop_table_if_exists(c, "entities")
+
+        print("[MIGRATION] v2.0.0 relationship removal complete")
   
 def _add_column_if_not_exists(c, table: str, column: str, dtype: str):
     """Add a column to a table if it doesn't already exist."""
@@ -440,44 +449,6 @@ def _create_chat_npcs_table(c):
     """)
 
 
-def _create_relationship_states_table(c):
-    """Create relationship_states table."""
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS relationship_states (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id TEXT NOT NULL,
-            character_from TEXT NOT NULL,
-            character_to TEXT NOT NULL,
-            trust INTEGER DEFAULT 50,
-            emotional_bond INTEGER DEFAULT 50,
-            conflict INTEGER DEFAULT 50,
-            power_dynamic INTEGER DEFAULT 50,
-            fear_anxiety INTEGER DEFAULT 50,
-            last_updated INTEGER,
-            last_analyzed_message_id INTEGER,
-            interaction_count INTEGER DEFAULT 0,
-            history TEXT,
-            FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
-            UNIQUE(chat_id, character_from, character_to)
-        )
-    """)
-
-
-def _create_entities_table(c):
-    """Create entities table."""
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS entities (
-            entity_id TEXT PRIMARY KEY,
-            entity_type TEXT NOT NULL,
-            name TEXT NOT NULL,
-            chat_id TEXT NOT NULL,
-            first_seen INTEGER NOT NULL,
-            last_seen INTEGER NOT NULL,
-            FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-        )
-    """)
-
-
 def _create_danbooru_tags_table(c):
     """Create danbooru_tags table."""
     c.execute("""
@@ -595,14 +566,6 @@ def _create_indexes(c):
         # Change log indexes
         ("idx_change_log_entity", "CREATE INDEX IF NOT EXISTS idx_change_log_entity ON change_log(entity_type, entity_id)"),
         ("idx_change_log_time", "CREATE INDEX IF NOT EXISTS idx_change_log_time ON change_log(timestamp DESC)"),
-        
-        # Relationship states indexes
-        ("idx_relationship_states_chat", "CREATE INDEX IF NOT EXISTS idx_relationship_states_chat ON relationship_states(chat_id)"),
-        ("idx_relationship_states_chars", "CREATE INDEX IF NOT EXISTS idx_relationship_states_chars ON relationship_states(character_from, character_to)"),
-        
-        # Entities indexes
-        ("idx_entities_chat", "CREATE INDEX IF NOT EXISTS idx_entities_chat ON entities(chat_id)"),
-        ("idx_entities_type", "CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)"),
         
         # Chat NPCs indexes
         ("idx_chat_npcs_chat", "CREATE INDEX IF NOT EXISTS idx_chat_npcs_chat ON chat_npcs(chat_id)"),

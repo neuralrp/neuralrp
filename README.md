@@ -2,6 +2,8 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
+**v2.0.0 is a breaking release — Forking, relationship tracking, and snapshot variation mode have been removed. Existing v1.x users should review the Migration Notes below before upgrading.**
+
 **tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine that keeps long, multi-character stories from turning into slop by structuring the conversation into clear scenes and aggressively summarizing old chatter, while delivering best-in-class, character-consistent Stable Diffusion images**
 
 **Simple out of the box. Just drop your SillyTavern cards in the folders, there isn't a million different things to configure. Just go.**
@@ -12,7 +14,7 @@
 
 **Next step: Open [Quickstart Guide](docs/QUICKSTART.md) for setup, recommended LLM models, and example characters and worlds**
 
-**Status**: Actively developed, v1.12.0 released. Report bugs in Discussions!
+**Status**: Actively developed, v2.0.0 released. Report bugs in Discussions!
 ---
 
 ## Table of Contents
@@ -35,17 +37,15 @@
 - [License](#license)
 
 ---
+## v2.0.0: Stabilization
 
-## v1.12.0: NPC Migration
+v2.0.0 is a stabilization release. The codebase grew too fast, I kept adding features and wasn't thinking about the state of the codbase until it got out of control. To try to keep the project maintainable, I removed three overly-complex systems: forking, relationship tracking, and snapshot variation mode. If these features are essential for you and you don't mind the bugs, don't download v2.0.0. 
 
-After many struggles with bugs, I bit the bullet and migrated NPC's over to the database from metadata. I also worked on optimizing inpainting under the hood, other bug fixes around NPC's and snapshots and a bunch of testing. Should be pretty stable. Will do more testing over the next few days. 
+Over the coming weeks, I'll debug this and continue to optimize. I want to leave this project in as good a place as I can, and removing those features is going to help me do it.
 
-I'm considering a V2.0, simplified version of NerualRP on Vue 3, since this got so big and bulky. In the meantime, I'll keep up bugfixes for this one, but I'm not planning new features. 
+## Scene-First Architecture
 
-
-## v1.11.0: Scene-First Architecture
-
-This new release represents a large architectural and philosophical shift for NeuralRP. Through extensive testing, I have found that smaller LLMs (I roleplay with a 12b LLM) simply cannot keep characters straight, no matter what you prompt, when lots of dialog is present. Characters just merge together. 
+This represents a large architectural and philosophical shift for NeuralRP. Through extensive testing, I have found that smaller LLMs (I roleplay with a 12b LLM) simply cannot keep characters straight, no matter what you prompt, when lots of dialog is present. Characters just merge together. 
 
 To keep this from happening, I have combined consistent, small chunks of character reinforcement and a "spike" of reinforcement for new characters, along with smart auto-summarization based on scene change, to ensure the LLM both recognizes the change, and doesn't "merge" the new and old characters together.
 
@@ -115,11 +115,7 @@ NeuralRP v1.11.0 uses scene-first architecture for maximum character consistency
 - **6-exchange history window (RP-optimized)** — Last 6 exchanges shown verbatim, older content summarized into scene capsules
 - **Hybrid full card system** — Sticky full cards on turns 1-3, capsules on turns 4+, reset points for returning characters
 - **Context-aware retrieval** — World lore appears when semantically relevant. Canon law reinforced every 3 turns.
-- **Directional relationships** — Alice→Bob ≠ Bob→Alice, tracked automatically, injected when meaningful
 - **Scalability by design** — SCENE CAST (400-600 tokens) + 6 exchanges (900-1500 tokens) + sticky full cards (500-2000, turns 1-3). Supports 5+ character group chats.
-
-**Why Scene-First?**
-Regular character reinforcement along with smart summarization beats more dialog in context. SCENE CAST ensures consistent voice across 50+ turn conversations while the 6-exchange window prevents attention decay. Sticky full cards (first 3 turns + reset points) provide strong early reinforcement without constant repetition.
 
 ---
 
@@ -161,16 +157,6 @@ World lore injects automatically when semantically relevant to the conversation:
 - **Unquoted keys** — Semantic matching for concepts (e.g., dragon → dragons, draconic). You can think of quoted keys as exact bookmarks, unquoted as fuzzy search.
 - **Canon law** — Enforce your core world rules on a customizable turn basis
 
-### Relationship Tracking
-
-Five emotional dimensions tracked between all entities (trust, bond, conflict, power, fear):
-
-- Directional tracking (Alice→Bob separate from Bob→Alice)
-- Automatic updates via semantic analysis
-- Only injected when relevant to current scene
-- Preserved through summarization
-- User is also tracked and develops relationships with Characters and NPC's
-
 ### Intelligent Summarization
 
 Continue conversations beyond context limits. When context approaches 80%:
@@ -181,10 +167,6 @@ Continue conversations beyond context limits. When context approaches 80%:
 - Summarization window to view and customize summaries (or auto-summarize your summaries!)
 
 Relationship state is one of the most difficult things to maintain when summaries happen. The relationship system brings continuity without having to update character cards manually.
-
-### Branching Timelines
-
-Fork any message to create alternate storylines. Characters, NPCs, world info, and relationships copied. NPCs and relationships develop independently across branches.
 
 ---
 
@@ -234,6 +216,32 @@ Tag management for character and world cards:
 
 ---
 
+## Stability and Operations
+
+v2.0.0 adds operational features to support running NeuralRP as a long-term local service, not a script you restart every session.
+
+### Data Safety
+
+- Automatic daily SQLite backups with 30‑day retention and compression.
+- Backup APIs to list, create, delete, and restore backups when needed.
+- Recovery in minutes if database corruption or bad migrations occur
+
+### Operational Hygiene
+
+- Structured logging with rotation (size and time‑based), and configurable log levels.
+- Retention policies for autosaves, unnamed chats, change logs, metrics, and summarized messages.
+- Weekly VACUUM to keep the database lean instead of growing without bound.
+
+Together, these keep NeuralRP from slowly turning into a massive mystery file with no visibility into what's going on.
+
+### Monitoring and Configuration
+
+- A `/api/system/status` endpoint with service health, database and disk stats, backup info, and app metadata.
+- config.yaml for all settings with NEURALRP_{SECTION}_{KEY} environment variable overrides—no more editing Python source to change behavior
+
+Together, these make NeuralRP something you can run for months without manual housekeeping or mystery failures.
+
+
 ## Additional Capabilities
 
 - **Multi-mode chat** — Narrator (third-person), Focus (first-person), Auto mode that automatically detects who should be talking.
@@ -282,6 +290,21 @@ All data in SQLite (neuralrp.db) with automatic JSON export for SillyTavern comp
 - Supports: KoboldCpp, Ollama, Tabby (OpenAI-compatible)
 
 ---
+
+## Migration Notes for v1.x Users
+
+**Data Changes:**
+- **Forking data:** Existing forked chats remain as plain independent chats with no origin linkage
+- **Relationship state:** No migration path—relationship tracking is entirely removed
+
+**Behavioral Changes:**
+- **Forking workflow:** Use "Save As" with different names or summary-based new chats
+- **Regeneration:** "Regenerate" button now uses standard snapshot mode (natural SD seed variations)
+
+**What's Preserved:**
+- All chat history, characters, NPCs, world info, settings
+- Snapshot generation, inpainting, favorites, visual canon
+- NPC functionality under unified storage system
 
 ## Quick Start
 
