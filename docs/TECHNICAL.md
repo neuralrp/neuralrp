@@ -155,16 +155,18 @@ Comfortable fit with 8k minimum context.
 - **Simple**: Single comparison logic vs complex edit tracking
 - **Efficient**: Only regenerates when data actually changes
 
-**Metadata Structure:**
+**Metadata Structure (Capsules stored in character data):**
 ```json
+// Capsules are stored in character data at data.extensions.multi_char_summary
+// Example character structure:
 {
-  "characterCapsules": {
-    "alice.json": "Alice is a brave adventurer...",
-    "npc_123": "Mysterious merchant..."
-  },
-  "characterCapsuleTimestamps": {
-    "alice.json": 1738838400,
-    "npc_123": 1738838500
+  "name": "Alice",
+  "data": {
+    "personality": "...",
+    "description": "...",
+    "extensions": {
+      "multi_char_summary": "Alice is a brave adventurer..."
+    }
   }
 }
 ```
@@ -176,27 +178,26 @@ Comfortable fit with 8k minimum context.
 - **get_and_clear_recent_edits()**: Function no longer used
 
 **Rationale for Removal:**
-- Timestamp-based system is simpler and more reliable
+- Auto-regeneration on edit is simpler and provides immediate feedback
 - No in-memory state to lose on server restart
 - No complex coordination between edit recording and consumption
-- Capsules regenerate automatically without user-visible notifications
+- Capsules regenerate automatically on edit without user-visible notifications
 
 **Behavior When Character/NPC is Edited:**
-1. User edits character/NPC → Save endpoint writes to database/metadata
-2. `updated_at` timestamp set to current time
-3. Next chat turn: System loads character/NPC with new timestamp
-4. Capsule regeneration detects `updated_at > capsule_timestamp`
-5. New capsule generated and timestamp saved
-6. Updated capsule appears in SCENE CAST
+1. User edits character/NPC (personality, body, scenario, or mes_example field)
+2. Save endpoint writes to database
+3. Capsule auto-regenerated immediately via LLM
+4. New capsule stored in `data.extensions.multi_char_summary`
+5. Database updated with new capsule
+6. Updated capsule appears in SCENE CAST on next turn
+
+**Note:** Capsule regeneration only triggers for fields that affect the capsule (personality, body/description, scenario, mes_example). Other fields (first_message, tags, etc.) do not trigger regeneration.
 
 **Why This is Better Than Previous System:**
 - **Previous**: Complex in-memory tracking, one-time notifications, manual coordination
-- **Current**: Simple timestamp comparison, automatic regeneration, persistent state
+- **Current**: Auto-regeneration on edit, immediate feedback, persistent state
 
-For a deep dive into context hygiene tradeoffs and reasoning, see [Context Hygiene Philosophy](#context-hygiene-philosophy) in the Design Decisions section.
-
-
-For a deep dive into context hygiene tradeoffs and reasoning, see [Context Hygiene Philosophy](#context-hygiene-philosophy) in the Design Decisions section.
+For a deep dive into context hygiene tradeoffs and reasoning, see [Context Hygiene Philosophy](#context-hygiene-philosophy) in the Design Decictions section.
 
 ### Project Structure
 
@@ -231,27 +232,53 @@ Resource Manager (queues operations)
 
 ### Configuration Settings
 
-NeuralRP uses a centralized `CONFIG` dictionary in `main.py` for global settings. These defaults can be overridden per chat via the settings UI.
+NeuralRP uses `config.yaml` as the primary configuration file, loaded at startup via `app/config_loader.py`. Settings can be overridden per-chat via the settings UI.
 
-**Global Configuration (main.py):**
+**Configuration File (config.yaml):**
 
-```python
-CONFIG = {
-    "kobold_url": "http://127.0.0.1:5001",
-    "sd_url": "http://127.0.0.1:7861",
-    "system_prompt": "Write a highly detailed, creative, and immersive response. Stay in character at all times.",
-    "performance_mode_enabled": True,
-    "max_context": 8192,           # v1.11.0+
-    "summarize_threshold": 0.80        # v1.11.0+
-}
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8000
+  log_level: "INFO"
+
+kobold:
+  url: "http://127.0.0.1:5001"
+
+stable_diffusion:
+  url: "http://127.0.0.1:7861"
+
+context:
+  max_context: 10000
+  summarize_trigger_turn: 10
+  summarize_threshold: 0.90
+  history_window: 5
+  max_exchanges_per_scene: 15
+  world_info_reinforce_freq: 3
+
+sampling:  # v2.0.1+
+  temperature: 0.7
+  top_p: 0.85
+  top_k: 60
+  repetition_penalty: 1.12
+
+system_prompt: "Write a highly detailed, creative, and immersive response. Stay in character at all times."
 ```
 
-**Configuration Settings:**
+**Environment Variable Overrides:**
+
+Any setting can be overridden via environment variables using the format `NEURALRP_{SECTION}_{KEY}`:
+- `NEURALRP_SAMPLING_REPETITION_PENALTY=1.2`
+- `NEURALRP_CONTEXT_MAX_CONTEXT=16384`
+- `NEURALRP_KOBOLD_URL=http://192.168.1.100:5001`
+
+**Core Configuration Settings:**
 
 | Setting | Default | Range | Description |
 |----------|---------|--------|-------------|
 | `max_context` | 8192 | 1024-32768 | Maximum token context window for LLM generation |
-| `summarize_threshold` | 0.80 | 0.50-1.00 | Context percentage triggering threshold summarization (v1.11.0+) |
+| `summarize_trigger_turn` | 10 | 5-50 | Turn-based summarization trigger (v2.0.1+) |
+| `summarize_threshold` | 0.90 | 0.50-1.00 | Token percentage backstop (v2.0.1+) |
 | `world_info_reinforce_freq` | 3 | 1-100 | Turns between canon law reinforcement |
 | `kobold_url` | http://127.0.0.1:5001 | URL | KoboldCpp or OpenAI-compatible endpoint |
 | `sd_url` | http://127.0.0.1:7861 | URL | AUTOMATIC1111 WebUI endpoint |
@@ -269,56 +296,110 @@ CONFIG = {
   - 8192: Modern models (LLaMA 3 8B, Mistral, etc.)
   - 16384: Large context models (Command R, Qwen, etc.)
 
-**`summarize_threshold` (0.80):**
-- **Purpose**: Context percentage that triggers threshold summarization
-- **Usage**: Checked by `trigger_threshold_summarization()` after each generation
-- **Behavior**:
-  - When `token_count / max_context >= summarize_threshold`, old messages are summarized
-  - Lower values (0.50): More frequent summarization, less context
-  - Higher values (0.95): Less frequent summarization, more context but risk overflow
-- **Recommended**: 0.70-0.85 for balanced performance
-- **Per-Chat Override**: Can be customized in chat settings UI
+**`summarize_trigger_turn` (10) - v2.0.1+:**
+- **Purpose**: Turn-based summarization trigger
+- **Usage**: Summarizes when `absolute_turn >= summarize_trigger_turn`
+- **Behavior**: Guarantees summarization by turn N, preventing long "pre-summary" runs where LLM collapse occurs
+- **Recommended**: 8-12 turns for 11-12B models, 6-8 for 7B models
+- **UI Override**: Can be customized in settings UI ("Summarize at Turn")
+
+**`summarize_threshold` (0.90) - v2.0.1+:**
+- **Purpose**: Token percentage backstop for edge cases
+- **Usage**: Summarizes when `token_count / max_context >= summarize_threshold`
+- **Behavior**: Catches verbose conversations that would overflow before turn trigger
+- **Recommended**: 0.90 (only triggers if turn-based misses due to very long messages)
+- **Note**: UI no longer exposes this; turn-based is the primary trigger
+
+**v2.0.1 Summarization Logic:**
+```python
+# Trigger if EITHER condition is met
+over_turn_limit = absolute_turn >= summarize_trigger_turn
+over_token_limit = total_tokens >= (max_context * summarize_threshold)
+
+if over_turn_limit or over_token_limit:
+    await trigger_threshold_summarization(chat_id)
+```
+
+**Why Turn-Based?**
+- Percentage-based triggers allow unpredictable "pre-summary" runs (5-20 turns)
+- Long pre-summary runs are exactly when small models start looping
+- Turn-based guarantees summarization happens before the danger zone
+
+**v2.0.1+ Sampling Parameters:**
+
+These parameters control LLM generation quality and help prevent "LLM collapse" (repetition loops in long contexts), especially important for 7-14B models.
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| `temperature` | 0.7 | 0.1-2.0 | Randomness of output. Lower = deterministic, higher = creative |
+| `top_p` | 0.85 | 0.1-1.0 | Nucleus sampling. Cuts off tokens below cumulative probability threshold |
+| `top_k` | 60 | 1-1000 | Limits vocabulary to top K tokens. Prevents wild token selection |
+| `repetition_penalty` | 1.12 | 1.0-2.0 | Penalizes repeated tokens. 1.0 = off, 1.1-1.2 = gentle, 1.3+ = aggressive |
+
+**`repetition_penalty` Guidelines:**
+- **1.0**: No penalty (not recommended for long chats)
+- **1.1-1.15**: Gentle penalty, preserves intentional repetition in dialogue
+- **1.15-1.25**: Moderate penalty, good for most use cases
+- **1.3+**: Aggressive penalty, may produce unnatural output
+
+**Example: Tuning for Different Model Sizes:**
+```yaml
+# For 7B models (more prone to loops)
+sampling:
+  repetition_penalty: 1.2
+  top_p: 0.8
+  top_k: 40
+
+# For 11-12B models (balanced)
+sampling:
+  repetition_penalty: 1.12
+  top_p: 0.85
+  top_k: 60
+
+# For 20B+ models (less repetition prone)
+sampling:
+  repetition_penalty: 1.05
+  top_p: 0.9
+  top_k: 100
+```
 
 **Setting Application Order:**
 
-1. **Global Default**: `CONFIG` dictionary values used as defaults
-2. **Chat Settings**: Per-chat settings override global defaults (if set)
-3. **Request Settings**: Frontend may pass additional settings in API requests
-4. **Final Value**: Used in context assembly, summarization, generation
+1. **config.yaml**: Global defaults loaded at startup via `app/config_loader.py`
+2. **Environment Variables**: Override config.yaml (e.g., `NEURALRP_SAMPLING_REPETITION_PENALTY=1.2`)
+3. **Chat Settings**: Per-chat settings override global defaults (if set via UI)
+4. **Request Settings**: Frontend may pass additional settings in API requests
+5. **Final Value**: Used in context assembly, summarization, generation
 
 **Example Usage in Code:**
 
 ```python
+# Get sampling params with fallback chain: request → config.yaml → hardcoded
+sampling_config = CONFIG.get('sampling', {})
+temp = request.settings.get("temperature", sampling_config.get('temperature', 0.7))
+top_p = request.settings.get("top_p", sampling_config.get('top_p', 0.85))
+rep_pen = request.settings.get("repetition_penalty", sampling_config.get('repetition_penalty', 1.12))
+
 # Get context limit (per-chat override or global default)
-max_context = request.settings.get('max_context', CONFIG['max_context'])
-
-# Get summarization threshold (per-chat override or global default)
-threshold = request.settings.get('summarize_threshold', CONFIG['summarize_threshold'])
-
-# Check if summarization needed
-if token_count / max_context >= threshold:
-    await trigger_threshold_summarization(chat_id)
+max_context = request.settings.get('max_context', CONFIG['context']['max_context'])
 ```
 
 **Configuration Persistence:**
 
-Global settings are hard-coded in `main.py` and apply across all chats:
-
 | Setting Type | Stored | Changed By | Persistence |
 |--------------|---------|-------------|---------------|
-| Global CONFIG | Code only | Developer (edit main.py) | Forever (code change) |
+| config.yaml | File system | User (edit YAML) | Until file changed |
+| Environment vars | Shell/OS | User (export/set) | Process lifetime |
 | Chat Settings | Chat metadata | User (settings UI) | Per chat (in database) |
 
 **Adding New Global Settings:**
 
 To add a new global setting:
 
-1. **Add to CONFIG dictionary:**
-   ```python
-   CONFIG = {
-       # ... existing settings ...
-       "new_setting": default_value
-   }
+1. **Add to config.yaml:**
+   ```yaml
+   sampling:
+     new_setting: default_value
    ```
 
 2. **Document purpose and usage in this section**
@@ -329,7 +410,8 @@ To add a new global setting:
 
 4. **Use in code with fallback:**
    ```python
-   value = request.settings.get('new_setting', CONFIG['new_setting'])
+   sampling_config = CONFIG.get('sampling', {})
+   value = request.settings.get('new_setting', sampling_config.get('new_setting', default_fallback))
    ```
 
 ---
@@ -3606,7 +3688,8 @@ Frontend needs context size for SD optimization. Rather than forcing frontend to
 When conversation context grows too large, NeuralRP automatically summarizes older messages to stay within the model's context window.
 
 **Trigger Conditions**:
-- Total tokens > 80% of model's max context (configurable via `summarize_threshold`, default 0.80)
+- Turn >= `summarize_trigger_turn` (default 10, v2.0.1+)
+- OR total tokens > 90% of model's max context (`summarize_threshold` backstop)
 - Message count > 10 (minimum for summarization)
 - Cast change: Character departs scene (triggers scene capsule)
 
@@ -3625,7 +3708,7 @@ Scene capsule summarization is an advanced async post-response summarization sys
 
 | Aspect | Traditional (v1.10.4-) | Scene Capsule (v1.11.0+) |
 |---------|---------------------------|----------------------------|
-| **Trigger** | Threshold only (context > 80%) | Threshold + Cast Change |
+| **Trigger** | Threshold only (context > 80%) | Turn-based + Token backstop |
 | **Grouping** | Flat batches (10 messages) | Scene-aware (by cast changes) |
 | **Capsule Size** | 150 tokens | 200 tokens |
 | **Execution** | Synchronous (blocks generation) | Async (post-response, non-blocking) |
@@ -3945,7 +4028,8 @@ Scene (Turns 32-47): Alice and Charlie reunited at the ruins entrance. Charlie r
 
 | Setting | Default | Range | Purpose |
 |---------|---------|--------|---------|
-| `summarize_threshold` | 0.80 | 0.50-1.00 | Context percentage triggering threshold summarization |
+| `summarize_trigger_turn` | 10 | 5-50 | Turn number triggering summarization |
+| `summarize_threshold` | 0.90 | 0.50-1.00 | Token percentage backstop |
 | `max_exchanges_per_scene` | 15 | 5-50 | Maximum exchanges before forcing scene boundary |
 
 **Metadata Structure:**
@@ -4267,7 +4351,7 @@ async def autosummarize_selection(chat_id: str, request: dict):
 
 ### Manual Control
 
-You can trigger summarization manually via API or by setting a `summarize_threshold` lower than default 85%.
+You can trigger summarization manually via API or by adjusting `summarize_trigger_turn` in settings or config.yaml.
 
 ---
 

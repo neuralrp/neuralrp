@@ -221,7 +221,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# SD Presets for context-aware optimization
+# SD Presets for context-aware optimization (loaded from config)
 SD_PRESETS = {
     "normal": {
         "steps": 25,
@@ -242,6 +242,14 @@ SD_PRESETS = {
         "threshold": 15000
     }
 }
+
+def load_sd_presets_from_config():
+    """Load SD presets from config, falling back to defaults if not configured"""
+    global SD_PRESETS
+    config_presets = CONFIG.get("stable_diffusion", {}).get("presets", {})
+    if config_presets:
+        SD_PRESETS = config_presets
+        print(f"[CONFIG] Loaded SD presets from config: {list(SD_PRESETS.keys())}")
 
 # Resource Manager for operation queuing
 class ResourceManager:
@@ -476,16 +484,16 @@ Keep the reply under 3–5 paragraphs."""
 SCENE_CAPSULE_PROMPT = """### System: Summarize the following conversation into a scene capsule.
 
 Requirements:
-- Use neutral, factual, past-tense prose
-- Include key events and plot developments
-- Note character interactions and dialogue exchanges
-- Record any world information discovered
-- Explicitly mention when characters enter or exit
+- MAXIMUM 100 words. This is a hard limit.
+- Use terse, factual, past-tense prose
+- Only include: plot-critical events, major character decisions, scene transitions
+- Character entries/exits: "X entered", "Y left" only
 
 Do NOT:
-- Mimic character voices or speech patterns
-- Include direct dialogue quotes
-- Add stylistic flourishes
+- Include dialogue summaries or conversation details
+- Describe emotional states or reactions
+- Add context, filler, or connective phrases
+- Exceed 100 words
 
 {departed_note}
 
@@ -1137,8 +1145,8 @@ async def get_token_count(text: str):
                 timeout=10.0
             )
             return res.json().get("value", 0)
-        except:
-            # Fallback to rough estimate if API fails
+        except Exception as e:
+            logger.error(f"Token count API failed: {type(e).__name__}: {e}")
             return len(text) // 4
 
 # World info optimization: LRU caching to avoid reprocessing
@@ -2203,6 +2211,10 @@ async def startup_event():
     logger.info("Scanning for new JSON files to import...")
     auto_import_json_files()
 
+    # Auto-generate capsules for characters that don't have them (v2.0.1)
+    logger.info("Ensuring all characters have capsules...")
+    await ensure_capsules_for_all_characters()
+
     # Populate FTS5 search index with existing messages (one-time migration)
     logger.info("Running FTS5 search index migration...")
     migrate_populate_fts()
@@ -2613,6 +2625,7 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         active_names.append(get_character_name(char_obj))
     
     # Extract capsules from character objects for SCENE CAST
+    # Both global characters and NPCs have _filename set, so one loop captures all
     character_capsules = {}
     for char in request.characters:
         entity_id = char.get('_filename')
@@ -2620,14 +2633,6 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
             capsule = char.get('data', {}).get('extensions', {}).get('multi_char_summary')
             if capsule:
                 character_capsules[entity_id] = capsule
-    
-    for char in request.characters:
-        if char.get('is_npc'):
-            entity_id = char.get('entity_id')
-            if entity_id:
-                capsule = char.get('data', {}).get('extensions', {}).get('multi_char_summary')
-                if capsule:
-                    character_capsules[entity_id] = capsule
     
     # === RECORD FIRST TURNS FOR NEW CHARACTERS ===
     for char in request.characters:
@@ -2727,6 +2732,7 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
     
     # Detect characters needing full cards (reset points)
     chars_needing_full_card = []
+    chars_at_reset_point = []  # Track which chars need full_card_turn updated
     for char in request.characters:
         char_ref = char.get('_filename') or char.get('entity_id')
         char_name = get_character_name(char)
@@ -2764,6 +2770,10 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         if is_first_appearance or is_returning or is_in_sticky_window:
             chars_needing_full_card.append(char_ref)
             
+            # Only update sticky window tracking on reset points (first appearance or returning)
+            if is_first_appearance or is_returning:
+                chars_at_reset_point.append(char_ref)
+            
             if is_in_sticky_window:
                 print(f"[CONTEXT] {char_name}: Full card (sticky window)")
             else:
@@ -2781,8 +2791,9 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
             full_card = build_full_character_card(char)
             full_prompt += full_card + "\n\n"
             
-            # Record that this character got a full card this turn
-            character_full_card_turns[char_ref] = absolute_turn
+            # Only update full_card_turn on reset points, not sticky window reinforcement
+            if char_ref in chars_at_reset_point:
+                character_full_card_turns[char_ref] = absolute_turn
     
     # SCENE CAST capsules for remaining characters (no duplicates)
     scene_cast = build_scene_cast_block(
@@ -2794,8 +2805,9 @@ def construct_prompt(request: PromptRequest, character_first_turns: Dict[str, in
         full_prompt += scene_cast + "\n\n"
 
     # === 7. CHAT HISTORY (split into recent/old) ===
-    # Use new window-based approach: recent 10 exchanges verbatim
-    recent_messages, old_messages = split_messages_by_window(request.messages)
+    # Use new window-based approach: recent N exchanges verbatim
+    history_window = request.settings.get("history_window", CONFIG['context']['history_window'])
+    recent_messages, old_messages = split_messages_by_window(request.messages, history_window)
 
     full_prompt += "\n### Chat History:\n"
     for msg in recent_messages:
@@ -2858,7 +2870,7 @@ def should_show_canon_law(current_turn: int, freq: int) -> bool:
 
 def split_messages_by_window(
     messages: List[ChatMessage],
-    max_exchanges: int = 6
+    max_exchanges: int = 5
 ) -> Tuple[List[ChatMessage], List[ChatMessage]]:
     """
     Split messages into recent (verbatim) and old (candidates for summarization).
@@ -3006,7 +3018,8 @@ async def trigger_cast_change_summarization(
 
         messages = chat.get('messages', [])
         chat_messages = [ChatMessage(**msg) for msg in messages]
-        recent, old = split_messages_by_window(chat_messages)
+        history_window = CONFIG['context']['history_window']
+        recent, old = split_messages_by_window(chat_messages, history_window)
 
         if not old:
             logger.info(f"Cast-change summarization: no old messages for chat {chat_id}")
@@ -3035,6 +3048,26 @@ async def trigger_cast_change_summarization(
         new_summary = (existing_summary + "\n\n" + scene_capsule).strip()
         chat['summary'] = new_summary
         chat['messages'] = [m.model_dump() for m in recent]
+        
+        metadata = chat.get('metadata', {})
+        
+        if snapshot_analyzer:
+            active_chars = chat.get('activeCharacters', [])
+            char_names = [c.get('name', '') for c in active_chars] if active_chars else []
+            primary_char = char_names[0] if char_names else None
+            
+            cache_data = await snapshot_analyzer.extract_location_dress_for_cache(
+                messages=chat.get('messages', []),
+                character_names=char_names,
+                primary_character=primary_char
+            )
+            if cache_data.get('location') or cache_data.get('dress'):
+                if 'snapshot_cache' not in metadata:
+                    metadata['snapshot_cache'] = {}
+                metadata['snapshot_cache'].update(cache_data)
+                print(f"[SNAPSHOT CACHE] Updated cache via cast-change summarization: {cache_data}")
+        
+        chat['metadata'] = metadata
         db_save_chat(chat_id, chat)
 
         logger.info(f"Cast-change summarization completed for chat {chat_id} ({len(old)} messages, truncated to {len(recent)} active)")
@@ -3059,7 +3092,8 @@ async def trigger_threshold_summarization(
 
         messages = chat.get('messages', [])
         chat_messages = [ChatMessage(**msg) for msg in messages]
-        recent, old = split_messages_by_window(chat_messages)
+        history_window = CONFIG['context']['history_window']
+        recent, old = split_messages_by_window(chat_messages, history_window)
 
         if not old:
             logger.info(f"Threshold summarization: no old messages for chat {chat_id}")
@@ -3095,6 +3129,26 @@ async def trigger_threshold_summarization(
         new_summary = (existing_summary + "\n\n" + combined_capsules).strip()
         chat['summary'] = new_summary
         chat['messages'] = [m.model_dump() for m in recent]
+        
+        metadata = chat.get('metadata', {})
+        
+        if snapshot_analyzer:
+            active_chars = chat.get('activeCharacters', [])
+            char_names = [c.get('name', '') for c in active_chars] if active_chars else []
+            primary_char = char_names[0] if char_names else None
+            
+            cache_data = await snapshot_analyzer.extract_location_dress_for_cache(
+                messages=chat.get('messages', []),
+                character_names=char_names,
+                primary_character=primary_char
+            )
+            if cache_data.get('location') or cache_data.get('dress'):
+                if 'snapshot_cache' not in metadata:
+                    metadata['snapshot_cache'] = {}
+                metadata['snapshot_cache'].update(cache_data)
+                print(f"[SNAPSHOT CACHE] Updated cache via threshold summarization: {cache_data}")
+        
+        chat['metadata'] = metadata
         db_save_chat(chat_id, chat)
 
         logger.info(f"Threshold summarization completed for chat {chat_id} ({len(scenes)} scenes, {len(old)} messages, truncated to {len(recent)} active)")
@@ -3928,6 +3982,85 @@ Output only capsule summary line, nothing else."""
     result = await call_llm_helper(system, prompt, 200)
     return result.strip()
 
+
+async def ensure_capsules_for_all_characters():
+    """Auto-generate capsules for any global characters missing them.
+    
+    Called on startup to handle legacy characters that were imported before
+    the capsule system was added.
+    """
+    try:
+        from app.database import db_get_all_characters, db_save_character
+        
+        characters = db_get_all_characters()
+        updated_count = 0
+        
+        for char in characters:
+            filename = char.get('_filename')
+            if not filename:
+                continue
+            
+            # Check if character already has a capsule
+            existing_capsule = char.get('data', {}).get('extensions', {}).get('multi_char_summary')
+            if existing_capsule and existing_capsule.strip():
+                continue
+            
+            # Get character data for capsule generation
+            data = char.get('data', char)
+            name = data.get('name', '')
+            description = data.get('description', '')
+            personality = data.get('personality', '')
+            scenario = data.get('scenario', '')
+            mes_example = data.get('mes_example', '')
+            gender = data.get('extensions', {}).get('gender', '')
+            
+            # Skip if no meaningful data to generate capsule from
+            if not description and not personality:
+                logger.info(f"[CAPSULE] Skipping {filename} - no description or personality")
+                continue
+            
+            try:
+                # Generate capsule
+                capsule = await generate_capsule_for_character(
+                    char_name=name,
+                    description=description,
+                    personality=personality,
+                    scenario=scenario,
+                    mes_example=mes_example,
+                    gender=gender
+                )
+                
+                # Update character data with capsule
+                if 'extensions' not in data:
+                    data['extensions'] = {}
+                data['extensions']['multi_char_summary'] = capsule
+                
+                # Save to database and JSON file
+                db_save_character(char, filename)
+                
+                # Also update JSON file
+                file_path = os.path.join(DATA_DIR, "characters", filename)
+                save_data = char.copy()
+                if '_filename' in save_data:
+                    del save_data['_filename']
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(save_data, f, indent=2, ensure_ascii=False)
+                
+                updated_count += 1
+                logger.info(f"[CAPSULE] Auto-generated capsule for {filename}")
+                
+            except Exception as e:
+                logger.warning(f"[CAPSULE] Failed to generate capsule for {filename}: {e}")
+        
+        if updated_count > 0:
+            logger.info(f"[CAPSULE] Completed: {updated_count} capsules generated")
+        else:
+            logger.info("[CAPSULE] All characters already have capsules")
+            
+    except Exception as e:
+        logger.warning(f"[CAPSULE] Error in ensure_capsules_for_all_characters: {e}")
+
+
 # Character Editing Endpoints
 @app.post("/api/characters/edit-field")
 async def edit_character_field(req: CharacterEditRequest):
@@ -3959,7 +4092,28 @@ async def edit_character_field(req: CharacterEditRequest):
         if not sync_result["success"]:
             print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
         
-
+        # Auto-regenerate capsule if edited field affects it
+        capsule_fields = {"personality", "body", "scenario", "mes_example"}
+        if req.field in capsule_fields:
+            try:
+                data = char_data.get("data", char_data)
+                capsule = await generate_capsule_for_character(
+                    char_name=char_data.get("name", data.get("name", "")),
+                    description=data.get("description", ""),
+                    personality=data.get("personality", ""),
+                    scenario=data.get("scenario", ""),
+                    mes_example=data.get("mes_example", ""),
+                    gender=data.get("extensions", {}).get("gender", "")
+                )
+                if "extensions" not in data:
+                    data["extensions"] = {}
+                data["extensions"]["multi_char_summary"] = capsule
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(char_data, f, indent=2, ensure_ascii=False)
+                db_save_character(char_data, req.filename)
+                print(f"[CAPSULE] Auto-regenerated capsule for {req.filename} after {req.field} edit")
+            except Exception as e:
+                print(f"[CAPSULE] Failed to regenerate capsule for {req.filename}: {e}")
         
         return {"success": True, "message": f"Field '{req.field}' updated successfully"}
         
@@ -4049,7 +4203,28 @@ async def edit_character_field_ai(req: CharacterEditFieldRequest):
         if not sync_result["success"]:
             print(f"Warning: Character synced to JSON but database sync failed: {sync_result['message']}")
 
-
+        # Auto-regenerate capsule if edited field affects it
+        capsule_fields = {"personality", "body", "scenario", "mes_example"}
+        if req.field in capsule_fields:
+            try:
+                data = char_data.get("data", char_data)
+                capsule = await generate_capsule_for_character(
+                    char_name=char_data.get("name", data.get("name", "")),
+                    description=data.get("description", ""),
+                    personality=data.get("personality", ""),
+                    scenario=data.get("scenario", ""),
+                    mes_example=data.get("mes_example", ""),
+                    gender=data.get("extensions", {}).get("gender", "")
+                )
+                if "extensions" not in data:
+                    data["extensions"] = {}
+                data["extensions"]["multi_char_summary"] = capsule
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(char_data, f, indent=2, ensure_ascii=False)
+                db_save_character(char_data, req.filename)
+                print(f"[CAPSULE] Auto-regenerated capsule for {req.filename} after {req.field} AI edit")
+            except Exception as e:
+                print(f"[CAPSULE] Failed to regenerate capsule for {req.filename}: {e}")
 
         return {"success": True, "text": result}
 
@@ -4162,6 +4337,27 @@ async def edit_npc_field_ai(chat_id: str, npc_id: str, req: NpcEditFieldRequest)
             chat["metadata"] = metadata
             db_save_chat(chat_id, chat)
             print(f"[NPC_EDIT_AI] NPC {filename} updated in database and metadata")
+
+        # Auto-regenerate capsule if edited field affects it
+        capsule_fields = {"personality", "body", "scenario", "mes_example"}
+        if req.field in capsule_fields:
+            try:
+                data = npc_data.get("data", npc_data)
+                capsule = await generate_capsule_for_character(
+                    char_name=npc_data.get("name", data.get("name", "")),
+                    description=data.get("description", ""),
+                    personality=data.get("personality", ""),
+                    scenario=data.get("scenario", ""),
+                    mes_example=data.get("mes_example", ""),
+                    gender=data.get("extensions", {}).get("gender", "")
+                )
+                if "extensions" not in data:
+                    data["extensions"] = {}
+                data["extensions"]["multi_char_summary"] = capsule
+                db_update_npc(chat_id, filename, data)
+                print(f"[CAPSULE] Auto-regenerated capsule for NPC {filename} after {req.field} AI edit")
+            except Exception as e:
+                print(f"[CAPSULE] Failed to regenerate capsule for NPC {filename}: {e}")
 
         return {"success": True, "text": result}
 
@@ -4769,7 +4965,8 @@ async def chat(request: PromptRequest):
 
     # Check for summarization need
     max_ctx = request.settings.get("max_context", CONFIG['context']['max_context'])
-    threshold = request.settings.get("summarize_threshold", CONFIG['context']['summarize_threshold'])
+    summarize_threshold = request.settings.get("summarize_threshold", CONFIG['context']['summarize_threshold'])
+    summarize_trigger_turn = request.settings.get("summarize_trigger_turn", CONFIG['context']['summarize_trigger_turn'])
     
     current_request = request
     new_summary = request.summary or ""
@@ -4834,8 +5031,12 @@ async def chat(request: PromptRequest):
 
     print(f"Generated Prompt ({tokens} tokens):\n{prompt}")
     
-    # Extract settings for generation
-    temp = request.settings.get("temperature", 0.7)
+    # Extract sampling params - defaults from config.yaml, overridable via request.settings
+    sampling_config = CONFIG.get('sampling', {})
+    temp = request.settings.get("temperature", sampling_config.get('temperature', 0.7))
+    top_p = request.settings.get("top_p", sampling_config.get('top_p', 0.85))
+    top_k = request.settings.get("top_k", sampling_config.get('top_k', 60))
+    rep_pen = request.settings.get("repetition_penalty", sampling_config.get('repetition_penalty', 1.12))
     max_len = request.settings.get("max_length", 250)
     mode = request.mode or "narrator"
 
@@ -4875,6 +5076,9 @@ async def chat(request: PromptRequest):
                     "prompt": prompt,
                     "max_length": max_len,
                     "temperature": temp,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "rep_pen": rep_pen,
                     "stop_sequence": stops
                 },
                 timeout=60.0
@@ -4950,14 +5154,23 @@ async def chat(request: PromptRequest):
                     canon_law_entries=canon_law_entries
                 )
 
-            # 2. Threshold-based summarization
+            # 2. Turn-based summarization with percentage backstop
+            # Trigger if: turn >= trigger_turn OR tokens >= threshold%
             max_context = request.settings.get('max_context', CONFIG['context']['max_context'])
             all_messages_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in current_request.messages])
             all_messages_tokens = await get_token_count(all_messages_text)
             existing_summary_tokens = await get_token_count(current_request.summary or "")
             total_tokens = all_messages_tokens + existing_summary_tokens
-            if total_tokens >= (max_context * 0.80):
+            
+            over_turn_limit = absolute_turn >= summarize_trigger_turn
+            over_token_limit = total_tokens >= (max_context * summarize_threshold)
+            
+            if over_turn_limit or over_token_limit:
                 data["_summarization_triggered"] = True
+                if over_turn_limit and not over_token_limit:
+                    print(f"[SUMMARIZE] Turn-based trigger: turn {absolute_turn} >= {summarize_trigger_turn}")
+                elif over_token_limit and not over_turn_limit:
+                    print(f"[SUMMARIZE] Token-based backstop: {total_tokens} >= {int(max_context * summarize_threshold)} ({int(summarize_threshold*100)}%)")
                 await trigger_threshold_summarization(
                     chat_id=current_request.chat_id,
                     canon_law_entries=canon_law_entries
@@ -5024,15 +5237,24 @@ async def chat(request: PromptRequest):
                     canon_law_entries=canon_law_entries
                 )
 
-            # 2. Threshold-based summarization
+            # 2. Turn-based summarization with percentage backstop
+            # Trigger if: turn >= trigger_turn OR tokens >= threshold%
             max_context = request.settings.get('max_context', CONFIG['context']['max_context'])
             all_messages_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in current_request.messages])
             all_messages_tokens = await get_token_count(all_messages_text)
             ai_response_text = response.get("results", [{}])[0].get("text", "")
             ai_response_tokens = await get_token_count(ai_response_text)
             total_tokens = all_messages_tokens + ai_response_tokens
-            if total_tokens >= (max_context * 0.80):
+            
+            over_turn_limit = absolute_turn >= summarize_trigger_turn
+            over_token_limit = total_tokens >= (max_context * summarize_threshold)
+            
+            if over_turn_limit or over_token_limit:
                 response["_summarization_triggered"] = True
+                if over_turn_limit and not over_token_limit:
+                    print(f"[SUMMARIZE] Turn-based trigger: turn {absolute_turn} >= {summarize_trigger_turn}")
+                elif over_token_limit and not over_turn_limit:
+                    print(f"[SUMMARIZE] Token-based backstop: {total_tokens} >= {int(max_context * summarize_threshold)} ({int(summarize_threshold*100)}%)")
                 await trigger_threshold_summarization(
                     chat_id=current_request.chat_id,
                     canon_law_entries=canon_law_entries
@@ -5044,6 +5266,7 @@ async def chat(request: PromptRequest):
                 updated_chat_id = updated_chat.get('id', current_request.chat_id)
                 response.setdefault("_updated_state", {})["summary"] = updated_chat.get('summary', '')
                 response.setdefault("_updated_state", {})["chat_id"] = updated_chat_id
+                response.setdefault("_updated_state", {})["messages"] = [m.model_dump() for m in [ChatMessage(**msg) for msg in updated_chat.get('messages', [])]]
 
             return response
         except Exception as e:
@@ -5128,6 +5351,10 @@ async def generate_image(params: SDParams):
             final_height = params.height
 
         async with httpx.AsyncClient() as client:
+            sd_config = CONFIG.get("stable_diffusion", {})
+            defaults = sd_config.get("defaults", {})
+            hires_config = defaults.get("hires_fix", {})
+            
             payload = {
                 "prompt": processed_prompt,
                 "negative_prompt": params.negative_prompt,
@@ -5136,8 +5363,20 @@ async def generate_image(params: SDParams):
                 "width": final_width,
                 "height": final_height,
                 "sampler_name": params.sampler_name,
-                "scheduler": params.scheduler
+                "scheduler": params.scheduler,
+                "seed": defaults.get("seed", -1),
+                "restore_faces": defaults.get("restore_faces", False),
+                "tiling": defaults.get("tiling", False),
+                "n_iter": defaults.get("n_iter", 1),
+                "clip_skip": defaults.get("clip_skip", 1)
             }
+            
+            if hires_config.get("enabled", False):
+                payload["enable_hr"] = True
+                payload["hr_scale"] = hires_config.get("scale", 2)
+                payload["hr_upscaler"] = hires_config.get("upscaler", "Latent")
+                payload["denoising_strength"] = hires_config.get("denoising_strength", 0.7)
+            
             preset_info = preset if preset else 'user'
             print(f"SD Prompt Construction (preset applied: {preset_info}): {processed_prompt}")
 
@@ -5660,6 +5899,13 @@ async def generate_chat_snapshot(request: SnapshotRequest):
         print(f"[SNAPSHOT] Aggregated character tags: {character_tags}")
 
         # Analyze scene using character-scoped JSON extraction
+        # First, check for cached location/dress from summarization
+        snapshot_cache = chat.get('metadata', {}).get('snapshot_cache', {})
+        cached_location = snapshot_cache.get('location', '')
+        cached_dress = snapshot_cache.get('dress', '')
+        
+        print(f"[SNAPSHOT] Cache check: location='{cached_location}', dress='{cached_dress}'")
+        
         scene_analysis = await snapshot_analyzer.analyze_scene(
             messages,
             request.chat_id,
@@ -5668,8 +5914,47 @@ async def generate_chat_snapshot(request: SnapshotRequest):
             primary_character_card=primary_char_card
         )
         
-        # Extract scene JSON for simplified prompt building
         scene_json = scene_analysis.get('scene_json', {})
+        
+        if cached_location:
+            scene_json['location'] = cached_location
+            print(f"[SNAPSHOT] Using cached location: {cached_location}")
+        elif not scene_json.get('location'):
+            print("[SNAPSHOT] No cached location or extracted location, extracting from last 5 messages")
+            fallback_cache = await snapshot_analyzer.extract_location_dress_for_cache(
+                messages,
+                character_names=character_names,
+                primary_character=primary_char_name
+            )
+            if fallback_cache.get('location'):
+                scene_json['location'] = fallback_cache['location']
+                print(f"[SNAPSHOT] Fallback extracted location: {fallback_cache['location']}")
+        
+        if cached_dress:
+            scene_json['dress'] = cached_dress
+            print(f"[SNAPSHOT] Using cached dress: {cached_dress}")
+        elif not scene_json.get('dress'):
+            print("[SNAPSHOT] No cached dress or extracted dress, extracting from last 5 messages")
+            if not fallback_cache:
+                fallback_cache = await snapshot_analyzer.extract_location_dress_for_cache(
+                    messages,
+                    character_names=character_names,
+                    primary_character=primary_char_name
+                )
+            if fallback_cache.get('dress'):
+                scene_json['dress'] = fallback_cache['dress']
+                print(f"[SNAPSHOT] Fallback extracted dress: {fallback_cache['dress']}")
+        
+        if not scene_json.get('action'):
+            print("[SNAPSHOT] No action from scene analysis, extracting from last 2 messages")
+            extracted_action = await snapshot_analyzer.extract_action_only(
+                messages,
+                character_names=character_names,
+                primary_character=primary_char_name
+            )
+            if extracted_action:
+                scene_json['action'] = extracted_action
+                print(f"[SNAPSHOT] Extracted action from last 2 messages: {extracted_action}")
         
         # Build user tags list from user_data if present
         user_tags = []
@@ -5948,7 +6233,8 @@ async def get_all_favorites(scene_type: Optional[str] = None,
             if fav.get('tags'):
                 try:
                     fav['tags'] = json.loads(fav['tags'])
-                except:
+                except Exception as e:
+                    logger.error(f"Failed to parse favorite tags: {type(e).__name__}: {e}")
                     fav['tags'] = []
 
         return {"favorites": favorites, "count": len(favorites)}
@@ -6847,7 +7133,8 @@ async def list_chats():
                         chats.append({
                             "id": f.replace(".json", "")
                         })
-                except:
+                except Exception as e:
+                    logger.error(f"Failed to load chat file {f}: {type(e).__name__}: {e}")
                     chats.append({
                         "id": f.replace(".json", "")
                     })
@@ -7757,6 +8044,11 @@ async def inpaint_image(request: InpaintRequest):
         mask_base64 = base64.b64encode(mask_bytes).decode('utf-8')
         
         # Prepare the payload for A1111 img2img API
+        sd_config = CONFIG.get("stable_diffusion", {})
+        inpainting_config = sd_config.get("inpainting", {})
+        img2img_config = sd_config.get("img2img", {})
+        defaults = sd_config.get("defaults", {})
+        
         payload = {
             "init_images": [image_base64],
             "mask": mask_base64,
@@ -7769,10 +8061,17 @@ async def inpaint_image(request: InpaintRequest):
             "denoising_strength": request.denoising_strength,
             "sampler_name": request.sampler_name,
             "mask_blur": request.mask_blur,
-            "inpainting_fill": 1,  # 'original' - use original image content
-            "inpaint_full_res": True,  # 'only masked'
-            "inpaint_full_res_padding": 16,
-            "inpainting_mask_invert": 0  # 0 = inpaint masked, 1 = inpaint not masked
+            "inpainting_fill": inpainting_config.get("fill_mode", 1),
+            "inpaint_full_res": inpainting_config.get("full_res", True),
+            "inpaint_full_res_padding": inpainting_config.get("full_res_padding", 16),
+            "inpainting_mask_invert": inpainting_config.get("mask_invert", 0),
+            "resize_mode": img2img_config.get("resize_mode", 0),
+            "initial_noise_multiplier": img2img_config.get("initial_noise_multiplier", 1.0),
+            "seed": defaults.get("seed", -1),
+            "restore_faces": defaults.get("restore_faces", False),
+            "tiling": defaults.get("tiling", False),
+            "n_iter": defaults.get("n_iter", 1),
+            "clip_skip": defaults.get("clip_skip", 1)
         }
         
         # Call SD API
@@ -7819,8 +8118,8 @@ async def inpaint_image(request: InpaintRequest):
         try:
             error_data = e.response.json()
             error_detail += f" - {error_data.get('detail', 'Unknown error')}"
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to parse SD error response: {type(e).__name__}: {e}")
         return {"success": False, "error": error_detail}
     except Exception as e:
         return {"success": False, "error": f"Inpainting failed: {str(e)}"}
@@ -8208,7 +8507,8 @@ async def export_chat_for_training(chat_id: str, request: Request):
     """
     try:
         body = await request.json()
-    except:
+    except Exception as e:
+        logger.error(f"Failed to parse request body: {type(e).__name__}: {e}")
         body = {}
     
     chat = db_get_chat(chat_id)
@@ -8309,7 +8609,8 @@ async def export_all_chats_for_training(request: Request):
     """
     try:
         body = await request.json()
-    except:
+    except Exception as e:
+        logger.error(f"Failed to parse request body: {type(e).__name__}: {e}")
         body = {}
     
     export_format = body.get('format', 'alpaca')
@@ -8856,6 +9157,8 @@ if __name__ == "__main__":
     parser.add_argument('--host', type=str, default=None, help='Host to bind to (overrides config)')
     parser.add_argument('--port', type=int, default=None, help='Port to bind to (overrides config)')
     args = parser.parse_args()
+    
+    load_sd_presets_from_config()
     
     host = args.host if args.host is not None else CONFIG['server']['host']
     

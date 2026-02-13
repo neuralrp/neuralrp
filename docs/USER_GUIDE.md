@@ -74,7 +74,7 @@ The top navigation bar provides access to all major features:
 
 **Settings ⚙️** - Configure NeuralRP
 - Neural Connection Section: Connection status with Test buttons for KoboldCpp and Stable Diffusion
-- General Settings: System prompt, Your Name, Your Persona, Reinforce World Canon Every X Turns, Enable World Info, Max World Info Entries, Temperature, Max Resp Tokens, Max Context, Summ Threshold
+- General Settings: System prompt, Your Name, Your Persona, Reinforce World Canon Every X Turns, Enable World Info, Max World Info Entries, Temperature, Max Resp Tokens, Max Context, Summarize at Turn
 - Long-Term Memory: Read-only view of current chat summary, Clear Memory button
 - Performance Optimization: Smart Performance Mode toggle
 - World Info Cache: Cache status display with Refresh/Clear buttons and cache size limit setting
@@ -196,9 +196,10 @@ Highlight specific sections of your summary and condense them using the LLM:
   - LLM backend must be available (check KoboldCpp status in Settings)
 
 **Configuring Summarization:**
-- **Summ Threshold**: Default 80% - adjust to trigger earlier/later
-- Lower threshold = more frequent summarization = less context per turn
-- Higher threshold = less frequent summarization = more context per turn
+- **Summarize at Turn**: Default 10 - triggers summarization when conversation reaches this turn
+- Lower values = earlier summarization = prevents LLM collapse but less context
+- Higher values = later summarization = more context but risk of repetition loops
+- A 90% token backstop catches verbose conversations that overflow before the turn trigger
 
 **Benefits:**
 - Enable indefinite conversations without hitting context limits
@@ -774,6 +775,100 @@ NeuralRP includes full inpainting support for editing parts of generated images:
 
 ---
 
+## Configuration File (config.yaml)
+
+NeuralRP uses a `config.yaml` file in the project root for global settings. This allows you to customize defaults without editing code.
+
+### Where to Find It
+
+```
+neuralrp/
+├── config.yaml          # Main configuration file
+├── main.py
+└── app/
+```
+
+### Key Settings
+
+**Server:**
+```yaml
+server:
+  port: 8000           # Web interface port
+  log_level: "INFO"    # DEBUG, INFO, WARNING, ERROR
+```
+
+**LLM Connection:**
+```yaml
+kobold:
+  url: "http://127.0.0.1:5001"   # KoboldCPP endpoint
+```
+
+**Context Management:**
+```yaml
+context:
+  max_context: 10000              # Token limit for context window
+  summarize_trigger_turn: 10      # Turn-based summarization trigger
+  summarize_threshold: 0.90       # Token backstop (90% = edge case safety)
+  history_window: 5               # Keep last 5 exchanges verbatim
+  world_info_reinforce_freq: 3    # Reinforce canon law every 3 turns
+```
+
+**Sampling Parameters (v2.0.1+):**
+
+These control LLM output quality and help prevent repetition loops:
+
+```yaml
+sampling:
+  temperature: 0.7           # Creativity (0.1-2.0, lower = more focused)
+  top_p: 0.85                # Nucleus sampling threshold
+  top_k: 60                  # Vocabulary limit
+  repetition_penalty: 1.12   # Anti-loop penalty (1.0-2.0)
+```
+
+### Tuning for Your Model
+
+**For 7B models** (more repetition-prone):
+```yaml
+sampling:
+  repetition_penalty: 1.2
+  top_p: 0.8
+  top_k: 40
+```
+
+**For 11-12B models** (balanced defaults):
+```yaml
+sampling:
+  repetition_penalty: 1.12
+  top_p: 0.85
+  top_k: 60
+```
+
+**For 20B+ models** (less repetition-prone):
+```yaml
+sampling:
+  repetition_penalty: 1.05
+  top_p: 0.9
+  top_k: 100
+```
+
+### Environment Variable Overrides
+
+You can override any setting without editing the file:
+
+```bash
+# Windows (PowerShell)
+$env:NEURALRP_SAMPLING_REPETITION_PENALTY="1.2"
+$env:NEURALRP_SERVER_PORT="8080"
+
+# Linux/macOS
+export NEURALRP_SAMPLING_REPETITION_PENALTY=1.2
+export NEURALRP_SERVER_PORT=8080
+```
+
+Format: `NEURALRP_{SECTION}_{KEY}` (uppercase, underscores for nested keys)
+
+---
+
 ## Advanced Features
 
 ### Gen Card (AI Character Generator)
@@ -890,7 +985,7 @@ NeuralRP includes full inpainting support for editing parts of generated images:
 - **Temperature**: LLM randomness (0.0-2.0, lower = more focused, higher = more creative)
 - **Max Resp Tokens**: Response length limit
 - **Max Context**: Context window size (default: 8192)
-- **Summ Threshold**: Summarization trigger point (default: 80%)
+- **Summarize at Turn**: Turn number that triggers summarization (default: 10)
 
 **Performance Mode:**
 - **Smart Performance Mode**: Queues heavy operations to prevent VRAM crashes
@@ -1113,7 +1208,7 @@ NeuralRP includes full inpainting support for editing parts of generated images:
 
 4. **Summarize Chat**
    - Free context space by summarizing old messages
-   - Use lower Summ Threshold (70-75%)
+   - Use lower Summarize at Turn value (6-8) for more frequent summarization
 
 5. **Use Smaller LLM Models**
    - Switch from 13B to 8B model

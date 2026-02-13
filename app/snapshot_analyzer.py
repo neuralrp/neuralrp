@@ -361,3 +361,176 @@ Assistant:"""
     def clear_cache(self):
         """Clear the character tag cache (DEPRECATED - kept for compatibility)."""
         pass
+
+    async def extract_location_dress_for_cache(
+        self,
+        messages: List[Dict],
+        character_names: Optional[List[str]] = None,
+        primary_character: Optional[str] = None
+    ) -> Dict[str, str]:
+        """
+        Extract location and dress for caching during summarization.
+        
+        This is a lightweight extraction used to cache scene state that can be
+        reused when generating snapshots, avoiding the need to analyze 20+ messages.
+        
+        Args:
+            messages: Chat messages to analyze
+            character_names: Names to strip from context
+            primary_character: Primary character to focus on
+            
+        Returns:
+            {'location': str, 'dress': str} - may be empty strings if extraction fails
+        """
+        if not messages:
+            return {'location': '', 'dress': ''}
+        
+        recent_messages = messages[-10:] if len(messages) > 10 else messages
+        
+        conversation_text = self.extract_conversation_context(
+            recent_messages,
+            message_count=10,
+            character_names=character_names
+        )
+        
+        if not conversation_text:
+            return {'location': '', 'dress': ''}
+        
+        character_context = ""
+        if primary_character:
+            character_context = f"\n\n[PRIMARY CHARACTER: {primary_character}]\n"
+        
+        prompt = f"""Extract scene information as JSON. Focus on location and clothing.
+
+{character_context}
+MISSION: Extract location and dress from the conversation.
+
+OUTPUT STYLE: Danbooru/booru-style tags (short lowercase phrases). Examples: "tavern interior", "armor", "casual clothes".
+
+Extract exactly 2 fields:
+1. "location": Where is this scene? 3-5 words. Examples: "tavern interior", "dark forest", "cozy bedroom". Use generic terms, no proper names.
+2. "dress": What is the character wearing? 2-3 words. Examples: "armor", "casual", "swimsuit", "dress", "jeans". Use "nude" if nudity implied. Empty string if unclear.
+
+Reply with ONLY valid JSON like: {{"location": "tavern interior", "dress": "armor"}}
+
+Conversation:
+{conversation_text}
+
+Assistant:"""
+        
+        if self.http_client is None or not self.config.get('kobold', {}).get('url'):
+            return {'location': '', 'dress': ''}
+        
+        try:
+            response = await self.http_client.post(
+                f"{self.config.get('kobold', {}).get('url', '')}/api/v1/generate",
+                json={
+                    "prompt": prompt,
+                    "max_length": 50,
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                    "stop_sequence": ["###", "\n\n", "Assistant:"]
+                },
+                timeout=30.0
+            )
+            
+            result = response.json().get('results', [{}])[0].get('text', '').strip()
+            parsed = json.loads(result)
+            
+            location = parsed.get('location', '').strip()
+            dress = parsed.get('dress', '').strip()
+            
+            print(f"[SNAPSHOT CACHE] Extracted - location: '{location}', dress: '{dress}'")
+            
+            return {'location': location, 'dress': dress}
+            
+        except json.JSONDecodeError as e:
+            print(f"[SNAPSHOT CACHE] JSON parse failed: {e}")
+        except Exception as e:
+            print(f"[SNAPSHOT CACHE] Extraction failed: {e}")
+        
+        return {'location': '', 'dress': ''}
+
+    async def extract_action_only(
+        self,
+        messages: List[Dict],
+        character_names: Optional[List[str]] = None,
+        primary_character: Optional[str] = None
+    ) -> str:
+        """
+        Extract action only from last 2 messages for fast snapshot generation.
+        
+        Args:
+            messages: Chat messages to analyze
+            character_names: Names to strip from context
+            primary_character: Primary character to focus on
+            
+        Returns:
+            Action string (e.g., "hugging another", "standing")
+        """
+        if not messages or len(messages) < 2:
+            return ''
+        
+        recent_messages = messages[-2:]
+        
+        conversation_text = self.extract_conversation_context(
+            recent_messages,
+            message_count=2,
+            character_names=character_names
+        )
+        
+        if not conversation_text:
+            return ''
+        
+        character_context = ""
+        if primary_character:
+            character_context = f"\n\n[PRIMARY CHARACTER: {primary_character}]\n"
+        
+        prompt = f"""Extract the current action as JSON.
+
+{character_context}
+MISSION: Extract what the primary character is doing RIGHT NOW.
+
+OUTPUT STYLE: Danbooru-style tags (short lowercase phrases).
+
+Extract exactly 1 field:
+"action": What is the character doing? 2-3 words. Examples: "hugging another", "standing", "sitting", "walking", "fighting". Use generic terms, no proper names.
+
+Reply with ONLY valid JSON like: {{"action": "hugging another"}}
+
+Conversation:
+{conversation_text}
+
+Assistant:"""
+        
+        if self.http_client is None or not self.config.get('kobold', {}).get('url'):
+            return ''
+        
+        try:
+            response = await self.http_client.post(
+                f"{self.config.get('kobold', {}).get('url', '')}/api/v1/generate",
+                json={
+                    "prompt": prompt,
+                    "max_length": 30,
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                    "stop_sequence": ["###", "\n\n", "Assistant:"]
+                },
+                timeout=30.0
+            )
+            
+            result = response.json().get('results', [{}])[0].get('text', '').strip()
+            parsed = json.loads(result)
+            
+            action = parsed.get('action', '').strip()
+            
+            print(f"[SNAPSHOT ACTION] Extracted action: '{action}'")
+            
+            return action
+            
+        except json.JSONDecodeError as e:
+            print(f"[SNAPSHOT ACTION] JSON parse failed: {e}")
+        except Exception as e:
+            print(f"[SNAPSHOT ACTION] Extraction failed: {e}")
+        
+        return ''

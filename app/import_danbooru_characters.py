@@ -7,12 +7,16 @@ Generates embeddings using all-mpnet-base-v2 for semantic search.
 Usage: python app/import_danbooru_characters.py
 """
 
+import logging
 import pandas as pd
 import sqlite3
 import numpy as np
 import os
 import sys
 import time
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,7 +31,8 @@ def get_excel_mtime():
     """Get the modification time of the Excel file."""
     try:
         return os.path.getmtime(EXCEL_PATH)
-    except:
+    except Exception as e:
+        logger.error(f"Failed to get Excel mtime: {type(e).__name__}: {e}")
         return 0
 
 
@@ -40,7 +45,8 @@ def get_last_import_time():
         row = cursor.fetchone()
         conn.close()
         return float(row[0]) if row else 0
-    except:
+    except Exception as e:
+        logger.error(f"Failed to get last import time: {type(e).__name__}: {e}")
         return 0
 
 
@@ -212,7 +218,8 @@ def check_if_import_needed():
             return (True, "No characters in database")
         else:
             return (False, f"Already imported {count} characters")
-    except:
+    except Exception as e:
+        logger.error(f"Failed to check import status: {type(e).__name__}: {e}")
         return (True, "Database error, assuming import needed")
 
 

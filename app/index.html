@@ -1408,9 +1408,9 @@
                                             class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
                                     </div>
                                     <div class="space-y-1">
-                                        <label class="text-[10px] text-slate-450 uppercase font-bold">Summ
-                                            Threshold</label>
-                                        <input type="number" step="0.01" x-model.number="settings.summarize_threshold"
+                                        <label class="text-[10px] text-slate-450 uppercase font-bold">Summarize
+                                            at Turn</label>
+                                        <input type="number" x-model.number="settings.summarize_trigger_turn"
                                             class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-blue-500">
                                     </div>
                                 </div>
@@ -3053,7 +3053,7 @@
                 temperature: 0.7,
                 max_length: 250,
                 max_context: 4096,
-                summarize_threshold: 0.80,  // v1.11.0: Changed from 0.85 for scene-first architecture
+                summarize_trigger_turn: 10,
                 performance_mode_enabled: true
             },
 
@@ -3408,8 +3408,10 @@
                     }
                 }
 
-                if (this.settings.summarize_threshold === 0.70) {
-                    this.settings.summarize_threshold = 0.80;
+                // Migration: Convert old summarize_threshold to summarize_trigger_turn
+                if (this.settings.summarize_threshold !== undefined) {
+                    delete this.settings.summarize_threshold;
+                    this.settings.summarize_trigger_turn = 10;
                     this.saveSettings();
                 }
             },
@@ -4629,7 +4631,8 @@
                             label_description: '',
                             danbooru_tag: '',
                             genre: '',
-                            gender: ''
+                            gender: '',
+                            multi_char_summary: ''
                         }
                     }
                 };
@@ -4643,6 +4646,9 @@
                     clone.data.extensions.depth_prompt = { depth: 4, prompt: '' };
                 }
                 if (!clone.data.extensions.gender) clone.data.extensions.gender = '';
+                if (!clone.data.extensions.multi_char_summary) {
+                    clone.data.extensions.multi_char_summary = '';
+                }
                 if (!clone.data.personality) clone.data.personality = '';
                 if (!clone.data.scenario) clone.data.scenario = '';
                 if (!clone.data.tags) clone.data.tags = [];
@@ -4942,9 +4948,6 @@
                     });
 
                     if (res.data._updated_state) {
-                        if (res.data._updated_state.summary !== this.summary) {
-                            this.messages = res.data._updated_state.messages;
-                        }
                         this.summary = res.data._updated_state.summary;
                     }
 
@@ -5020,10 +5023,7 @@
                     });
 
                     if (res.data._updated_state) {
-                        if (res.data._updated_state.summary !== this.summary) {
-                            this.messages = res.data._updated_state.messages;
-                        }
-                    this.summary = res.data._updated_state.summary;
+                        this.summary = res.data._updated_state.summary;
                     }
 
                     if (res.data._summarization_triggered) {

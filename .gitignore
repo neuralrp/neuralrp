@@ -105,8 +105,16 @@ frontend/node_modules/
 # ============================================
 # PROJECT FOLDERS
 # ============================================
-tests/
 project_docs/
+
+# ============================================
+# TEST ARTIFACTS
+# ============================================
+.coverage
+htmlcov/
+coverage.xml
+.hypothesis/
+.pytest_cache/
 
 # ============================================
 # BACKUP FILES

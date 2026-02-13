@@ -32,8 +32,9 @@ DEFAULT_CONFIG = {
     },
     "context": {
         "max_context": 8192,
-        "summarize_threshold": 0.80,
-        "history_window": 6,
+        "summarize_threshold": 0.90,
+        "summarize_trigger_turn": 10,
+        "history_window": 5,
         "max_exchanges_per_scene": 15,
         "world_info_reinforce_freq": 3
     },
