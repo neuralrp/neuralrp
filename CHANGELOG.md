@@ -5,6 +5,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [2.0.1] - 2026-02-12
+
+### Added
+- **Snapshot Scene Caching**: Location and dress cached during summarization for faster snapshots with reduced LLM overhead
+- **Sampling Parameters**: `top_p`, `top_k`, and repetition penalty now configurable via `config.yaml` for better control over LLM output quality
+- **Configuration Options**: Extended `config.yaml` support for SD presets, inpainting parameters, and generation defaults
+- **Legacy Character Capsule Generation**: Automatic capsule generation on startup for characters without multi-char summaries
+
+### Changed
+- **Turn-Based Summarization**: Summarization now triggers on turn intervals (default: turn 10) instead of percentage threshold, with 0.90 threshold as backstop only
+- **History Window**: Reduced from 6 to 5 exchanges for tighter context
+
+### Fixed
+- **Sticky Window Bug**: Characters now correctly switch to SCENE CAST capsules after their 3-turn sticky window, preventing infinite full card injection
+- **Capsule Field Visibility**: Fixed missing capsule field in character edit screen for legacy and newly created characters
+- **Error Handling**: Replaced bare exception clauses with specific exception handling and logging for better debugging
+
+***
+
 ## [2.0.0] - 2026-02-11
 
 ### Removed

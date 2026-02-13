@@ -3,6 +3,7 @@ NeuralRP Database Module
 Centralized SQLite database operations for characters, world info, chats, and images.
 """
 
+import logging
 import sqlite3
 import json
 import time
@@ -15,6 +16,8 @@ from contextlib import contextmanager
 import numpy as np
 import struct
 from app.tag_manager import parse_tag_string
+
+logger = logging.getLogger(__name__)
 
 # Global database path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -174,22 +177,22 @@ def init_db():
         try:
             cursor.execute("ALTER TABLE messages ADD COLUMN summarized INTEGER DEFAULT 0")
             print("Added summarized column to messages table")
-        except:
-            pass  # Column already exists
+        except Exception as e:
+            logger.error(f"Failed to add summarized column to messages: {type(e).__name__}: {e}")
         
         # Add updated_at column to characters table (v1.8.0+ for smart sync)
         try:
             cursor.execute("ALTER TABLE characters ADD COLUMN updated_at INTEGER")
             print("Added updated_at column to characters table")
-        except:
-            pass  # Column already exists
+        except Exception as e:
+            logger.error(f"Failed to add updated_at column to characters: {type(e).__name__}: {e}")
         
         # Add updated_at column to world_entries table (v1.8.0+ for smart sync)
         try:
             cursor.execute("ALTER TABLE world_entries ADD COLUMN updated_at INTEGER")
             print("Added updated_at column to world_entries table")
-        except:
-            pass  # Column already exists
+        except Exception as e:
+            logger.error(f"Failed to add updated_at column to world_entries: {type(e).__name__}: {e}")
         
         # Backfill updated_at for existing characters (set to created_at if null)
         try:
@@ -217,8 +220,8 @@ def init_db():
             cursor.execute("ALTER TABLE characters DROP COLUMN capsule")
             conn.commit()
             print("Dropped capsule column from characters table (capsules now chat-scoped)")
-        except:
-            pass  # Column doesn't exist or already dropped
+        except Exception as e:
+            logger.error(f"Failed to drop capsule column from characters: {type(e).__name__}: {e}")
 
         # Add snapshot_data column to messages table (v1.9.1+ - snapshot messages)
         # Stores snapshot data (prompt, negative_prompt, scene_analysis, etc.) as JSON
@@ -226,8 +229,8 @@ def init_db():
             cursor.execute("ALTER TABLE messages ADD COLUMN snapshot_data TEXT")
             conn.commit()
             print("Added snapshot_data column to messages table")
-        except:
-            pass  # Column already exists
+        except Exception as e:
+            logger.error(f"Failed to add snapshot_data column to messages: {type(e).__name__}: {e}")
 
          
         # Image metadata table
@@ -1205,8 +1208,8 @@ def db_save_world(name: str, entries: Dict[str, Any], tags: Optional[List[str]] 
             # Delete any stale embeddings for this world
             try:
                 cursor.execute("DELETE FROM vec_world_entries WHERE world_name = ?", (name,))
-            except:
-                pass  # sqlite-vec may not be available
+            except Exception as e:
+                logger.error(f"Failed to delete stale world embeddings: {type(e).__name__}: {e}")
             
             # Insert new entries
             entry_timestamp = int(time.time())
@@ -1533,6 +1536,27 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
                 metadata["snapshot_history"] = metadata.get("snapshot_history", [])
             else:
                 metadata["snapshot_history"] = incoming_metadata["snapshot_history"]
+ 
+            # Preserve cast tracking fields (backend-managed for SCENE UPDATE detection)
+            if "previous_active_cast" not in incoming_metadata:
+                metadata["previous_active_cast"] = metadata.get("previous_active_cast", [])
+            else:
+                metadata["previous_active_cast"] = incoming_metadata["previous_active_cast"]
+ 
+            if "previous_focus_character" not in incoming_metadata:
+                metadata["previous_focus_character"] = metadata.get("previous_focus_character")
+            else:
+                metadata["previous_focus_character"] = incoming_metadata["previous_focus_character"]
+ 
+            if "cast_change_turns" not in incoming_metadata:
+                metadata["cast_change_turns"] = metadata.get("cast_change_turns", [])
+            else:
+                metadata["cast_change_turns"] = incoming_metadata["cast_change_turns"]
+ 
+            if "characterFullCardTurns" not in incoming_metadata:
+                metadata["characterFullCardTurns"] = metadata.get("characterFullCardTurns", {})
+            else:
+                metadata["characterFullCardTurns"] = incoming_metadata["characterFullCardTurns"]
  
             # Critical: Ensure localnpcs exists (preserves NPCs from atomic creation)
             if "localnpcs" not in metadata:

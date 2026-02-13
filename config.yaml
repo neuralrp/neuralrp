@@ -16,10 +16,56 @@ stable_diffusion:
   url: "http://127.0.0.1:7861"
   timeout: 10.0
 
+  # Context-aware generation presets
+  presets:
+    normal:
+      steps: 25
+      width: 640
+      height: 512
+      threshold: 0.2
+    light:
+      steps: 20
+      width: 512
+      height: 448
+      threshold: 10000
+    emergency:
+      steps: 15
+      width: 384
+      height: 384
+      threshold: 15000
+
+  # Inpainting defaults
+  inpainting:
+    fill_mode: 1              # 0=fill, 1=original, 2=latent noise, 3=latent nothing
+    full_res: true            # Process only masked region
+    full_res_padding: 16
+    mask_invert: 0            # 0=inpaint masked, 1=inpaint unmasked
+
+  # Default generation parameters (can be overridden per-request)
+  defaults:
+    seed: -1                 # -1 = random, specific seed for reproducibility
+    restore_faces: false     # Face enhancement (CodeFormer/GPEN)
+    tiling: false            # Seamless texture mode
+    n_iter: 1                # Number of images to generate per request
+    clip_skip: 1             # CLIP skip (1=last layer, 2=second to last, etc.)
+
+    # Hires fix (upscaling)
+    hires_fix:
+      enabled: false
+      scale: 2               # Upscale multiplier (1.5-4)
+      upscaler: "Latent"    # Upscaler name (Latent, ESRGAN_4x, etc.)
+      denoising_strength: 0.7
+
+  # img2img specific defaults
+  img2img:
+    resize_mode: 0           # 0=resize, 1=crop, 2=fill
+    initial_noise_multiplier: 1.0
+
 context:
   max_context: 10000
-  summarize_threshold: 0.80
-  history_window: 6
+  summarize_threshold: 0.90
+  summarize_trigger_turn: 10
+  history_window: 5
   max_exchanges_per_scene: 15
   world_info_reinforce_freq: 3
 
@@ -48,3 +94,12 @@ features:
 # System prompt for AI responses
 # This can also be changed in the settings UI
 system_prompt: "Write a highly detailed, creative, and immersive response. Stay in character at all times."
+
+# Sampling parameters for LLM generation
+# These are defaults - can be overridden per-request via settings UI
+# Optimized for 11-12B models to reduce repetition loops in long contexts
+sampling:
+  temperature: 0.7
+  top_p: 0.85
+  top_k: 60
+  repetition_penalty: 1.12
