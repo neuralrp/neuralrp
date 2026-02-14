@@ -5,6 +5,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [2.0.2] - 2026-02-13
+
+### Added
+- **Summary Word Limit**: Automatic LLM-based condensation when chat summary exceeds configurable word count (default: 1200 words)
+  - Configurable via `config.yaml` → `context.summary_word_limit`
+  - Triggers on every chat turn, uses existing `summarize_text()` function to reduce summary by 50-70%
+  - Logs word count before/after: `[SUMMARIZE] Summary condensed: 1200 -> ~400 words`
+  - Works in both performance mode and standard mode
+
+***
+
 ## [2.0.1] - 2026-02-12
 
 ### Added

@@ -5176,6 +5176,22 @@ async def chat(request: PromptRequest):
                     canon_law_entries=canon_law_entries
                 )
 
+            # 3. Summary word count limit - condense summary if it gets too long
+            summary_word_limit = CONFIG['context'].get('summary_word_limit', 1200)
+            current_summary = current_request.summary or ""
+            summary_word_count = len(current_summary.split())
+            
+            if summary_word_count >= summary_word_limit:
+                print(f"[SUMMARIZE] Summary word limit: {summary_word_count} >= {summary_word_limit}")
+                condensed_summary = await summarize_text(current_summary)
+                if condensed_summary:
+                    chat = db_get_chat(current_request.chat_id)
+                    if chat:
+                        chat['summary'] = condensed_summary
+                        db_save_chat(current_request.chat_id, chat)
+                        data["_summarization_triggered"] = True
+                        print(f"[SUMMARIZE] Summary condensed: {summary_word_count} -> {len(condensed_summary.split())} words")
+
             # Reload chat to get updated summary and messages after summarization
             updated_chat = db_get_chat(current_request.chat_id)
             if updated_chat:
@@ -5259,6 +5275,22 @@ async def chat(request: PromptRequest):
                     chat_id=current_request.chat_id,
                     canon_law_entries=canon_law_entries
                 )
+
+            # 3. Summary word count limit - condense summary if it gets too long
+            summary_word_limit = CONFIG['context'].get('summary_word_limit', 1200)
+            current_summary = current_request.summary or ""
+            summary_word_count = len(current_summary.split())
+            
+            if summary_word_count >= summary_word_limit:
+                print(f"[SUMMARIZE] Summary word limit: {summary_word_count} >= {summary_word_limit}")
+                condensed_summary = await summarize_text(current_summary)
+                if condensed_summary:
+                    chat = db_get_chat(current_request.chat_id)
+                    if chat:
+                        chat['summary'] = condensed_summary
+                        db_save_chat(current_request.chat_id, chat)
+                        response["_summarization_triggered"] = True
+                        print(f"[SUMMARIZE] Summary condensed: {summary_word_count} -> {len(condensed_summary.split())} words")
 
             # Reload chat to get updated summary and messages after summarization
             updated_chat = db_get_chat(current_request.chat_id)

@@ -91,7 +91,7 @@ Starting with v1.11.0, NeuralRP uses a scene-first architecture where all active
 
 **Key Changes:**
 1. **SCENE CAST Block**: Every turn includes a block showing all active characters with their capsules
-2. **History Window**: Only the last 6 exchanges are shown verbatim; older content is summarized
+2. **History Window**: Only the last 5 exchanges are shown verbatim; older content is summarized
 3. **Fallback Capsules**: Single-character chats use fallback capsules (description + personality excerpts)
 4. **Pre-Generated Capsules**: Multi-character chats use LLM-generated capsules (50-100 tokens each)
 5. **Sticky Full Cards**: Characters get full cards on first appearance and stay for 2 more turns (sticky window)
@@ -99,7 +99,7 @@ Starting with v1.11.0, NeuralRP uses a scene-first architecture where all active
 **Why Scene-First?**
 - Regular character reinforcement beats more dialog in context
 - SCENE CAST ensures consistent voice across 50+ turn conversations
-- 6-exchange history prevents attention decay while maintaining recency (RP-optimized token budget)
+- 5-exchange history prevents attention decay while maintaining recency (RP-optimized token budget)
 - Higher baseline token cost (~400-600 tokens/turn) enables better character consistency
 - Sticky full cards (first appearance + 2 more turns) ensure strong early reinforcement
 
@@ -108,24 +108,22 @@ Starting with v1.11.0, NeuralRP uses a scene-first architecture where all active
 - Single-char chats: Fallback capsules built from description + personality (no LLM generation)
 - NPCs: Same system as global characters
 
-**Token Budget (v1.11.0+):**
+**Token Budget:**
 ```
 Component              Tokens       Frequency
-System + Mode          300-400      Every turn
-Scene capsules         300-500      If history exists
-User Description        50-100        Every turn (v1.11.0+)
-World knowledge         200-400        Semantic match
-SCENE UPDATE           50-100         On cast change only
-SCENE CAST             400-600        Every turn
-Recent dialogue (6 ex)  900-1500       Every turn
-Canon law              100-200        Every 3 turns
-
-Lead-in                50             Every turn
-Total                  2450-4050
-Generation headroom     3950-5550
+System + Mode          80-150       Every turn
+User Description      50-100       Every turn
+World Knowledge       100-300      On semantic match
+SCENE UPDATE          20-50        On cast change
+Character Data        200-800      Full cards + capsules
+Chat History          300-600      Last 5 exchanges
+Canon Law             50-150       Every 3 turns
+Lead-in               10-20        Every turn
+-------------------------------------------
+Total per turn        ~400-600     Baseline chars)
 ```
 
-Comfortable fit with 8k minimum context.
+This baseline is remarkably stable. Even at turn (2 500, you spend roughly the same tokens on context structure as at turn 5 - the only variable is chat history, which stays capped at 5 exchanges.
 
 **Capsule Regeneration System (v1.11.0+):**
 
@@ -279,6 +277,8 @@ Any setting can be overridden via environment variables using the format `NEURAL
 | `max_context` | 8192 | 1024-32768 | Maximum token context window for LLM generation |
 | `summarize_trigger_turn` | 10 | 5-50 | Turn-based summarization trigger (v2.0.1+) |
 | `summarize_threshold` | 0.90 | 0.50-1.00 | Token percentage backstop (v2.0.1+) |
+| `summary_word_limit` | 1200 | 500-3000 | Auto-condense summary when exceeded (v2.0.2+) |
+| `history_window` | 5 | 1-10 | Number of message exchanges kept verbatim |
 | `world_info_reinforce_freq` | 3 | 1-100 | Turns between canon law reinforcement |
 | `kobold_url` | http://127.0.0.1:5001 | URL | KoboldCpp or OpenAI-compatible endpoint |
 | `sd_url` | http://127.0.0.1:7861 | URL | AUTOMATIC1111 WebUI endpoint |
@@ -302,6 +302,17 @@ Any setting can be overridden via environment variables using the format `NEURAL
 - **Behavior**: Guarantees summarization by turn N, preventing long "pre-summary" runs where LLM collapse occurs
 - **Recommended**: 8-12 turns for 11-12B models, 6-8 for 7B models
 - **UI Override**: Can be customized in settings UI ("Summarize at Turn")
+
+**Configuration Tuning for Different Context Sizes:**
+
+| Context Size | summarize_trigger_turn | history_window | Notes |
+|--------------|------------------------|----------------|-------|
+| 4K tokens | 8 | 3-5 | Tight budget, summarize early |
+| 8K tokens | 10-15 | 5 | Default balanced |
+| 10K tokens | 20-30 | 5 | Room for longer sessions |
+| 16K+ tokens | 30-50 | 5-6 | Large context, less frequent summarization |
+
+For users with 10K context (common with quantized 12B models), setting `summarize_trigger_turn` to 20-30 is recommended - the default of 10 is conservative and triggers too early.
 
 **`summarize_threshold` (0.90) - v2.0.1+:**
 - **Purpose**: Token percentage backstop for edge cases
@@ -756,401 +767,147 @@ Plus virtual tables for FTS5 search and sqlite-vec embeddings.
 
 ## Context Assembly
 
-On every generation request, NeuralRP builds a prompt in a specific layered order to maintain stable structure.
-
-### Prompt Assembly Flowchart
-
-```mermaid
-flowchart TD
-    Start([Start Generation Request]) --> CalculateTurn[Calculate Turn Number]
-    CalculateTurn --> |Count user messages| CurrentTurn[current_turn]
-    
-    CurrentTurn --> CheckWorldInfo{World Info Active?}
-    CheckWorldInfo --> |Yes| MatchWorld[Match World Entries]
-    MatchWorld --> CanonLaw[Canon Law Entries: Always Included]
-    CanonLaw --> TriggeredLore[Triggered Lore: Semantic + Keyword Match]
-    TriggeredLore --> AddWorld[Add World Knowledge to Prompt]
-    
-    CheckWorldInfo --> |No| CheckCharacters
-    
-    AddWorld --> CheckCharacters{Characters Present?}
-    
-    CheckCharacters --> |Yes| CheckChatMode{Chat Mode?}
-    
-    CheckChatMode --> |Single Char| SingleInjection[Single Character Injection]
-    SingleInjection --> CheckSticky1{Reset Point?}
-    CheckSticky1 --> |Yes (First/Return/Sticky)| SingleFullCard[Full Card: 1000-1500 tokens]
-    CheckSticky1 --> |No| SceneCast
-
-    CheckChatMode --> |Multi Char| MultiInjection[Multi-Character Injection]
-    MultiInjection --> CheckSticky2{Reset Point?}
-    CheckSticky2 --> |Yes (First/Return/Sticky)| MultiFullCards[Full Cards: 1000-1500 each]
-    CheckSticky2 --> |No| SceneCast
-
-    CheckCharacters --> |No| AddHistory
-
-    SingleFullCard --> SceneCast
-    MultiFullCards --> SceneCast
-    
-    SceneCast[SCENE CAST: All Active Characters (Every Turn)]
-    
-    SceneCast --> AddHistory[Add Chat History to Prompt]
-    
-    AddHistory --> CanonReinforce{Canon Law Reinforcement?}
-    CanonReinforce --> |Turn 1,2 OR every N turns| CanonPinned[Pinned Canon Law at End]
-    CanonReinforce --> |Turn 1,2 OR every N turns| CanonPinned[Pinned Canon Law at End]
-
-
-    AddLeadIn --> End([Complete Prompt])
-    
-    subgraph "World Info Matching Logic"
-        MatchWorld --> Quoted{Key Quoted?}
-        Quoted --> |Yes| ExactMatch[Exact Phrase Match]
-        Quoted --> |No| Semantic[Semantic Search + Keyword Match]
-    end
-```
-
-**Key Concepts for Auditing:**
-
-- **Turn Calculation**: Count of user messages (1-indexed: Turn 1 = first user message)
-- **Sticky Full Cards**: First 3 turns (1, 2, 3) get full card injection (not capsules)
-  - Turn 1: First appearance → Full card
-  - Turns 2-3: Sticky window → Full card
-  - Turns 4+: SCENE CAST capsules only
-- **Reset Points**: Full cards also trigger on:
-  - First appearance in chat
-  - Returning after long absence (20+ messages not in recent history)
- - **Canon Law**: Always shown, reinforced every 3 turns at prompt end
- - **Entity ID Extraction** (v1.10.4): Use `get_entity_id()` for consistent entity lookups
- - **World Info**:
-   - Quoted keys (`"Event Name"`): Exact phrase match only
-   - Unquoted keys (`dragon`): Semantic similarity + flexible keyword match
- - **Character Modes**:
-   - Reset points (first appearance/return): Full card (1000-1500 tokens)
-   - Sticky window (turns 2-3): Full card (1000-1500 tokens)
-  - Regular turns (4+): SCENE CAST capsules (50-150 tokens each)
- 
-### 8-Turn Reinforcement Cycle (DEPRECATED - see Hybrid System above)
-
-**⚠️ REMOVED in v1.11.0:**
-The periodic reinforcement system described below has been replaced by the hybrid SCENE CAST + sticky full card system.
-See [Hybrid SCENE CAST + Sticky Full Card System (v1.11.0+)](#hybrid-scene-cast--sticky-full-card-system-v1110) above for current implementation.
-
-```mermaid
-flowchart LR
-    subgraph Turn1[Turn 1]
-        T1Char[Character: Full Card / Capsule<br/>Sticky Window]
-        T1World[World Info: Triggered Lore<br/>Semantic Match]
-        T1Canon[Canon Law: Always Included]
-        T1Reinf[Reinforcement: NO]
-        T1Canon --> T1World --> T1Char --> T1Reinf
-    end
-    
-    subgraph Turn2[Turn 2]
-        T2Char[Character: Full Card / Capsule<br/>Sticky Window]
-        T2World[World Info: If Relevant]
-        T2Canon[Canon Law: Reinforced<br/>Every 3 Turns]
-        T2Reinf[Reinforcement: NO]
-        T2Canon --> T2World --> T2Char --> T2Reinf
-    end
-    
-    subgraph Turn3[Turn 3]
-        T3Char[Character: Full Card / Capsule<br/>Sticky Window End]
-        T3World[World Info: If Relevant]
-        T3Canon[Canon Law: NO]
-        T3Reinf[Reinforcement: NO]
-        T3Canon --> T3World --> T3Char --> T3Reinf
-    end
-    
-    subgraph Turn4[Turn 4]
-        T4Char[Character: NO Injection]
-        T4World[World Info: If Relevant]
-        T4Canon[Canon Law: Reinforced]
-        T4Reinf[Reinforcement: NO]
-        T4Canon --> T4World --> T4Char --> T4Reinf
-    end
-    
-    subgraph Turn5[Turn 5]
-        T5Char[Character: Reinforcement<br/>Description + Personality]
-        T5World[World Info: If Relevant]
-        T5Canon[Canon Law: NO]
-        T5Reinf[Reinforcement: YES]
-        T5Canon --> T5World --> T5Char --> T5Reinf
-    end
-    
-    subgraph Turn6[Turn 6]
-        T6Char[Character: NO Injection]
-        T6World[World Info: If Relevant]
-        T6Canon[Canon Law: Reinforced]
-        T6Reinf[Reinforcement: NO]
-        T6Canon --> T6World --> T6Char --> T6Reinf
-    end
-    
-    subgraph Turn7[Turn 7]
-        T7Char[Character: NO Injection]
-        T7World[World Info: If Relevant]
-        T7Canon[Canon Law: NO]
-        T7Reinf[Reinforcement: NO]
-        T7Canon --> T7World --> T7Char --> T7Reinf
-    end
-    
-    subgraph Turn8[Turn 8]
-        T8Char[Character: NO Injection]
-        T8World[World Info: If Relevant]
-        T8Canon[Canon Law: Reinforced]
-        T8Reinf[Reinforcement: NO]
-        T8Canon --> T8World --> T8Char --> T8Reinf
-    end
-    
-    Turn1 --> Turn2 --> Turn3 --> Turn4 --> Turn5 --> Turn6 --> Turn7 --> Turn8
-    
-    style T1Char fill:#90EE90
-    style T2Char fill:#90EE90
-    style T3Char fill:#90EE90
-    style T5Reinf fill:#FFD700
-    style T1Canon fill:#87CEEB
-    style T2Canon fill:#87CEEB
-    style T4Canon fill:#87CEEB
-    style T6Canon fill:#87CEEB
-    style T8Canon fill:#87CEEB
-```
-
-**Legend:**
-- 🟢 **Green**: Sticky window (turns 1, 2, 3) - Full card/capsule injection
-- 🟡 **Gold**: SCENE CAST (every turn) - All active characters with capsules
-- 🔵 **Blue**: Canon law reinforced (turns 1, 2, then every 3rd turn)
- 
-**Configuration Settings:**
-- `world_info_reinforce_freq`: Default 3 (turns between canon law reinforcement)
-
-### Layer Structure
-
-1. **System and Mode Instructions**
-   - Global system prompt (tone, formatting rules)
-   - Mode-specific instructions (Narrator vs Focus)
-
-2. **User Description** (v1.11.0+)
-   - User name shown as "Name: [user_name]" (if provided)
-   - User persona shown as "Description: [user_persona]" (if provided)
-   - **Injected EVERY turn** (not just first turn) for consistent identity
-   - Placed early to influence perspective
-   - Enables LLM to track user identity and personality across conversations
-
-3. **World Info** (updated in v1.7.3)
-     - Canon Law entries first (always included)
-     - **Triggered Lore**: Semantic search results added when semantically relevant to current conversation
-     - **Quoted vs Unquoted Keys**:
-       - Quoted keys (`"Great Crash Landing"`): strict keyword matching, NO semantic search (exact phrase match only)
-       - Unquoted keys: semantic search + flexible keyword matching (catches plurals, synonyms)
-     - **World Knowledge Section**: Displays contextually-matched lore entries (not canon law)
-     - All keys in `key` array now processed (previously only first element used)
-
-4. **Character Definitions** (updated in v1.7.3)
-
-**Context Injection Strategy - Hybrid SCENE CAST + Full Card System:**
-
-NeuralRP uses a hybrid approach combining full cards and capsules, driven by context hygiene and token efficiency considerations:
-
-**Sticky Full Card System (All Character Types)**
-- **Behavior**: Complete character card (description + personality + scenario + mes_example) injected at reset points
-- **Reset Points**: Full cards appear when:
-  - First appearance in chat (turn 1)
-  - Returning after long absence (20+ messages not in recent history)
-  - Sticky window (turns 2-3 after first appearance or return)
-- **Format**: `### Character: {name}\n{description}\n{personality}\n{scenario}\nExample dialogue:\n{mes_example}`
-- **Sticky Window Duration**: 2 additional turns (total 3 turns with full card)
-- **Reasoning**:
-  - **Early-Turn Drift Prevention**: Full cards (500-2000 tokens) on turns 1-3 provide strong reinforcement
-  - **Dialogue Examples Preserved**: Scenario + mes_example provide voice fingerprints for first few turns
-  - **No Duplicates**: Full-card characters excluded from SCENE CAST to prevent redundant information
-  - **Token Efficiency**: After sticky window, capsules (50-150 tokens) maintain voice without full card overhead
-  - **Return Handling**: Characters returning after absence get fresh full cards to re-establish presence
-
-**Focus Mode:**
-- **Behavior**: Selected character emphasized with same capsule logic applying to all active characters
-- **Reasoning**: Even when focused on one character, others remain "present" in scene with minimal overhead
-
-**Hybrid Injection System (Critical for Context Hygiene):**
-- **Mechanism**: `character_first_turns` tracks first appearance, `character_full_card_turns` tracks last full card injection
-- **Reset Point Detection**:
-  - First appearance: `first_turn == absolute_turn`
-  - Returning after absence: Not in last 20 messages + `first_turn < absolute_turn`
-  - Sticky window: `absolute_turn - full_card_turn <= 2`
-- **First Turn Tracking**: `character_first_turns` metadata stores first turn number per character
-- **Full Card Turn Tracking**: `character_full_card_turns` metadata stores when each character last received full card
-- **Context Hygiene**: Prevents redundant injections (full card OR capsule, never both)
-- **Dynamic Addition**: Characters/NPCs added mid-chat automatically trigger full card injection
-- **Reasoning**:
-  - **Avoid Bloat**: Character A enters turn 5, gets full card turns 5-7, then capsule only
-  - **Sticky Window**: Full card persists for 2 additional turns (total 3 turns with full card)
-   - **Consistent State**: After sticky window, capsules maintain voice without full card overhead
-   - **Token Optimization**: Reserve tokens for conversation flow, not re-defining characters
-   - **Return Handling**: Characters returning after absence trigger fresh full card + sticky window
-
-**Re-appearance Detection After Long Absence (v1.10.4):**
-- **Problem**: Characters who appeared early in chat, left for many turns (summarized out), then returned were not getting fresh treatment
-  - `character_has_speaker()` checked ALL messages in `request.messages`
-  - After summarization, `request.messages` only contains recent messages (e.g., last 10-20)
-  - Character appearing at turn 1, leaving after turn 20, returning at turn 100:
-    - `request.messages` only has turns 80-100 (older messages summarized)
-    - `character_has_speaker()` says "never appeared" (turns 1-20 not in recent list)
-    - But `characterFirstTurns` metadata says "first appearance: turn 1"
-    - Result: Character gets full injection every turn (conflict between logic paths)
-- **Solution**: `character_has_appeared_recently()` function
-  - Checks only the **last 20 messages** (not all time)
-  - Characters absent for >20 messages are treated as "not recently appeared"
-  - Triggers fresh injection and new sticky window on return
-  - Records new `first_turn` when character reappears after absence
-- **Behavior**:
-  - Turn 1: Character Alice appears → `characterFirstTurns["alice.json"] = 1` → Full card injected (turns 1-3)
-  - Turn 20: Alice leaves conversation → Not in messages for 80 turns → Gets summarized out
-  - Turn 100: Alice returns → Not in last 20 messages → `character_has_appeared_recently()` returns False
-    - `characterFirstTurns["alice.json"] = 100` (NEW first turn recorded)
-    - Full card injected (turns 100-102, fresh sticky window)
-- **Works For Both**: Global characters and NPCs (same injection logic, only display label differs)
-- **Token Threshold**: 20 messages balances:
-  - Too low (5): Characters reappear after brief absence get unnecessary fresh treatment
-  - Too high (50): Long absences don't trigger fresh treatment
-  - 20 messages ~2-3 screenfuls of dialogue (reasonable "long absence" threshold)
-
-**Context Injection on Entry:**
-- **Behavior**: Upon character, NPC, or world introduction to a chat, their card/capsule is dropped into the context window on first appearance
-- **Example Scenario**:
-  - Turn 1: Alice, Bob start chat → Alice and Bob capsules injected
-  - Turn 10: User adds Charlie → Charlie capsule injected (Alice/Bob NOT re-injected)
-  - Turn 15: NPC "Guard Marcus" created → NPC capsule injected
-- **Reasoning**:
-  - **Just-in-Time Grounding**: Character defined when they become relevant to conversation
-  - **No Proactive Bloat**: Undefined characters don't consume tokens until needed
-  - **LLM Attention**: New character gets immediate spotlight in context
-
-   5. **Conversation History**
-      - Recent messages verbatim
-      - Older content as summary (if summarization triggered)
-      - SCENE UPDATE block on cast changes (v1.11.0+)
-  
-   6. **Generation Lead-In**
-     - Final formatting instruction
-     - User's latest message
-
-8. **Canon Law** (pinned for recency bias)
-    - World rules reinforced at prompt end
-    - Shown on turns 1-2 (initial) and every Nth turn thereafter
-    - Overrides character drift to maintain story logic
-
-### Reinforcement System (updated in v1.7.3)
-
-**Why Reinforcement is Necessary: Context Drift Problem**
-
-Even after initial character/world injection, LLMs naturally "forget" or "drift" away from defined behaviors over long conversations. This is not a failure—it's how LLMs process context:
-
-**Drift Mechanisms:**
-- **Attention Decay**: Early context (turn 1-10) receives less attention than recent messages (turn 80-100)
-- **Narrative Flow**: LLM prioritizes current plot momentum over static character definitions
-- **Token Saturation**: In 4096-token contexts, initial character definition (500+ tokens) gets "crowded out"
-
-**Reinforcement Solution:** Periodically re-inject essential character/world info to "re-anchor" LLM behavior without consuming tokens with full re-definitions.
+On every generation request, NeuralRP builds a prompt in a specific layered order. This is the core "secret sauce" - the system that enables long-running roleplay chats within finite token budgets.
 
 ---
 
-**Character Reinforcement (v1.11.0+): SCENE CAST System**
+### The 10-Layer Prompt Formula
 
-**⚠️ DEPRECATED (v1.10.4 and earlier):**
-- Old periodic reinforcement system using [REINFORCEMENT: markers] has been removed
-- The `reinforce_freq` setting is no longer used
-- See "SCENE CAST" section below for new architecture
+Every turn, the prompt is assembled in this exact order:
 
-**Current System (v1.11.0+):**
-SCENE CAST provides character context every turn instead of periodic reinforcement.
-See "Scene-First Architecture" section for details.
+| Layer | Component | When Injected | Est. Tokens |
+|-------|-----------|---------------|-------------|
+| 1 | System Prompt | Every turn | 50-100 |
+| 2 | Mode Instructions | Every turn (narrator/focus) | 30-50 |
+| 3 | Summary | After summarization triggered | 200-400 |
+| 4 | User Persona | Every turn | 50-100 |
+| 5 | World Knowledge | Semantic + keyword match | 100-300 |
+| 6 | SCENE UPDATE | Only when cast changes | 20-50 |
+| 7 | Character Data | Full cards OR capsules (hybrid) | 200-800 |
+| 8 | Chat History | Last 5 exchanges | 300-600 |
+| 9 | Canon Law | Every 3 turns | 50-150 |
+| 10 | Lead-in | Every turn | 10-20 |
+
+**Baseline cost per turn**: ~400-600 tokens (assuming 2 characters)
+
+This baseline is remarkably stable regardless of chat length - that's the key to scaling to hundreds of turns.
 
 ---
 
-**Hybrid SCENE CAST + Sticky Full Card System (v1.11.0+):**
+### Layer-by-Layer Breakdown
 
-**Overview:**
-Characters receive full cards at reset points (first appearance, returning after absence) and maintain sticky window for 2 additional turns. After sticky window expires, only SCENE CAST capsules are shown. This prevents duplicate character info while ensuring strong early reinforcement.
+#### Layer 1: System Prompt
+Global system prompt defining tone and formatting rules. Typically 50-100 tokens.
 
-**Reset Point Detection:**
+#### Layer 2: Mode Instructions
+- **Narrator mode**: Generic narration instructions
+- **Focus mode**: Character-specific instructions when one character is prioritized
+- Both single-char and multi-char chats receive mode instructions every turn
 
-Full cards are injected when:
-1. **First appearance**: Character appears in chat for the first time (`first_turn == absolute_turn`)
-2. **Returning after absence**: Character absent for 20+ messages then reappears (checked via `character_has_appeared_recently()`)
-3. **Sticky window**: Within 2 turns after full card injection (`absolute_turn - full_card_turn <= 2`)
+#### Layer 3: Summary
+After summarization triggers, older messages are condensed into a summary block (200-400 tokens). This replaces the old messages, allowing the chat to continue indefinitely.
 
-**Implementation Details:**
+**Summarization triggers**:
+- Turn-based: At turn 10 (configurable)
+- Token-based: At 90% context fill (backstop)
 
-**Metadata Tracking:**
-```python
-# In chat.metadata
-{
-  "characterFirstTurns": {
-    "alice.json": 1,          # First turn character appeared
-    "bob.json": 20              # Bob entered mid-chat
-  },
-  "characterFullCardTurns": {
-    "alice.json": 1,          # Alice got full card turn 1 (sticky window)
-    "bob.json": 20             # Bob got full card turn 20 (sticky window)
-  }
-}
+#### Layer 4: User Persona (v1.11.0+)
+**Critical for roleplay**: User name and persona injected **every turn**.
+
+```
+### User Description:
+Name: [user_name]
+[user_persona]
 ```
 
-**Detection Logic:**
-```python
-# Check if character needs full card this turn
-first_turn = character_first_turns.get(char_ref)
-is_first_appearance = (first_turn == absolute_turn)
+This ensures the LLM always knows who the user is and their personality traits - essential for natural relationship building.
 
-has_appeared_recently = character_has_appeared_recently(request.messages[-20:], char_name)
-is_returning = (first_turn < absolute_turn and not has_appeared_recently)
+#### Layer 5: World Knowledge
 
-full_card_turn = character_full_card_turns.get(char_ref)
-is_in_sticky_window = (
-    full_card_turn is not None and
-    absolute_turn - full_card_turn <= 2
-)
+**Two components**:
 
-# Full card if: first appearance OR returning OR in sticky window
-if is_first_appearance or is_returning or is_in_sticky_window:
-    chars_needing_full_card.append(char_ref)
+1. **Canon Law** (always included, reinforced periodically)
+   - Flagged world entries that are story rules (physics, magic limits, etc.)
+   - Injected separately from triggered lore
+
+2. **Triggered Lore** (semantic + keyword match)
+   - Semantic search with threshold 0.45 (tuned for 12B quantized models)
+   - Keyword matching:
+     - **Quoted keys** (`"Great Crash Landing"`): Exact phrase match only
+     - **Unquoted keys** (`dragon`): Flexible keyword + semantic match
+
+**Initial turn special handling**:
+- Turns 1-2: Only the latest user message is used for world info matching
+- Turns 3+: Last 5 messages used for matching
+
+**World Info Triggering Details**:
+
+| Component | Behavior |
+|-----------|----------|
+| **Semantic Search** | Threshold 0.45 (tuned for quantized 12B models) |
+| **Quoted Keys** | Exact phrase match only (`"Dark Lord"` → only matches "Dark Lord") |
+| **Unquoted Keys** | Flexible match, catches plurals/variations (`dragon` → "dragons", "dragon-like") |
+| **Canon Law** | Always included, reinforced every 3 turns |
+
+**Why 0.45 threshold?**
+Quantized 12B models have reduced semantic capability. Lower threshold compensates by being more permissive in matches. For larger contexts (16K+), consider raising to 0.5-0.6.
+
+#### Layer 6: SCENE UPDATE (v1.11.0+)
+
+Emitted only when the **active character set** changes:
+
+```
+SCENE UPDATE
+- Alice has left the scene.
+- Bob has entered the scene.
+- Adjust your portrayal to reflect only the currently active characters listed in SCENE CAST below.
 ```
 
-**SCENE CAST Integration:**
-- Characters receiving full cards are **excluded** from SCENE CAST to prevent duplicates
-- Only capsules shown for characters NOT in `chars_needing_full_card`
-- Ensures: Full card OR capsule, never both
+**What triggers SCENE UPDATE**:
+- Character joins or leaves the scene
+- NPC created or removed
 
-**Behavior by Turn:**
+**What does NOT trigger SCENE UPDATE**:
+- Focus changes (same cast, different emphasis)
 
-| Turn | Alice (first appearance) | Bob (turn 20 arrival) | Charlie (turn 50, returns 70) |
-|------|------------------------|------------------------|--------------------------------|
-| 1 | Full card | N/A (not active) | N/A (not active) |
-| 2 | Full card (sticky) | N/A | N/A |
-| 3 | Full card (sticky) | N/A | N/A |
-| 4+ | Capsule (SCENE CAST) | N/A | N/A |
-| 20 | Capsule | Full card | Capsule |
-| 21 | Capsule | Full card (sticky) | Capsule |
-| 22 | Capsule | Full card (sticky) | Capsule |
-| 23+ | Capsule | Capsule | Capsule |
-| 50 | Capsule | Capsule | Full card (returning) |
-| 51 | Capsule | Capsule | Full card (sticky) |
-| 52 | Capsule | Capsule | Full card (sticky) |
-| 53+ | Capsule | Capsule | Capsule |
-| 70 | Capsule | Capsule | Capsule |
-| 71 | Capsule | Capsule | Full card (returning) |
-| 72 | Capsule | Capsule | Full card (sticky) |
-| 73 | Capsule | Capsule | Full card (sticky) |
-| 74+ | Capsule | Capsule | Capsule |
+#### Layer 7: Character Data (Hybrid System)
 
-**Token Impact:**
+**The key optimization**: Full cards OR capsules, never both.
 
-| Scenario | Old System | New Hybrid | Savings |
-|----------|-------------|-------------|----------|
-| Turn 1 (Alice first) | Full card (1500) + SCENE CAST (400) = 1900 | Full card (1500) only = 1500 | 400 tokens (no duplicate) |
-| Turns 2-3 (Alice) | Full card (1500) + SCENE CAST (400) = 1900 | Full card (1500) only = 1500 | 400 tokens (no duplicate) |
-| Turns 4+ (Alice) | SCENE CAST (400) | SCENE CAST (400) | Same |
-| Turn 20 (Bob joins) | Full card (1500) + SCENE CAST (600) = 2100 | Full card Bob (1500) + SCENE CAST Alice (400) = 1900 | 200 tokens (no duplicate Bob) |
-| Turn 70 (Charlie returns) | Capsule (200) + SCENE CAST (600) = 800 | Full card Charlie (1500) + SCENE CAST (600) = 2100 | -300 tokens (better reinforcement) |
+**Full Card Injection** (500-800 tokens):
+- First appearance in chat
+- Returning after 20+ messages of absence
+- Sticky window: 2 additional turns after reset point
+
+**SCENE CAST Capsules** (50-200 tokens per character):
+- Shown every turn for all active characters
+- **Multi-char**: Pre-generated LLM capsules stored in `data.extensions.multi_char_summary`
+- **Single-char**: Fallback capsules built from description + personality
+
+**Mutual Exclusion**: Characters receiving full cards are excluded from SCENE CAST to prevent duplication.
+
+#### Layer 8: Chat History
+
+Only the last 5 exchanges (10 messages) kept verbatim. This is the RP-optimized sweet spot:
+
+- RP messages average ~250 tokens (descriptions, actions, dialogue)
+- 5 exchanges = ~1,250 tokens - healthy headroom
+- Older content either summarized or dropped
+
+#### Layer 9: Canon Law
+
+World rules pinned at prompt end for recency bias. Shown on:
+- Turns 1-2 (initial)
+- Every 3rd turn thereafter (`world_info_reinforce_freq = 3`)
+
+This periodic reinforcement prevents canon violations without bloating every turn.
+
+#### Layer 10: Lead-in
+
+Final formatting instruction telling the LLM who should speak next:
+- Single char focus mode: `{character_name}:`
+- Narrator mode: `Narrator:`
+- Multi-char focus mode: `{focus_character}:`
 
 **Key Benefits:**
 1. **No Duplicates**: Full card OR capsule, never both
@@ -1160,10 +917,10 @@ if is_first_appearance or is_returning or is_in_sticky_window:
 5. **Simple Logic**: Easy to understand, debug, and maintain
 
 **RP Optimization:**
-The 6-exchange verbatim window (12 messages) is specifically tuned for RP:
+The 5-exchange verbatim window (10 messages) is specifically tuned for RP:
 - RP messages average ~250 tokens (descriptions, actions, dialogue, inner thoughts)
 - 10 exchanges = ~5,000 tokens (79% of 8k context) - triggers constant summarization
-- 6 exchanges = ~3,000 tokens (54% of 8k context) - healthy headroom
+- 5 exchanges = ~1,250 tokens - healthy headroom
 - Result: More tokens available for complex scenes, world info, long responses
 
 ---
@@ -1473,47 +1230,17 @@ Think of reinforcement like cleaning a house:
 - Character consistency maintained through regular reinforcement (every turn vs periodic)
 - Deprecated `reinforce_freq` setting
 - Sticky window (first 3 turns) maintained for full card injection
-- Improved context hygiene with 6-exchange history window (RP-optimized)
+- Improved context hygiene with 5-exchange history window (RP-optimized)
 
-**Key Changes in v1.8.2 (Sticky First 3 Turns):**
-- Added sticky window logic: character cards/capsules injected on turns 1, 2, 3
-- Character first turn tracking: stored in chat.metadata.characterFirstTurns
-- New Chat Persistence Fix: characterFirstTurns saved for new chats
-- Full card/capsule on all sticky turns (not just reinforcement content)
-- Persistence: First turn numbers saved to chat metadata, loaded on resume
+---
 
-### Sticky First 3 Turns System (v1.8.2)
+### Additional Context Settings
 
-**Problem: Early-Turn Drift Without Sufficient Context**
-
-After initial character injection on turn 1, LLMs experience character drift in turns 2-5 before reinforcement kicks in (turn 6 by default). This creates a gap where LLM doesn't have adequate character context:
-
-| Issue | Without Sticky Window | With Sticky Window |
-|--------|---------------------|-------------------|
-| **Turn 2** | No character context (reinforcement due turn 6) | Full card/capsule injected |
-| **Turn 3** | No character context | Full card/capsule injected |
-| **Turn 4-5** | No character context | No character context (same as before) |
-| **Turn 6** | Reinforcement (description + personality) | Reinforcement (description + personality) |
-| **Early consistency** | Poor (3+ turns of drift) | Excellent (full context on turns 1-3) |
-
-**Solution: Sticky Window on First 3 Turns**
-
-**Implementation:**
-
-```python
-# Character first turn tracking (stored in chat.metadata.characterFirstTurns)
-character_first_turns = chat_data.get("metadata", {}).get("characterFirstTurns", {})
-
-# Record first turn when character appears
-if not char_has_appeared and char_ref not in character_first_turns:
-    character_first_turns[char_ref] = current_turn
-
-# Check sticky window (turns since first ≤ 2)
-first_turn = character_first_turns.get(char_ref)
-turns_since_first = current_turn - first_turn
-is_in_sticky_window = (
-    first_turn is not None and
-    turns_since_first is not None and
+**`summary_word_limit` (1200) - v2.0.2+:**
+- **Purpose**: Auto-condense summary when it exceeds this word count
+- **Behavior**: If summary exceeds 1200 words, it's re-summarized to fit
+- **Why**: Prevents summary bloat in very long-running chats
+- **Recommended**: 800-1200 for constrained contexts, 1500+ for large contexts
     turns_since_first <= 2
 )
 
@@ -1559,17 +1286,17 @@ needs_injection = (
 2. **Character Voice Consistency**: Full cards + capsules beat more dialog in context
    - Sticky window (turns 1-3): Full cards with dialogue examples for strong voice establishment
    - SCENE CAST (turns 4+): Capsules (50-100 tokens each) maintain voice fingerprints
-   - 6-exchange history window prevents attention decay while maintaining recency
+   - 5-exchange history window prevents attention decay while maintaining recency
 
 3. **Token Budget Efficiency**:
    - Sticky window: ~3,000-4,500 tokens (full cards) for strong early reinforcement
    - Turns 4+: ~400-600 tokens (SCENE CAST capsules) for sustained consistency
-   - 6 exchanges (12 messages) vs 10 exchanges (20 messages): Saves ~1500-2000 tokens per turn
+   - 5 exchanges (10 messages) vs 10 exchanges (20 messages): Saves ~1500-2000 tokens per turn
    - RP-optimized window: Long descriptive messages require tighter token management
 
 4. **Simple Implementation**: Single injection point every turn
     - No timing logic or turn calculations needed
-    - Works seamlessly with 6-exchange history window
+    - Works seamlessly with 5-exchange history window
     - Enables 5-6 character group chats
     - RP-optimized token budget for long descriptive messages
 
@@ -1708,7 +1435,7 @@ In v1.8.1, the edit override system was removed. Edited characters now follow th
 **Rationale for Scene-First Architecture (v1.11.0):**
 - Regular character reinforcement beats more dialog in context
 - SCENE CAST ensures consistent voice across 50+ turn conversations
-- 6-exchange history window (RP-optimized) prevents attention decay while maintaining recency
+- 5-exchange history window (RP-optimized) prevents attention decay while maintaining recency
 - Sticky full cards (turns 1-3 + reset points) provide strong early reinforcement
 - Higher baseline token cost (~400-600 tokens/turn) enables better character consistency
 - Edited characters appear with updated capsules on next turn
@@ -9355,7 +9082,7 @@ Think of context as a **4000-word essay** you're writing live:
  | Decision | What We Sacrifice | What We Gain | Verdict |
  |----------|-------------------|----------------|----------|
  | **Hybrid: Sticky full cards (turns 1-3) + SCENE CAST (turns 4+)** | Higher early-turn token usage (~3000-4500) | Better early consistency, no drift, excellent long-term voice | ✅ Worth it (v1.11.0+) |
- | **6-exchange history window (not 10)** | Less verbatim context in prompt | Better token budget (54% vs 79%), less frequent summarization | ✅ Critical for RP |
+ | **5-exchange history window (not 10)** | Less verbatim context in prompt | Better token budget (~30% vs ~60%), less frequent summarization | ✅ Critical for RP |
  | **Multi-char: Capsules not full cards after sticky window** | Full character details not always available | Enables 5+ character chats, voice differentiation | ✅ Critical |
  | **Semantic world info** | Potential false positives | Natural language queries, discovery enabled | ✅ Net positive |
 
