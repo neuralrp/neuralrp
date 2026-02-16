@@ -107,7 +107,7 @@ from app.database import (
     db_get_message_context, db_cleanup_old_autosaved_chats, db_cleanup_empty_chats,
     db_get_chat_npcs, db_create_npc_and_update_chat,
     db_get_npc_by_id, db_update_npc, db_create_npc_with_entity_id,
-    db_delete_npc,
+    db_delete_npc, db_update_npc_active, db_migrate_npcs,
     # Image metadata operations
     db_save_image_metadata, db_get_image_metadata, db_get_all_image_metadata,
     # sqlite-vec embedding operations
@@ -4774,10 +4774,8 @@ def load_character_profiles(active_chars: List[str], localnpcs: Dict, chat_id: O
                         print(f"[ERROR] NPC {char_ref} missing character data, skipping")
                         continue
 
-                    # Check if NPC is active (from metadata)
-                    is_active = True
-                    if char_ref in localnpcs:
-                        is_active = localnpcs[char_ref].get('is_active', True)
+                    # Check if NPC is active (from database - characters table)
+                    is_active = npc_data.get('is_active', True)
 
                     if not is_active:
                         print(f"[CONTEXT] Skipping inactive NPC: {npc_data.get('name')}")
@@ -7667,11 +7665,7 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
         if not chat:
             return {"success": False, "error": "Chat not found"}
 
-        metadata = chat.get('metadata', {}) or {}
-        # Check metadata for NPC
-        localnpcs = metadata.get('localnpcs', {}) or {}
-
-        # Check database
+        # Check database for NPC
         db_npcs = db_get_chat_npcs(chat_id)
         db_npc = None
         for npc in db_npcs:
@@ -7679,36 +7673,21 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
                 db_npc = npc
                 break
 
-        # Check metadata as fallback
-        metadata_npc = localnpcs.get(filename) if filename in localnpcs else None
+        # NPC must exist in database
+        if not db_npc:
+            return {"success": False, "error": f"NPC '{filename}' not found in database"}
 
-        # NPC must exist in at least one location
-        if not db_npc and not metadata_npc:
-            return {"success": False, "error": f"NPC '{filename}' not found in database or metadata"}
-
-        # Get current active state (prefer metadata since active status is metadata-only)
-        if metadata_npc:
-            current_active = metadata_npc.get('is_active', True)
-            npc_name = metadata_npc.get('name', 'Unknown')
-        else:
-            current_active = True  # Default to active if not in metadata
-            npc_name = db_npc.get('name', 'Unknown')
+        # Get current active state from database (is_active in characters table)
+        current_active = db_npc.get('is_active', True)
+        npc_name = db_npc.get('name', 'Unknown')
 
         # Toggle active state
         new_active = not current_active
 
-        # Update NPC in metadata (active status is stored in metadata)
-        if filename in localnpcs:
-            localnpcs[filename]['is_active'] = new_active
-        else:
-            # Add to metadata if not there
-            localnpcs[filename] = {
-                'name': npc_name,
-                'is_active': new_active,
-                'created_at': int(time.time())
-            }
+        # Update is_active in database (characters table)
+        db_update_npc_active(chat_id, filename, new_active)
 
-        # Update activeCharacters array
+        # Update activeCharacters array (still needed for prompt context)
         active_chars = chat.get('activeCharacters', [])
 
         if new_active:
@@ -7720,9 +7699,7 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
             if filename in active_chars:
                 active_chars.remove(filename)
 
-        # Save updated chat with modified metadata
-        metadata['localnpcs'] = localnpcs
-        chat['metadata'] = metadata
+        # Save updated chat
         chat['activeCharacters'] = active_chars
         db_save_chat(chat_id, chat)
         
@@ -7741,6 +7718,125 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
         import traceback
         traceback.print_exc()
         return {"success": False, "error": str(e)}
+
+
+@app.post("/api/chats/{chat_id}/migrate-npcs")
+async def migrate_npcs(chat_id: str, request: Request):
+    """
+    Migrate NPCs from another chat to this chat.
+    
+    Used when saving a chat under a new name (branching or renaming).
+    Each NPC gets a new filename to ensure independence between chats.
+    
+    Request body:
+        old_chat_id: str - Source chat ID to migrate NPCs from
+    
+    Returns:
+        success: bool
+        filename_mapping: {old_filename: new_filename}
+        metadata_updated: bool
+    """
+    try:
+        body = await request.json()
+        old_chat_id = body.get("old_chat_id")
+        
+        if not old_chat_id:
+            return {"success": False, "error": "old_chat_id is required"}
+        
+        print(f"[NPC_MIGRATE] Migrating NPCs from {old_chat_id} to {chat_id}")
+        
+        # Check if new chat exists
+        new_chat = db_get_chat(chat_id)
+        if not new_chat:
+            return {"success": False, "error": f"Chat '{chat_id}' not found"}
+        
+        # Check if old chat exists
+        old_chat = db_get_chat(old_chat_id)
+        if not old_chat:
+            # No old chat = nothing to migrate, that's OK
+            print(f"[NPC_MIGRATE] Old chat '{old_chat_id}' not found, nothing to migrate")
+            return {"success": True, "filename_mapping": {}, "metadata_updated": True}
+        
+        # Migrate NPCs (atomic operation)
+        success, filename_mapping, error = db_migrate_npcs(old_chat_id, chat_id)
+        
+        if not success:
+            return {"success": False, "error": error or "Migration failed"}
+        
+        if not filename_mapping:
+            print(f"[NPC_MIGRATE] No NPCs to migrate")
+            return {"success": True, "filename_mapping": {}, "metadata_updated": True}
+        
+        print(f"[NPC_MIGRATE] Migrated {len(filename_mapping)} NPCs: {filename_mapping}")
+        
+        # Remap metadata in new chat
+        try:
+            new_metadata = new_chat.get('metadata', {}) or {}
+            
+            # Remap activeCharacters
+            active_chars = new_metadata.get('activeCharacters', [])
+            remapped_active = []
+            for char_ref in active_chars:
+                if char_ref in filename_mapping:
+                    remapped_active.append(filename_mapping[char_ref])
+                else:
+                    remapped_active.append(char_ref)  # Global characters stay the same
+            new_metadata['activeCharacters'] = remapped_active
+            
+            # Remap characterFirstTurns
+            first_turns = new_metadata.get('characterFirstTurns', {})
+            remapped_first_turns = {}
+            for char_ref, turn in first_turns.items():
+                if char_ref in filename_mapping:
+                    remapped_first_turns[filename_mapping[char_ref]] = turn
+                else:
+                    remapped_first_turns[char_ref] = turn
+            new_metadata['characterFirstTurns'] = remapped_first_turns
+            
+            # Remap characterFullCardTurns
+            full_card_turns = new_metadata.get('characterFullCardTurns', {})
+            remapped_full_card_turns = {}
+            for char_ref, turn in full_card_turns.items():
+                if char_ref in filename_mapping:
+                    remapped_full_card_turns[filename_mapping[char_ref]] = turn
+                else:
+                    remapped_full_card_turns[char_ref] = turn
+            new_metadata['characterFullCardTurns'] = remapped_full_card_turns
+            
+            # Remap localnpcs keys
+            localnpcs = new_metadata.get('localnpcs', {})
+            remapped_localnpcs = {}
+            for npc_ref, npc_data in localnpcs.items():
+                if npc_ref in filename_mapping:
+                    remapped_localnpcs[filename_mapping[npc_ref]] = npc_data
+                else:
+                    remapped_localnpcs[npc_ref] = npc_data
+            new_metadata['localnpcs'] = remapped_localnpcs
+            
+            # Save updated metadata
+            new_chat['metadata'] = new_metadata
+            db_save_chat(chat_id, new_chat)
+            
+            print(f"[NPC_MIGRATE] Updated metadata for chat {chat_id}")
+            
+            return {
+                "success": True,
+                "filename_mapping": filename_mapping,
+                "metadata_updated": True
+            }
+            
+        except Exception as e:
+            print(f"[NPC_MIGRATE] Error updating metadata: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": f"Metadata update failed: {str(e)}"}
+            
+    except Exception as e:
+        print(f"[NPC_MIGRATE] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}
+
 
 # World Info Cache Management Endpoints
 @app.get("/api/world-info/cache/stats")

@@ -2,9 +2,7 @@
 
 ![Screenshot 2026-01-28 075248](https://github.com/user-attachments/assets/339e9fc7-ff88-4c35-860b-71f3b640e1a5)
 
-**v2.0.0 is a breaking release — Forking, relationship tracking, and snapshot variation mode have been removed. Existing v1.x users should review the Migration Notes below before upgrading.**
-
-**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine that keeps long, multi-character stories from turning into slop by structuring the conversation into clear scenes and aggressively summarizing old chatter, while delivering best-in-class, character-consistent Stable Diffusion images**
+**tl;dr: NeuralRP is a local, no-cloud, opinionated roleplay engine that keeps long chats from turning into slop by structuring the conversation into clear scenes and aggressively summarizing old chatter, while delivering best-in-class, character-consistent Stable Diffusion images**
 
 **Simple out of the box. Just drop your SillyTavern cards in the folders, there isn't a million different things to configure. Just go.**
 
@@ -14,74 +12,16 @@
 
 **Next step: Open [Quickstart Guide](docs/QUICKSTART.md) for setup, recommended LLM models, and example characters and worlds**
 
-**Status**: Actively developed, v2.0.0 released. Report bugs in Discussions!
----
-
-## Table of Contents
-
-- [Why It's Different](#why-its-different)
-- [NeuralRP: Storytime](#neuralrp-storytime)
-- [Core Philosophy: Conversation First](#core-philosophy-conversation-first)
-- [Built for SillyTavern Ecosystem Compatibility](#built-for-sillytavern-ecosystem-compatibility)
-- [What This Enables](#what-this-enables)
-- [Image Generation with AUTOMATIC1111](#image-generation-with-automatic1111)
-- [Library-Scale Organization](#library-scale-organization)
-- [Additional Capabilities](#additional-capabilities)
-- [Built for Local Deployment](#built-for-local-deployment)
-- [Known Limitations](#known-limitations)
-- [Hardware Requirements](#hardware-requirements)
-- [Quick Start](#quick-start)
-- [Danbooru Tag Generator (Optional)](#danbooru-tag-generator-optional)
-- [Documentation](#documentation)
-- [Credits](#credits)
-- [License](#license)
-
----
-## v2.0.0: Stabilization
-
-v2.0.0 is a stabilization release. The codebase grew too fast, I kept adding features and wasn't thinking about the state of the codebase until it got out of control. To try to keep the project maintainable, I removed three overly-complex systems: forking, relationship tracking, and snapshot variation mode. If these features are essential for you and you don't mind the bugs, don't download v2.0.0. 
-
-Over the coming weeks, I'll continue debug this and optimizing.
-
-## Scene-First Architecture
-
-Through extensive testing, I have found that smaller LLMs (I roleplay with a 12b LLM) simply cannot keep characters straight, no matter what you prompt, when lots of dialog is present. Characters just merge together. 
-
-To keep this from happening, I have combined consistent, small chunks of character reinforcement and a "spike" of reinforcement for new characters, along with smart auto-summarization based on scene change, to ensure the LLM both recognizes the change, and doesn't "merge" the new and old characters together.
-
-The result: a "scene-first" focus. When a new character or NPC enters, there's a reason for that. You want that different energy, someone who will contribute something new or unique. This design maximizes that, while keeping in mind the limitations of small, locally-runnable LLMs.
-
-What's New
-1. **Continuous Character Presence (SCENE CAST)**
-- Every turn shows who's in the scene with their key traits and speech style
-- Replaces "reinforce every 5 turns" with constant lightweight grounding
-- Pre-generated "capsules", essentially shorter character cards with dialog examples, for each active character/NPC, every turn
-
-2. **Strategic Full Card Injection**
-- Full character cards appear at reset points: first appearance, sticky window (turns 1-3), and after long absence (20+ messages)
-- New characters establish voice immediately with rich context
-- Returning characters get a "memory refresh" to prevent drift
-
-3. **Smarter Auto-Summarization**
-- Cast-change: Compresses old content when new characters enter, giving them a fresh voice. No voice-merging! 
-- Threshold: Groups old messages into scenes when context hits 80%, with characters/NPC's leaving being a threshold.
-- Both run in the background after you get your response (non-blocking)
-
-4. **Tighter History Window + 8k Baseline**
-- Keeps last 6 exchanges (12 messages) verbatim instead of 10
-- max_context default increased from 4096 to 8192 (tested and designed for this window)
-- summarize_threshold raised to 0.80 (use more of the window before compressing)
-- Tuned for modern 7B-14B models (Nemo, Qwen 2.5, Llama 3 base)
-
-Benefits: Characters maintain consistent voices through long conversations. Better token efficiency means more room for world info and detailed responses. Auto-summarization keeps performance smooth without manual intervention.
+**Status**: Actively developed, v2.0.3 released.
 
 ---
 
 ## Why It’s Different
+Through extensive testing, I have found that smaller LLMs (I roleplay with a 12b LLM) simply cannot keep characters straight, no matter what you prompt, when lots of dialog is present. Characters just merge together. To battle this, I've focused on building a system predicated on smart character and world card insertion, along with lots of auto-summarization:
 
-1. **Context hygiene engine** — Character cards appear in full at strategic reset points (first appearance, turns 1-3 sticky window, after long absence), then lightweight SCENE CAST reminders every turn keep voices consistent. World lore appears only when semantically relevant unless marked as "canon law", which reinforces periodically. Recent dialogue (last 6 exchanges) stays detailed and verbatim; older content compresses into scene summaries. ~50–60% of your 8k context stays as recent conversation and character grounding, with plenty of headroom for world info and long responses.
+1. **Context hygiene engine** — Character cards appear in full at strategic reset points (first appearance, turns 1-3 sticky window, after long absence), then lightweight reminders every turn keep voices consistent. World lore appears only when semantically relevant unless marked as "canon law", which reinforces periodically. Recent dialogue stays, older content compresses into scene summaries.
 
-2. **Emergent cast with visual canon** — Quickly create NPCs on the fly that are isolated to one chat, have full parity with characters, can be promoted, and stay branch‑safe. Gender selection keeps both text and visuals targeted, and one-click Danbooru tag assignment based on character description solves the problem of visual drift, so you can stay immersed in the actual roleplay.
+2. **Emergent cast with visual canon** — Quickly create NPCs on the fly that are isolated to one chat, have full parity with characters and can be promoted to full characters. Gender selection keeps both text and visuals targeted, and one-click Danbooru tag assignment based on character description solves the problem of visual drift, so you can stay immersed in the actual roleplay.
 
 3. **Native Stable Diffusion, scene‑aware** — Deep AUTOMATIC1111 integration: inpainting, both manual and automatic generation via the "snapshot" feature, and automatic danbooru tag assignment based on physical features, carefully designed to not "leak" into the context window. A "Favorites" menu allows you to jump right to where the image appeared in its original chat, so you can see the context. All designed to fit into the flow of roleplay, as unintrusively as possible.
 
@@ -107,15 +47,40 @@ The fact is, there are certain limitations with 7b-14b LLMs that you simply can'
 
 ---
 
-## Core Philosophy: Scene-First
+## Image Generation with AUTOMATIC1111
 
-NeuralRP v1.11.0 uses scene-first architecture for maximum character consistency across long conversations.
+Native integration, with the goal to be best in class:
 
-- **SCENE CAST every turn** — All active characters shown with their capsules every turn (replaces periodic reinforcement)
-- **6-exchange history window (RP-optimized)** — Last 6 exchanges shown verbatim, older content summarized into scene capsules
-- **Hybrid full card system** — Sticky full cards on turns 1-3, capsules on turns 4+, reset points for returning characters
-- **Context-aware retrieval** — World lore appears when semantically relevant. Canon law reinforced every 3 turns.
-- **Scalability by design** — SCENE CAST (400-600 tokens) + 6 exchanges (900-1500 tokens) + sticky full cards (500-2000, turns 1-3). Supports 5+ character group chats.
+### 1. Snapshots
+
+- **Generated from Context** – Generate images from chat context automatically; AI analyzes the last 20 messages, providing location, action, activity, dress, and facial expression, which is then directly matched to an SD Generation-optimized prompt. 
+- **How is it Different?** - It doesn't just ask the LLM for a complete prompt and shove it into A1111 like others do. It takes a specific framework optimized for Anime-based LLM generation models, using Danbooru tags that those models are specifically trained on, to create consistent images. The LLM is just delivering keywords - action, location, activity, dress, and facial expression. And no "leakage" into the context window, one of the things that would ruin my RP chats with other frontends you have probably used.
+- **Intelligent analysis** - Snapshot looks across recent chat messages, intelligently gathering context for the snapshot while focusing on the most recent action for the picture.
+- **Focus Mode** - More than one character in the shot? Select the one you want using focus mode.
+- **You are IN THE SHOT** - Define yourself as male/female/other, and fill out your own tags in settings. You're in the snapshot, with context derived from your tags and the chat text. 
+
+### 2. Inpainting
+
+- Adjustable brush size
+- Ctrl+Z undo
+- Eraser tool
+- Persistent mask between regenerations
+- Full A1111 parameter control
+
+### 3. Manual-Mode Generation
+
+- **Pop-out Window** - Easily accessible pop out window, prompt stays in browser memory so you don't have to retype every time, re-size generation on the fly.
+- **Character tag substitution** – Assign Danbooru tags to characters once, reference with `[CharacterName]` in prompts for consistent appearance without memorizing tag lists.
+
+### 4. Browse and Save Your Images
+- **Images Folder** - separate images folder where every generation is saved, even if you delete it in the chat. 
+- **Favorites menu** – Favorite images to build a visual library; click on the image and go straight to the image's original location in the chat. Filter by tag.
+- **Jump‑to‑source** – Double‑click favorites to jump back to the exact chat moment they came from.
+- **Recreate images** - Image metadata saved, so you can see exactly what prompt generated what image. Easily recreate images with a click of a button.
+
+### 5. Performance‑Aware Presets
+
+Automatic selectable step/resolution reduction when context is large (>12K tokens) to prevent VRAM crashes, with sane defaults for 8–16 GB cards.
 
 ---
 
@@ -165,43 +130,7 @@ Continue conversations beyond context limits. When context approaches 80%:
 - Relationship states preserved
 - Story continuity maintained
 - Summarization window to view and customize summaries (or auto-summarize your summaries!)
-
-Relationship state is one of the most difficult things to maintain when summaries happen. The relationship system brings continuity without having to update character cards manually.
-
----
-
-## Image Generation with AUTOMATIC1111
-
-Native integration, with the goal to be best in class:
-
-### 1. Performance‑Aware Presets
-
-Automatic selectable step/resolution reduction when context is large (>12K tokens) to prevent VRAM crashes, with sane defaults for 8–16 GB cards.
-
-### 2. Inpainting
-
-- Adjustable brush size
-- Ctrl+Z undo
-- Eraser tool
-- Persistent mask between regenerations
-- Full A1111 parameter control
-
-### 3. Manual-Mode Generation
-
-- **Pop-out Window** - Easily accessible pop out window, prompt stays in browser memory so you don't have to retype every time, re-size generation on the fly.
-- **Character tag substitution** – Assign Danbooru tags to characters once, reference with `[CharacterName]` in prompts for consistent appearance without memorizing tag lists.
-
-### 4. Snapshots
-
-- **Generated from Context** – Generate images from chat context automatically; AI analyzes the last 20 messages, providing location, action, activity, dress, and facial expression, which is then directly matched to an SD Generation-optimized prompt. 
-- **How is it Different?** - It doesn't just ask the LLM for a complete prompt and shove it into A1111 like others do. It takes a specific framework optimized for Anime-based LLM generation models, using Danbooru tags that those models are specifically trained on, to create consistent images. The LLM is just delivering keywords - action, location, activity, dress, and facial expression. And no "leakage" into the context window, one of the things that would ruin my RP chats with other frontends you have probably used.
-- **You are IN THE SHOT** - Define yourself as male/female/other, and fill out your own tags in settings. You're in the snapshot, with context derived from your tags and the chat text. 
-
-### 5. Browse and Save Your Images
-- **Images Folder** - separate images folder where every generation is saved, even if you delete it in the chat. 
-- **Favorites menu** – Favorite images to build a visual library; click on the image and go straight to the image's original location in the chat. Filter by tag.
-- **Jump‑to‑source** – Double‑click favorites to jump back to the exact chat moment they came from.
-- **Recreate images** - Image metadata saved, so you can see exactly what prompt generated what image. Easily recreate images with a click of a button.
+- Auto-summarization of summaries once they hit 1200 words
 
 ---
 
@@ -268,15 +197,14 @@ All data in SQLite (neuralrp.db) with automatic JSON export for SillyTavern comp
 
 ## Known Limitations
 
-- Requires 8k+ context models. NeuralRP's scene-first architecture won't fit in 4k context windows. Modern 7B-14B RP-tuned models (Mistral, Qwen, Llama 3, etc.) all ship with 8k+ by default.
+- Requires 8k+ context models. NeuralRP's architecture won't fit in 4k context windows. Modern 7B-14B RP-tuned models (Mistral, Qwen, Llama 3, etc.) all ship with 8k+ by default.
 - No cloud extensibility, all local
 - Requires AUTOMATIC1111 for image generation, not compatible with ComfyUI and others at this time (run with --API).
 - Requires OpenAI-compatible backend with text to text LLM running locally (KoboldCpp strongly recommended).
 - Tested with KoboldCpp with a quantized 12B LLM model tuned for RP, and with A1111 running an Illustrious SD model.
 - All testing done with a NVidia 3060 12GB vRAM GPU
 - Running 2 LLMs with an 8GB vRAM GPU is untested, will likely lead to sub-optimal results
-- Danbooru tagging is optimized for SD models like Pony and Illustrious, which are trained for that input. Other SD models are untested
-- There's a SCENE CAST bug, when an NPC enters a chat and is the only NPC/Character there, the prompt treats them like they are new to the chat every turn and drops their entire character card. I'm trying to find the bug but also haven't found that it significantly impacts chat negatively either.
+- Danbooru tagging is optimized for SD models like Pony and Illustrius, which are trained for that input. Other SD models are untested
 
 ## Hardware Requirements
 

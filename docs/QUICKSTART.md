@@ -179,7 +179,13 @@ Use the dropdown menu in the bottom input area:
 
 ### Understanding Context Summarization
 
-NeuralRP automatically summarizes long conversations to maintain performance while preserving story continuity. When your chat reaches 80% context, old messages are compressed into scene summaries. This allows infinite conversations without losing context. You can view and edit summaries in the Summaries panel (📋 icon in header).
+NeuralRP automatically summarizes long conversations to maintain performance while preserving story continuity. Summarization triggers in three ways:
+
+1. **Turn-Based**: At turn 10 (configurable), old messages are compressed into scene summaries
+2. **Summary Word Limit**: When your summary exceeds 1200 words, it's automatically condensed by ~50-70%
+3. **Context Threshold**: 90% context usage as a safety backstop
+
+This allows infinite conversations without losing context. You can view and edit summaries in the Summaries panel (📋 icon in header).
 
 ---
 

@@ -1889,12 +1889,18 @@ All NPC endpoints updated to use filename-based entity IDs:
 # v1.12.0+: Load NPCs from unified table
 npc_data = db_get_character(filename, chat_id=chat_id)
 if npc_data:
+    # v2.0.3+: Check is_active from database
+    is_active = npc_data.get('is_active', True)
+    if not is_active:
+        continue  # Skip inactive NPCs
+
     character_profiles.append({
         'name': npc_data['name'],
         'data': npc_data['data'],
         '_filename': npc_data['_filename'],
         'entity_id': npc_data['_filename'],  # Filename is entity ID
         'is_npc': True,
+        'is_active': is_active,  # v2.0.3+: From database, not metadata
         'updated_at': npc_data.get('updated_at', 0)
     })
 ```
@@ -1902,6 +1908,7 @@ if npc_data:
 **NPC Reload on Every Message**:
 - NPCs reloaded from `characters` table on every message
 - Ensures immediate synchronization of mid-chat edits
+- `is_active` checked from database field
 - No need for metadata-only NPC storage
 
 ### Key Benefits
@@ -1973,9 +1980,15 @@ File System
 
 **v1.12.0 Storage Changes**:
 - **Unified `characters` table**: Both global and NPCs in one table
-- **NPC metadata only**: Chat metadata stores `localnpcs` for active status tracking
 - **Automatic migration**: Existing `chat_npcs` table migrated on first startup
 - **Backup preserved**: `chat_npcs_backup` table kept for rollback
+
+**v2.0.3 Storage Changes**:
+- **Active status in database**: `is_active` column added to `characters` table (default: 1)
+- **Single source of truth**: `is_active` stored in database, not metadata
+- **Reduced metadata**: `localnpcs` no longer stores `is_active` field
+- **Enhanced migration**: `/api/chats/{chat_id}/migrate-npcs` endpoint copies NPCs between chats
+- **Atomic operations**: NPC migration uses database transactions for consistency
 
 ### Database Schema
 
@@ -1990,6 +2003,7 @@ CREATE TABLE characters (
     visual_canon_id INTEGER,
     visual_canon_tags TEXT,
     chat_id TEXT,                    -- NEW: NULL = global, 'chat_id' = NPC
+    is_active INTEGER DEFAULT 1,     -- v2.0.3+: Active status in database (not metadata)
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -2121,11 +2135,13 @@ Load chat data: db_get_chat(chat_id)
     ↓
 Get references: activeCharacters = ['alice.json', 'npc_123']
     ↓
-Resolve characters: load_character_profiles(activeCharacters, local_npcs)
+Resolve characters: load_character_profiles(activeCharacters)
     ├── Global: db_get_character('alice.json')
-    └── NPC: local_npcs['npc_123'] (if is_active)
+    └── NPC: db_get_character('npc_123.json', chat_id) (from database)
     ↓
-Unified character list: [{name, data, entity_id, is_npc}, ...]
+Check is_active: if npc['is_active'] is False, skip
+    ↓
+Unified character list: [{name, data, entity_id, is_npc, is_active}, ...]
     ↓
 Apply capsule summaries (if multi-character)
     ↓
@@ -2193,12 +2209,12 @@ Save chat: db_save_chat(chat_id, chat_data)
 
 #### 1. Context Assembly (app/main.py)
 
-**Function**: `load_character_profiles(active_chars, local_npcs)`
+**Function**: `load_character_profiles(active_chars)`
 
 Resolves character references to full character objects:
-- Checks if reference starts with `npc_` → load from local_npcs
-- Otherwise → load from database via `db_get_character()`
-- Validates data exists and NPCs are active
+- Checks if reference starts with `npc_` → load from database via `db_get_character(npc_id, chat_id)`
+- Otherwise → load from database via `db_get_character(char_id)`
+- Validates data exists and NPCs are active (checked from `npc['is_active']` field)
 - Returns unified character list
 
 **Location**: Called in `/api/chat` endpoint before prompt construction
@@ -2217,11 +2233,13 @@ Every N turns (default: 5), character profiles re-injected to prevent drift:
 
 #### Active/Inactive State
 
-NPCs can be toggled active/inactive:
-- **Active**: Included in context assembly, reinforcement
-- **Inactive**: Skipped during context assembly, preserved in metadata
+NPCs can be toggled active/inactive via `/api/chats/{chat_id}/npcs/{npc_id}/toggle-active`:
+- **Active**: `is_active: 1` in `characters` table, included in context assembly, reinforcement
+- **Inactive**: `is_active: 0` in `characters` table, skipped during context assembly, preserved in database
 
 **Use case**: Temporarily remove NPC from scene without deleting
+
+**v2.0.3 Change**: `is_active` now stored in database `characters` table, not metadata `localnpcs`
 
 #### Name Collision Prevention
 
@@ -2755,9 +2773,11 @@ NPC messages are tagged with their entity ID in export metadata:
 ```
 
 **Inactive NPC Handling**:
-- Inactive NPCs (is_active: false) are excluded from character profiles
+- Inactive NPCs (`is_active: false`) are excluded from character profiles
+- `is_active` stored in `characters` table, not metadata
 - Historical NPC responses remain in conversation history
 - Only active NPCs appear in system prompt character definitions
+- Toggle via `/api/chats/{chat_id}/npcs/{npc_id}/toggle-active` endpoint
 
 ### API Endpoints
 
@@ -8782,23 +8802,19 @@ The visual canon binding (which Danbooru character was selected) was not being p
 
 #### Root Cause
 
-**Newly created NPCs only exist in chat metadata, not in database:**
+**v1.12.0+ NPC Storage:**
+- NPCs are created directly in `characters` table (not metadata)
+- Frontend calls `db_create_npc_and_update_chat()` during creation
+- All fields (including `is_active`) stored in database
+- Metadata `localnpcs` only tracks active status and references (v2.0.3: no longer stores `is_active`)
 
 ```
 User workflow:
-1. User creates NPC via "Generate Character" → Stored in chat.metadata.localnpcs
+1. User creates NPC via "Generate Character" → Stored in `characters` table via db_create_npc_and_update_chat()
 2. User clicks "Generate Danbooru Tags" → Calls generate_and_assign_to_npc()
-3. System tries to assign visual_canon_id to chat_npcs table
-4. NPC doesn't exist in chat_npcs table → db_assign_visual_canon_to_npc() returns False
-5. Warning logged, but tags still returned to UI
-6. User saves NPC → NPC synced to database via PUT /api/chats/{id}/npcs/{npc_id}
-7. BUT visual_canon_id never stored (was lost in step 4)
-```
-
-**Database state:**
-```
-chat_npcs table: NPC not created yet
-chat.metadata.localnpcs: NPC exists, no visual_canon_id
+3. System assigns visual_canon_id to `characters` table
+4. Frontend saves chat → metadata localnpcs synced with database
+5. visual_canon_id properly stored and persists
 ```
 
 #### Solution: Option A + Option B Fallback Strategy

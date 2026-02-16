@@ -5,6 +5,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ***
 
+## [2.0.3] - 2026-02-16
+
+### Changed
+- **NPC Active Status Storage**: Moved from metadata-based (`localnpcs.is_active`) to database-based (`characters.is_active`)
+  - Eliminates redundant `localnpcs` dependency that caused countless bugs
+  - Single source of truth for NPC data and active status
+  - `is_active` now stored directly in `characters` table (default: 1)
+  - Frontend now calls `/api/chats/{chat_id}/migrate-npcs` when saving chats under new names
+  - NPCs are copied with new filenames to ensure independence between branches
+
+### Fixed
+- **Input Button Overlap Bug**: Moved snapshot and send buttons from absolutely positioned inside the textarea to a horizontal flex layout alongside the textarea
+  - Previously: Buttons overlaid text when typing, making them hard to reach
+  - Now: Buttons float on the right side alongside the textarea with dedicated spacing
+  - Text never covered by buttons at any input length
+
+### Technical
+- **New Database Function**: `db_update_npc_active()` - updates NPC active status in database
+- **New Database Function**: `db_migrate_npcs()` - atomically copies NPCs between chats
+- **New API Endpoint**: `POST /api/chats/{chat_id}/migrate-npcs` - migrates NPCs from another chat
+- **Database Migration**: Added `is_active` column to `characters` table with one-time populating from metadata
+- **Reduced Metadata Redundancy**: Removed `is_active` from `localnpcs` during NPC creation
+- **Updated Helper Functions**: `db_get_characters()` now includes `is_active` from database
+
 ## [2.0.2] - 2026-02-13
 
 ### Added

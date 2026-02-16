@@ -98,6 +98,11 @@ def get_connection_stats() -> dict:
     return _connection_stats.copy()
 
 
+def column_exists(cursor, table: str, column: str) -> bool:
+    """Check if a column exists in a table."""
+    cursor.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cursor.fetchall())
+
 
 def init_db():
     """Initialize database tables if they don't exist."""
@@ -174,25 +179,22 @@ def init_db():
         """)
         
         # Add summarized column if it doesn't exist (for older databases)
-        try:
+        if not column_exists(cursor, "messages", "summarized"):
             cursor.execute("ALTER TABLE messages ADD COLUMN summarized INTEGER DEFAULT 0")
+            conn.commit()
             print("Added summarized column to messages table")
-        except Exception as e:
-            logger.error(f"Failed to add summarized column to messages: {type(e).__name__}: {e}")
         
         # Add updated_at column to characters table (v1.8.0+ for smart sync)
-        try:
+        if not column_exists(cursor, "characters", "updated_at"):
             cursor.execute("ALTER TABLE characters ADD COLUMN updated_at INTEGER")
+            conn.commit()
             print("Added updated_at column to characters table")
-        except Exception as e:
-            logger.error(f"Failed to add updated_at column to characters: {type(e).__name__}: {e}")
         
         # Add updated_at column to world_entries table (v1.8.0+ for smart sync)
-        try:
+        if not column_exists(cursor, "world_entries", "updated_at"):
             cursor.execute("ALTER TABLE world_entries ADD COLUMN updated_at INTEGER")
+            conn.commit()
             print("Added updated_at column to world_entries table")
-        except Exception as e:
-            logger.error(f"Failed to add updated_at column to world_entries: {type(e).__name__}: {e}")
         
         # Backfill updated_at for existing characters (set to created_at if null)
         try:
@@ -216,23 +218,50 @@ def init_db():
         
         # Drop capsule column from characters table (v1.8.2+ - capsules now chat-scoped)
         # Capsules are now stored in chat.metadata.characterCapsules instead
-        try:
+        if column_exists(cursor, "characters", "capsule"):
             cursor.execute("ALTER TABLE characters DROP COLUMN capsule")
             conn.commit()
             print("Dropped capsule column from characters table (capsules now chat-scoped)")
-        except Exception as e:
-            logger.error(f"Failed to drop capsule column from characters: {type(e).__name__}: {e}")
 
         # Add snapshot_data column to messages table (v1.9.1+ - snapshot messages)
         # Stores snapshot data (prompt, negative_prompt, scene_analysis, etc.) as JSON
-        try:
+        if not column_exists(cursor, "messages", "snapshot_data"):
             cursor.execute("ALTER TABLE messages ADD COLUMN snapshot_data TEXT")
             conn.commit()
             print("Added snapshot_data column to messages table")
-        except Exception as e:
-            logger.error(f"Failed to add snapshot_data column to messages: {type(e).__name__}: {e}")
 
-         
+        # Add is_active column to characters table (v2.1.0+ - NPC active status in DB)
+        if not column_exists(cursor, "characters", "is_active"):
+            cursor.execute("ALTER TABLE characters ADD COLUMN is_active INTEGER DEFAULT 1")
+            conn.commit()
+            print("Added is_active column to characters table")
+
+            # One-time migration: populate is_active from chat metadata.localnpcs
+            try:
+                print("[MIGRATION] Populating is_active from metadata...")
+                cursor.execute("SELECT id, metadata FROM chats")
+                for chat_row in cursor.fetchall():
+                    chat_id = chat_row['id']
+                    metadata_str = chat_row['metadata']
+                    if not metadata_str:
+                        continue
+                    try:
+                        metadata = json.loads(metadata_str)
+                        localnpcs = metadata.get('localnpcs', {})
+                        for filename, npc_data in localnpcs.items():
+                            is_active = 1 if npc_data.get('is_active', True) else 0
+                            cursor.execute(
+                                "UPDATE characters SET is_active = ? WHERE chat_id = ? AND filename = ?",
+                                (is_active, chat_id, filename)
+                            )
+                    except Exception as e:
+                        print(f"[MIGRATION] Failed to migrate is_active for chat {chat_id}: {e}")
+                conn.commit()
+                print("[MIGRATION] Completed populating is_active from metadata")
+            except Exception as e:
+                print(f"[MIGRATION] Failed to populate is_active: {e}")
+
+          
         # Image metadata table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS image_metadata (
@@ -565,7 +594,7 @@ def db_get_characters(chat_id: Optional[str] = None) -> List[Dict[str, Any]]:
             # Get only NPCs for this chat
             cursor.execute("""
                 SELECT filename, data, danbooru_tag, created_at, updated_at,
-                       visual_canon_id, visual_canon_tags
+                       visual_canon_id, visual_canon_tags, is_active
                 FROM characters
                 WHERE chat_id = ?
                 ORDER BY created_at DESC
@@ -574,7 +603,7 @@ def db_get_characters(chat_id: Optional[str] = None) -> List[Dict[str, Any]]:
             # Get all global characters (chat_id IS NULL)
             cursor.execute("""
                 SELECT filename, data, danbooru_tag, created_at, updated_at,
-                       visual_canon_id, visual_canon_tags
+                       visual_canon_id, visual_canon_tags, is_active
                 FROM characters
                 WHERE chat_id IS NULL
                 ORDER BY created_at DESC
@@ -586,6 +615,8 @@ def db_get_characters(chat_id: Optional[str] = None) -> List[Dict[str, Any]]:
             char_data['_filename'] = row['filename']
             char_data['updated_at'] = row['updated_at']
             char_data['is_npc'] = chat_id is not None
+            # Include is_active from database (default to True if null for backwards compatibility)
+            char_data['is_active'] = row['is_active'] if row['is_active'] is not None else True
             
             # Get extensions dict from either flat or nested structure
             if 'data' in char_data:
@@ -3403,14 +3434,16 @@ def db_get_chat_npcs(chat_id: str) -> list:
         # Transform to match old format
         result = []
         for npc in npcs:
+            # is_active comes from database now (characters table)
+            is_active = npc.get('is_active', True)
             result.append({
                 "entityid": npc['_filename'],
                 "entity_id": npc['_filename'],
                 "chat_id": chat_id,
                 "name": npc.get("name", "Unknown"),
                 "data": npc,
-                "isactive": True,  # Active status is now in chat metadata
-                "is_active": True,
+                "isactive": is_active,
+                "is_active": is_active,
                 "promoted": False,
                 "globalfilename": None,
                 "createdat": npc.get("created_at", int(time.time()))
@@ -3524,6 +3557,33 @@ def db_delete_npc(chat_id: str, filename: str) -> bool:
         return False
 
 
+def db_update_npc_active(chat_id: str, filename: str, is_active: bool) -> bool:
+    """
+    Update NPC active status in characters table.
+    
+    Args:
+        chat_id: Chat ID
+        filename: NPC filename
+        is_active: New active status
+    
+    Returns:
+        bool: Success
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE characters 
+                SET is_active = ? 
+                WHERE chat_id = ? AND filename = ?
+            """, (1 if is_active else 0, chat_id, filename))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        print(f"[NPC] Error updating is_active: {e}")
+        return False
+
+
 def db_create_npc_with_entity_id(chat_id: str, entity_id: str, npc_data: Dict) -> Tuple[bool, Optional[str]]:
     """
     Create NPC in database with a specific entity_id (now filename).
@@ -3633,8 +3693,8 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                 cursor.execute(
                     """
                     INSERT INTO characters
-                        (chat_id, filename, name, data, danbooru_tag, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (chat_id, filename, name, data, danbooru_tag, is_active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chat_id,
@@ -3642,6 +3702,7 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                         name,
                         json.dumps(npc_data, ensure_ascii=False),
                         danbooru_tag,
+                        1,  # is_active: default to active
                         int(time.time()),
                         int(time.time()),
                     ),
@@ -3673,10 +3734,10 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                     existing_metadata["localnpcs"] = {}
                 
                 # Add new NPC to metadata (preserving existing localnpcs)
+                # Note: is_active is now stored in characters table, not metadata
                 existing_metadata["localnpcs"][filename] = {
                     'name': name,
                     'data': npc_data,
-                    'is_active': True,
                     'promoted': False,
                     'created_at': int(time.time())
                 }
@@ -3722,6 +3783,83 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                 # Rollback on any error
                 conn.rollback()
                 return False, None, f"Atomic transaction failed: {str(e)}"
+                
+    except Exception as e:
+        return False, None, f"Unexpected error: {str(e)}"
+
+
+def db_migrate_npcs(old_chat_id: str, new_chat_id: str) -> Tuple[bool, Optional[Dict[str, str]], Optional[str]]:
+    """
+    Atomically copy all NPCs from old chat to new chat.
+    
+    This is used when saving a chat under a new name (e.g., branching or renaming).
+    Each NPC gets a new filename to ensure independence between chats.
+    
+    Args:
+        old_chat_id: Source chat ID
+        new_chat_id: Destination chat ID
+    
+    Returns:
+        (success: bool, filename_mapping: {old_filename: new_filename}, error_message: str)
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("BEGIN TRANSACTION")
+            
+            try:
+                # Get all NPCs from old chat
+                cursor.execute("""
+                    SELECT filename, name, data, danbooru_tag, is_active, 
+                           visual_canon_id, visual_canon_tags, created_at, updated_at
+                    FROM characters 
+                    WHERE chat_id = ?
+                """, (old_chat_id,))
+                
+                old_npcs = cursor.fetchall()
+                
+                if not old_npcs:
+                    conn.commit()
+                    return True, {}, None
+                
+                # Build mapping: old_filename -> new_filename
+                filename_mapping = {}
+                
+                # Copy each NPC with new filename
+                for npc in old_npcs:
+                    old_filename = npc['filename']
+                    name = npc['name']
+                    data_str = npc['data']
+                    danbooru_tag = npc['danbooru_tag']
+                    is_active = npc['is_active'] if npc['is_active'] is not None else 1
+                    visual_canon_id = npc['visual_canon_id']
+                    visual_canon_tags = npc['visual_canon_tags']
+                    created_at = npc['created_at']
+                    
+                    # Generate new filename
+                    safe_name = name.lower().replace(' ', '_').replace("'", '')
+                    new_filename = f"npc_{safe_name}_{int(time.time())}_{len(filename_mapping)}.json"
+                    
+                    # Insert copy with new chat_id and filename
+                    cursor.execute("""
+                        INSERT INTO characters 
+                        (filename, name, data, chat_id, danbooru_tag, is_active,
+                         visual_canon_id, visual_canon_tags, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        new_filename, name, data_str, new_chat_id, danbooru_tag, is_active,
+                        visual_canon_id, visual_canon_tags, created_at, int(time.time())
+                    ))
+                    
+                    filename_mapping[old_filename] = new_filename
+                
+                conn.commit()
+                return True, filename_mapping, None
+                
+            except Exception as e:
+                conn.rollback()
+                return False, None, f"Atomic migration failed: {str(e)}"
                 
     except Exception as e:
         return False, None, f"Unexpected error: {str(e)}"
