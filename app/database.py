@@ -193,6 +193,23 @@ def init_db():
             cursor.execute("ALTER TABLE characters ADD COLUMN updated_at INTEGER")
             conn.commit()
             print("Added updated_at column to characters table")
+
+        # Add chat_id column to characters table (v2.0+ unified characters/NPC storage)
+        if not column_exists(cursor, "characters", "chat_id"):
+            cursor.execute("ALTER TABLE characters ADD COLUMN chat_id TEXT")
+            conn.commit()
+            print("Added chat_id column to characters table")
+
+        # Add visual canon columns to characters table (v1.10.0+)
+        if not column_exists(cursor, "characters", "visual_canon_id"):
+            cursor.execute("ALTER TABLE characters ADD COLUMN visual_canon_id INTEGER")
+            conn.commit()
+            print("Added visual_canon_id column to characters table")
+
+        if not column_exists(cursor, "characters", "visual_canon_tags"):
+            cursor.execute("ALTER TABLE characters ADD COLUMN visual_canon_tags TEXT")
+            conn.commit()
+            print("Added visual_canon_tags column to characters table")
         
         # Add updated_at column to world_entries table (v1.8.0+ for smart sync)
         if not column_exists(cursor, "world_entries", "updated_at"):
