@@ -2480,17 +2480,23 @@ def db_save_performance_metric(operation_type: str, duration: float, context_tok
 
 def db_get_recent_performance_metrics(operation_type: str, limit: int = 10) -> List[float]:
     """Get recent performance metrics for an operation type."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT duration
-            FROM performance_metrics
-            WHERE operation_type = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-        """, (operation_type, limit))
-        
-        return [row['duration'] for row in cursor.fetchall()]
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT duration
+                FROM performance_metrics
+                WHERE operation_type = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (operation_type, limit))
+            
+            return [row['duration'] for row in cursor.fetchall()]
+    except sqlite3.OperationalError as e:
+        # Tests/import-time startup may run before all tables exist.
+        if "no such table: performance_metrics" in str(e).lower():
+            return []
+        raise
 
 
 def db_get_median_performance(operation_type: str, limit: int = 10) -> Optional[float]:
