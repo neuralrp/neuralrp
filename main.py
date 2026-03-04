@@ -122,7 +122,7 @@ from app.database import (
     db_save_performance_metric, db_get_recent_performance_metrics,
     db_get_median_performance, db_cleanup_old_metrics,
     # Undo/Redo functions
-    get_recent_changes, get_last_change, undo_last_delete, restore_version,
+    get_recent_changes, get_last_change, undo_last_delete, restore_version as db_restore_version,
     # Search functions (FTS5 full-text search)
     db_search_messages, db_get_message_context, db_get_available_speakers,
     migrate_populate_fts,
@@ -3053,7 +3053,7 @@ async def trigger_cast_change_summarization(
         
         if snapshot_analyzer:
             active_chars = chat.get('activeCharacters', [])
-            char_names = [c.get('name', '') for c in active_chars] if active_chars else []
+            char_names = resolve_active_character_names(active_chars, chat_id=chat_id)
             primary_char = char_names[0] if char_names else None
             
             cache_data = await snapshot_analyzer.extract_location_dress_for_cache(
@@ -3134,7 +3134,7 @@ async def trigger_threshold_summarization(
         
         if snapshot_analyzer:
             active_chars = chat.get('activeCharacters', [])
-            char_names = [c.get('name', '') for c in active_chars] if active_chars else []
+            char_names = resolve_active_character_names(active_chars, chat_id=chat_id)
             primary_char = char_names[0] if char_names else None
             
             cache_data = await snapshot_analyzer.extract_location_dress_for_cache(
@@ -3163,6 +3163,36 @@ def count_tokens(text: str) -> int:
     Uses ~4 chars per token for backward compatibility.
     """
     return len(text) // 4
+
+
+def resolve_active_character_names(active_chars: List[Any], chat_id: Optional[str] = None) -> List[str]:
+    """
+    Resolve active character references into display names.
+
+    Handles mixed formats:
+    - string entity refs (e.g., "alice.json", "npc_bob_123.json")
+    - dict payloads with name/data
+    """
+    names: List[str] = []
+
+    for char_ref in active_chars or []:
+        # Legacy/object payloads
+        if isinstance(char_ref, dict):
+            name = get_character_name(char_ref)
+            if name and name != "Unknown":
+                names.append(name)
+            continue
+
+        # Unified entity-id string payloads
+        if isinstance(char_ref, str):
+            char_data = db_get_character(char_ref, chat_id=chat_id) if char_ref.startswith("npc_") else db_get_character(char_ref)
+            if char_data:
+                names.append(get_character_name(char_data))
+            else:
+                # Last-resort fallback so snapshot analyzer still gets a stable identifier
+                names.append(char_ref)
+
+    return names
 
 def build_fallback_capsule(name: str, data: Dict) -> str:
     """Build minimal capsule when pre-generated capsule unavailable."""
@@ -8519,7 +8549,7 @@ async def undo_last_delete_endpoint(request: dict):
 
 
 @app.post("/api/changes/restore")
-async def restore_version(request: dict):
+async def restore_version_endpoint(request: dict):
     """Restore an entity to a specific change version.
     
     Request body:
@@ -8546,7 +8576,7 @@ async def restore_version(request: dict):
             return {"success": False, "error": "change_id must be a valid integer"}
         
         # Call database restore function
-        result = restore_version(change_id)
+        result = db_restore_version(change_id)
         return result
     except Exception as e:
         print(f"Error in restore_version: {e}")

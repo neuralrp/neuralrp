@@ -4079,7 +4079,8 @@
                     summary: this.summary,
                     activeCharacters: this.activeCharacters,
                     activeWI: this.activeWI,
-                    settings: this.settings
+                    settings: this.settings,
+                    metadata: this.currentChatMetadata || {},
                 };
                 try {
                     const res = await axios.post('/api/chats', { name, data });
@@ -4102,8 +4103,9 @@
                         }
                     }
                     
-                    // Migrate NPCs from old chat to new chat before deleting old chat
-                    if (oldChatId) {
+                    // Migrate/delete only on true rename, not overwrite of same chat id
+                    const isRename = Boolean(oldChatId && oldChatId !== name);
+                    if (isRename) {
                         try {
                             await axios.post(`/api/chats/${name}/migrate-npcs`, { old_chat_id: oldChatId });
                             console.log(`Migrated NPCs from ${oldChatId} to ${name}`);
@@ -4118,6 +4120,8 @@
                         } catch (e) {
                             console.error('Failed to delete old chat:', e);
                         }
+                    } else if (oldChatId === name) {
+                        console.log(`Overwrote existing chat without migration/delete: ${name}`);
                     }
                     
                     await this.fetchChats();
