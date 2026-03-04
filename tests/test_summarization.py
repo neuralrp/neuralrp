@@ -149,3 +149,69 @@ class TestSplitMessagesByWindow:
         
         assert len(older) >= 0
         assert len(recent) >= 0
+
+
+class TestSummarizationSafeguards:
+    """Tests for summary dedupe and hard limits."""
+
+    def test_enforce_word_limit_truncates(self):
+        """Word limiter should hard-truncate overlong text."""
+        from main import enforce_word_limit
+
+        text = "one two three four five six"
+        result = enforce_word_limit(text, 4)
+
+        assert result == "one two three four"
+
+    def test_filter_unsummarized_old_messages(self):
+        """Old messages at/below marker should be excluded from re-summarization."""
+        from main import filter_unsummarized_old_messages
+        from pydantic import BaseModel
+
+        class MockMessage(BaseModel):
+            role: str
+            content: str
+            id: int
+            speaker: str = ""
+
+        old = [
+            MockMessage(role="user", content="a", id=10),
+            MockMessage(role="assistant", content="b", id=11),
+            MockMessage(role="user", content="c", id=12),
+        ]
+        metadata = {"last_summarized_message_id": 11}
+
+        result = filter_unsummarized_old_messages(old, metadata)
+
+        assert len(result) == 1
+        assert result[0].id == 12
+
+    def test_group_messages_into_scenes_respects_start_turn(self):
+        """Scene turn labels should preserve absolute turn offset."""
+        from main import group_messages_into_scenes
+        from pydantic import BaseModel
+
+        class MockMessage(BaseModel):
+            role: str
+            content: str
+            id: int
+            speaker: str = ""
+
+        messages = [
+            MockMessage(role="user", content="u1", id=1),
+            MockMessage(role="assistant", content="a1", id=2),
+            MockMessage(role="user", content="u2", id=3),
+            MockMessage(role="assistant", content="a2", id=4),
+        ]
+
+        scenes = group_messages_into_scenes(
+            messages,
+            cast_change_turns=[],
+            max_exchanges_per_scene=15,
+            start_turn=20
+        )
+
+        assert len(scenes) == 1
+        start_turn, end_turn, _ = scenes[0]
+        assert start_turn == 20
+        assert end_turn == 21

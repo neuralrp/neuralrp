@@ -2919,7 +2919,8 @@ def calculate_turn_for_message(messages: List[ChatMessage], target_index: int) -
 def group_messages_into_scenes(
     messages: List[ChatMessage],
     cast_change_turns: List[int],
-    max_exchanges_per_scene: int = 15
+    max_exchanges_per_scene: int = 15,
+    start_turn: int = 1
 ) -> List[Tuple[int, int, List[ChatMessage]]]:
     """
     Group messages into scenes for capsule generation.
@@ -2933,9 +2934,9 @@ def group_messages_into_scenes(
     """
     scenes = []
     current_scene_messages = []
-    current_scene_start = 1
+    current_scene_start = max(1, start_turn)
     exchange_count = 0
-    turn_counter = 0
+    turn_counter = current_scene_start - 1
 
     for i, msg in enumerate(messages):
         if msg.role == 'user':
@@ -2963,6 +2964,42 @@ def group_messages_into_scenes(
         scenes.append((current_scene_start, turn_counter, current_scene_messages))
 
     return scenes
+
+
+def enforce_word_limit(text: str, max_words: int) -> str:
+    """
+    Enforce a hard max word limit with deterministic truncation.
+    """
+    if not text or max_words <= 0:
+        return ""
+    words = text.split()
+    if len(words) <= max_words:
+        return text.strip()
+    return " ".join(words[:max_words]).strip()
+
+
+def filter_unsummarized_old_messages(
+    old_messages: List[ChatMessage],
+    metadata: Dict[str, Any]
+) -> List[ChatMessage]:
+    """
+    Return only old messages that are newer than the last summarized message marker.
+    Prevents duplicate re-summarization if stale messages re-enter active context.
+    """
+    last_summarized_message_id = metadata.get("last_summarized_message_id")
+    if not last_summarized_message_id:
+        return old_messages
+    return [m for m in old_messages if m.id > last_summarized_message_id]
+
+
+def find_message_index_by_id(messages: List[ChatMessage], message_id: int) -> int:
+    """
+    Find a message index by ID, defaulting to 0 if not found.
+    """
+    for idx, msg in enumerate(messages):
+        if msg.id == message_id:
+            return idx
+    return 0
 
 async def generate_scene_capsule(
     messages: List[ChatMessage],
@@ -3005,6 +3042,7 @@ async def generate_scene_capsule(
             )
             data = response.json()
             capsule = data["results"][0]["text"].strip()
+            capsule = enforce_word_limit(capsule, 100)
             return capsule
         except Exception as e:
             logger.error(f"Failed to generate scene capsule (turns {start_turn}-{end_turn}): {e}")
@@ -3030,13 +3068,15 @@ async def trigger_cast_change_summarization(
         chat_messages = [ChatMessage(**msg) for msg in messages]
         history_window = CONFIG['context']['history_window']
         recent, old = split_messages_by_window(chat_messages, history_window)
+        metadata = chat.get('metadata', {}) or {}
+        old = filter_unsummarized_old_messages(old, metadata)
 
         if not old:
             logger.info(f"Cast-change summarization: no old messages for chat {chat_id}")
             return
 
-        old_start_index = 0
-        old_end_index = len(old) - 1
+        old_start_index = find_message_index_by_id(chat_messages, old[0].id)
+        old_end_index = find_message_index_by_id(chat_messages, old[-1].id)
         start_turn = calculate_turn_for_message(chat_messages, old_start_index)
         end_turn = calculate_turn_for_message(chat_messages, old_end_index)
 
@@ -3059,8 +3099,7 @@ async def trigger_cast_change_summarization(
         new_summary = (existing_summary + "\n\n" + scene_capsule).strip()
         chat['summary'] = new_summary
         chat['messages'] = [m.model_dump() for m in recent]
-        
-        metadata = chat.get('metadata', {})
+        metadata['last_summarized_message_id'] = max(metadata.get('last_summarized_message_id', 0), old[-1].id)
         
         if snapshot_analyzer:
             active_chars = chat.get('activeCharacters', [])
@@ -3105,15 +3144,28 @@ async def trigger_threshold_summarization(
         chat_messages = [ChatMessage(**msg) for msg in messages]
         history_window = CONFIG['context']['history_window']
         recent, old = split_messages_by_window(chat_messages, history_window)
+        metadata = chat.get('metadata', {}) or {}
+        old = filter_unsummarized_old_messages(old, metadata)
 
         if not old:
             logger.info(f"Threshold summarization: no old messages for chat {chat_id}")
             return
 
-        metadata = chat.get('metadata', {})
+        old_user_turns = sum(1 for m in old if m.role == "user")
+        if old_user_turns < 2:
+            logger.info(f"Threshold summarization: skipping tiny old window for chat {chat_id} ({old_user_turns} user turns)")
+            return
+
+        old_start_index = find_message_index_by_id(chat_messages, old[0].id)
+        base_turn = calculate_turn_for_message(chat_messages, old_start_index)
         cast_change_turns = metadata.get('cast_change_turns', [])
 
-        scenes = group_messages_into_scenes(old, cast_change_turns, max_exchanges_per_scene=15)
+        scenes = group_messages_into_scenes(
+            old,
+            cast_change_turns,
+            max_exchanges_per_scene=15,
+            start_turn=base_turn
+        )
 
         if not scenes:
             logger.warning(f"Threshold summarization: no scenes for chat {chat_id}")
@@ -3140,8 +3192,7 @@ async def trigger_threshold_summarization(
         new_summary = (existing_summary + "\n\n" + combined_capsules).strip()
         chat['summary'] = new_summary
         chat['messages'] = [m.model_dump() for m in recent]
-        
-        metadata = chat.get('metadata', {})
+        metadata['last_summarized_message_id'] = max(metadata.get('last_summarized_message_id', 0), old[-1].id)
         
         if snapshot_analyzer:
             active_chars = chat.get('activeCharacters', [])
@@ -3346,10 +3397,14 @@ async def call_llm_helper(system_prompt: str, user_prompt: str, max_tokens: int 
             print(f"LLM Call Exception: {str(e)}")
             raise Exception(f"API Error: {str(e)}")
 
-async def summarize_text(text: str) -> str:
+async def summarize_text(text: str, max_words: Optional[int] = None) -> str:
     """Summarize provided text into a concise version."""
     system = "You are an expert at distilling information into concise summaries."
-    
+
+    hard_limit_line = ""
+    if max_words and max_words > 0:
+        hard_limit_line = f"- HARD LIMIT: {max_words} words maximum\n"
+
     prompt = f"""Summarize the following text into a more concise version while preserving all key information.
 
 Requirements:
@@ -3358,6 +3413,7 @@ Requirements:
 - Maintain neutral, factual tone
 - Do NOT add new information
 - Remove redundancy and filler
+{hard_limit_line}
 
 Text to summarize:
 {text}
@@ -3365,7 +3421,10 @@ Text to summarize:
 Output only the summarized text, nothing else."""
 
     result = await call_llm_helper(system, prompt, 300)
-    return result.strip()
+    result = result.strip()
+    if max_words and max_words > 0:
+        result = enforce_word_limit(result, max_words)
+    return result
 
 @app.post("/api/card-gen/generate-field")
 async def generate_card_field(req: CardGenRequest):
@@ -5218,7 +5277,8 @@ async def chat(request: PromptRequest):
             
             if summary_word_count >= summary_word_limit:
                 print(f"[SUMMARIZE] Summary word limit: {summary_word_count} >= {summary_word_limit}")
-                condensed_summary = await summarize_text(current_summary)
+                condensed_target = max(250, int(summary_word_limit * 0.6))
+                condensed_summary = await summarize_text(current_summary, max_words=condensed_target)
                 if condensed_summary:
                     chat = latest_chat or db_get_chat(current_request.chat_id)
                     if chat:
@@ -5313,7 +5373,8 @@ async def chat(request: PromptRequest):
             
             if summary_word_count >= summary_word_limit:
                 print(f"[SUMMARIZE] Summary word limit: {summary_word_count} >= {summary_word_limit}")
-                condensed_summary = await summarize_text(current_summary)
+                condensed_target = max(250, int(summary_word_limit * 0.6))
+                condensed_summary = await summarize_text(current_summary, max_words=condensed_target)
                 if condensed_summary:
                     chat = latest_chat or db_get_chat(current_request.chat_id)
                     if chat:
@@ -7763,7 +7824,12 @@ async def toggle_npc_active(chat_id: str, npc_id: str):
         new_active = not current_active
 
         # Update is_active in database (characters table)
-        db_update_npc_active(chat_id, filename, new_active)
+        db_update_ok = db_update_npc_active(chat_id, filename, new_active)
+        if not db_update_ok:
+            return {
+                "success": False,
+                "error": f"Failed to update NPC '{filename}' active state in database"
+            }
 
         # Update activeCharacters array (still needed for prompt context)
         active_chars = chat.get('activeCharacters', [])

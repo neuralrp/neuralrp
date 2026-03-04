@@ -22,12 +22,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - Removed import-time calls to `init_db()`, `init_vec_table()`, and `migrate_npcs_to_characters()`
 - **Config Mutability Bug**: Prevented shared nested default mutation by using `deepcopy` in `app/config_loader.py`.
 - **Test Signal Reliability**: Prevented stale/deprecated suites from polluting default CI/local pass-fail signal by isolating them as legacy-only coverage.
+- **Incremental Auto-Summarization Cursor**: Added persistent metadata tracking via `last_summarized_message_id` so summarization processes only unsummarized old messages instead of reprocessing previously summarized ranges.
+- **Scene Boundary Turn Alignment**: Fixed scene grouping to respect absolute turn offsets (`start_turn`) when segmenting threshold summaries, ensuring cast-change boundaries align correctly after prior truncation/summarization.
+- **Hard Summary Length Enforcement**:
+  - Scene capsules now enforce a hard 100-word cap in code (not prompt-only).
+  - Summary condensation now supports explicit hard word limits and deterministic truncation post-generation.
+  - Auto-condense now targets ~60% of configured `summary_word_limit` (with floor) to prevent runaway summary growth.
+- **Summary Noise Reduction**: Threshold summarization now skips tiny old windows (<2 user turns) to avoid low-value micro-capsules that bloat long-term summary memory.
+- **Metadata Persistence for Summarization State**: Updated chat save path to preserve `last_summarized_message_id` across autosaves, preventing loss of summarization progress.
+- **NPC Atomic Create Safety**: Replaced `INSERT OR REPLACE` chat write in NPC creation flow with safe `UPDATE` semantics to prevent delete+insert behavior that could cascade-delete chat messages.
+- **Legacy Migration Compatibility**: Hardened NPC migration startup path to skip `entities` remap when `entities` table is absent (v2.0+ schema), preventing migration-time startup failures.
+- **NPC Active-State Consistency**: `db_get_character(..., chat_id=...)` now includes `is_active` and `created_at` from the unified `characters` table, preventing inactive NPCs from being treated as active by default in load paths.
+- **Toggle-Active Reliability**: `/api/chats/{chat_id}/npcs/{npc_id}/toggle-active` now checks database update success and returns an error instead of silently reporting success on write failure.
+- **NPC Filename Uniqueness**: Updated filename generation to satisfy global `UNIQUE(filename)` constraints across chats with collision-resistant ID generation.
+- **Stable NPC Timestamps**: `db_get_characters(chat_id=...)` now propagates `created_at`, preventing API fallback to runtime timestamps when listing NPCs.
 
 ### Added
 - **Minimal CI Test Gate**: Added GitHub Actions workflow at `.github/workflows/pytest.yml` that runs `pytest -q` on push to `main` and on pull requests using Python 3.10.
 
 ### Validation
 - Local stabilized pytest gate passes after changes: **91 passed, 0 failed**.
+- Targeted NPC regression checks pass after fixes: `pytest tests/test_npc_management.py tests/test_helpers.py tests/test_cast_change.py -q` (**30 passed**).
 
 ## [2.0.3] - 2026-02-16
 

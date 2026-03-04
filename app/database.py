@@ -617,6 +617,7 @@ def db_get_characters(chat_id: Optional[str] = None) -> List[Dict[str, Any]]:
         for row in cursor.fetchall():
             char_data = json.loads(row['data'])
             char_data['_filename'] = row['filename']
+            char_data['created_at'] = row['created_at']
             char_data['updated_at'] = row['updated_at']
             char_data['is_npc'] = chat_id is not None
             # Include is_active from database (default to True if null for backwards compatibility)
@@ -666,16 +667,16 @@ def db_get_character(filename: str, chat_id: Optional[str] = None) -> Optional[D
         if chat_id:
             # NPC in specific chat
             cursor.execute("""
-                SELECT filename, data, danbooru_tag, updated_at,
-                       visual_canon_id, visual_canon_tags
+                SELECT filename, data, danbooru_tag, created_at, updated_at,
+                       visual_canon_id, visual_canon_tags, is_active
                 FROM characters
                 WHERE filename = ? AND chat_id = ?
             """, (filename, chat_id))
         else:
             # Global character
             cursor.execute("""
-                SELECT filename, data, danbooru_tag, updated_at,
-                       visual_canon_id, visual_canon_tags
+                SELECT filename, data, danbooru_tag, created_at, updated_at,
+                       visual_canon_id, visual_canon_tags, is_active
                 FROM characters
                 WHERE filename = ? AND chat_id IS NULL
             """, (filename,))
@@ -700,8 +701,12 @@ def db_get_character(filename: str, chat_id: Optional[str] = None) -> Optional[D
             }
         
         char_data['_filename'] = row['filename']
+        char_data['created_at'] = row['created_at']
         char_data['updated_at'] = row['updated_at']  # Include updated_at timestamp
         char_data['is_npc'] = chat_id is not None
+        if chat_id is not None:
+            # NPC active state lives in unified characters table.
+            char_data['is_active'] = row['is_active'] if row['is_active'] is not None else True
         
         # Get extensions dict from nested structure (now guaranteed to exist)
         if 'extensions' not in char_data['data']:
@@ -1592,6 +1597,11 @@ def db_save_chat(chat_id: str, data: Dict[str, Any], autosaved: bool = True) -> 
                 metadata["characterFullCardTurns"] = metadata.get("characterFullCardTurns", {})
             else:
                 metadata["characterFullCardTurns"] = incoming_metadata["characterFullCardTurns"]
+
+            if "last_summarized_message_id" not in incoming_metadata:
+                metadata["last_summarized_message_id"] = metadata.get("last_summarized_message_id", 0)
+            else:
+                metadata["last_summarized_message_id"] = incoming_metadata["last_summarized_message_id"]
  
             # Critical: Ensure localnpcs exists (preserves NPCs from atomic creation)
             if "localnpcs" not in metadata:
@@ -3658,10 +3668,7 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
     """
     try:
         name = npc_data.get("name", "Unknown NPC")
-
-        # Generate filename: npc_{sanitized_name}_{timestamp}.json
         safe_name = name.lower().replace(' ', '_').replace("'", '')
-        filename = f"npc_{safe_name}_{int(time.time())}.json"
         
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -3670,17 +3677,7 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
             cursor.execute("BEGIN TRANSACTION")
             
             try:
-                # Step 1: Check for existing NPC by filename or name
-                cursor.execute(
-                    "SELECT filename, name FROM characters WHERE chat_id = ? AND filename = ?",
-                    (chat_id, filename)
-                )
-                existing_by_id = cursor.fetchone()
-                
-                if existing_by_id:
-                    conn.rollback()
-                    return False, None, "Filename already exists"
-                
+                # Step 1: Check for existing NPC name in this chat
                 cursor.execute(
                     "SELECT filename, name FROM characters WHERE chat_id = ? AND name = ?",
                     (chat_id, name)
@@ -3690,6 +3687,21 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                 if existing_by_name:
                     conn.rollback()
                     return False, None, "NPC name already exists in this chat"
+
+                # Generate globally unique filename because schema enforces UNIQUE(filename).
+                # Try a few deterministic attempts before falling back to random suffix.
+                filename = None
+                for attempt in range(8):
+                    candidate = f"npc_{safe_name}_{int(time.time() * 1000)}_{attempt}.json"
+                    cursor.execute(
+                        "SELECT 1 FROM characters WHERE filename = ?",
+                        (candidate,)
+                    )
+                    if not cursor.fetchone():
+                        filename = candidate
+                        break
+                if not filename:
+                    filename = f"npc_{safe_name}_{int(time.time() * 1000)}_{random.randint(1000, 999999)}.json"
                 
                  # Insert NPC into characters table
                 extensions = npc_data.get('data', {}).get('extensions', {})
@@ -3759,21 +3771,25 @@ def db_create_npc_and_update_chat(chat_id: str, npc_data: Dict) -> Tuple[bool, O
                 # Update chat record with new metadata
                 metadata_json = json.dumps(existing_metadata, ensure_ascii=False)
                 
+                # IMPORTANT: never REPLACE chats row (it can cascade-delete messages).
                 cursor.execute(
                     """
-                    INSERT OR REPLACE INTO chats 
-                    (id, branch_name, summary, metadata, created_at, autosaved)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    UPDATE chats
+                    SET branch_name = ?, summary = ?, metadata = ?, created_at = ?, autosaved = ?
+                    WHERE id = ?
                     """,
                     (
-                        chat_id,
                         branch_name,
                         summary,
                         metadata_json,
                         created_at,
-                        True  # autosaved
+                        True,  # autosaved
+                        chat_id
                     )
                 )
+                if cursor.rowcount == 0:
+                    conn.rollback()
+                    return False, None, f"Chat '{chat_id}' not found"
                 
                 # Commit transaction
                 conn.commit()
@@ -4481,14 +4497,22 @@ def migrate_npcs_to_characters():
         
         print(f"[MIGRATION] Migrated {migrated_count} NPCs (skipped {skipped_count})")
         
-        # Update entities table to use filename instead of entity_id
-        print("[MIGRATION] Updating entities table...")
-        for old_entity_id, new_filename in entity_to_filename_map.items():
-            cursor.execute("""
-                UPDATE entities
-                SET entity_id = ?
-                WHERE entity_id = ?
-            """, (new_filename, old_entity_id))
+        # Update entities table if it still exists (v2.0+ removed this table).
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='entities'
+        """)
+        has_entities_table = cursor.fetchone() is not None
+        if has_entities_table:
+            print("[MIGRATION] Updating entities table...")
+            for old_entity_id, new_filename in entity_to_filename_map.items():
+                cursor.execute("""
+                    UPDATE entities
+                    SET entity_id = ?
+                    WHERE entity_id = ?
+                """, (new_filename, old_entity_id))
+        else:
+            print("[MIGRATION] entities table not present; skipping entities remap")
         
         # Update chat metadata localnpcs references
         print("[MIGRATION] Updating chat metadata...")
