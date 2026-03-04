@@ -11,6 +11,7 @@ Example:
 """
 
 import os
+import copy
 import yaml
 from typing import Dict, Any, Optional
 
@@ -68,7 +69,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         Complete configuration dictionary with nested sections
     """
     # Start with defaults
-    config = DEFAULT_CONFIG.copy()
+    config = copy.deepcopy(DEFAULT_CONFIG)
 
     # Load from YAML file if it exists
     if config_path is None:

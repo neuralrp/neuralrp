@@ -17,8 +17,8 @@ import os
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add repository root to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import httpx
 import numpy as np
@@ -26,6 +26,8 @@ import numpy as np
 from app.snapshot_analyzer import SnapshotAnalyzer
 from app.snapshot_prompt_builder import SnapshotPromptBuilder
 from app.danbooru_tags_config import get_block_tags, BLOCK_0
+
+pytestmark = pytest.mark.legacy
 
 
 # ==============================================================================

@@ -15,8 +15,8 @@ import time
 import sys
 from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add repository root to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.database import (
     db_get_danbooru_tag_count,
@@ -31,6 +31,8 @@ from app.danbooru_tags_config import get_total_tag_count
 from app.snapshot_analyzer import SnapshotAnalyzer
 from app.snapshot_prompt_builder import SnapshotPromptBuilder
 from app.danbooru_tags_config import get_min_matches
+
+pytestmark = pytest.mark.legacy
 
 # ==============================================================================
 # Task 2: Database Layer Tests

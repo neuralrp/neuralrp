@@ -3996,13 +3996,31 @@
                 });
 
                 p += "\n### Chat:\n";
-                this.messages.forEach(m => {
+                const historyWindow = this.settings.history_window || 5;
+                const recentMessages = this.splitMessagesByWindowLocal(this.messages, historyWindow);
+                recentMessages.forEach(m => {
                     if (m.speaker === 'Visual System') return;
                     const speaker = m.speaker || (m.role === 'user' ? 'User' : 'Narrator');
                     p += `${speaker}: ${m.content}\n`;
                 });
                 p += "Narrator:";
                 return p;
+            },
+
+            splitMessagesByWindowLocal(messages, maxExchanges = 5) {
+                if (!Array.isArray(messages) || messages.length === 0) return [];
+                if (maxExchanges <= 0) return [];
+
+                const userIndices = [];
+                for (let i = 0; i < messages.length; i++) {
+                    if (messages[i].role === 'user') {
+                        userIndices.push(i);
+                    }
+                }
+
+                if (userIndices.length <= maxExchanges) return messages;
+                const splitIndex = userIndices[userIndices.length - maxExchanges];
+                return messages.slice(splitIndex);
             },
 
             // ========== SUMMARY MANAGEMENT ==========
@@ -4993,6 +5011,12 @@
                         content: aiContent.trim(),
                         id: Date.now() + 1
                     };
+                    if (res.data._updated_state && Array.isArray(res.data._updated_state.messages)) {
+                        this.messages = res.data._updated_state.messages;
+                    }
+                    if (!this.messages.some(m => m.id === userMsg.id)) {
+                        this.messages.push(userMsg);
+                    }
                     this.messages.push(aiMsg);
                     await this.autosaveChat();
 
@@ -5068,6 +5092,12 @@
                         content: aiContent.trim(),
                         id: Date.now() + 1
                     };
+                    if (res.data._updated_state && Array.isArray(res.data._updated_state.messages)) {
+                        this.messages = res.data._updated_state.messages;
+                    }
+                    if (lastUserMsg && !this.messages.some(m => m.id === lastUserMsg.id)) {
+                        this.messages.push(lastUserMsg);
+                    }
                     this.messages.push(aiMsg);
                     await this.autosaveChat();
 

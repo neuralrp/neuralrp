@@ -33,6 +33,10 @@ _connection_stats = {
     "active": 0
 }
 
+# Runtime initialization guard
+_runtime_init_lock = threading.Lock()
+_runtime_initialized = False
+
 
 @contextmanager
 def get_connection():
@@ -4529,14 +4533,33 @@ def migrate_npcs_to_characters():
         print("[MIGRATION] NPC migration complete!")
 
 
-# Initialize database on module import (only once at end)
-init_db()
-init_vec_table()
+def initialize_database_runtime(force: bool = False) -> bool:
+    """
+    Explicitly initialize database runtime state.
 
-# Run NPC migration on startup (after database initialization)
-try:
-    migrate_npcs_to_characters()
-except Exception as e:
-    print(f"[MIGRATION ERROR] Failed to migrate NPCs: {e}")
-    import traceback
-    traceback.print_exc()
+    This replaces import-time side effects and should be called from app startup.
+    """
+    global _runtime_initialized
+
+    if _runtime_initialized and not force:
+        return True
+
+    with _runtime_init_lock:
+        if _runtime_initialized and not force:
+            return True
+
+        try:
+            init_db()
+            init_vec_table()
+        except Exception:
+            logger.exception("[DB INIT] Failed during database initialization")
+            return False
+
+        try:
+            migrate_npcs_to_characters()
+        except Exception:
+            logger.exception("[DB INIT] NPC migration failed during startup")
+            return False
+
+        _runtime_initialized = True
+        return True

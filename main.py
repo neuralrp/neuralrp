@@ -89,7 +89,7 @@ startup_time = time.time()
 from app.backup_manager import create_backup, rotate_backups, list_backups
 from app.database import (
     # Core connection and initialization
-    init_db, get_connection,
+    init_db, get_connection, initialize_database_runtime,
     # Character operations
     db_get_character, db_get_all_characters, db_save_character, db_delete_character,
     db_get_character_updated_at,
@@ -212,7 +212,16 @@ verify_sqlite_vec_extension()
 
 # Removed orphaned code - this block references undefined variables and is not used
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan hook replacing deprecated startup/shutdown events."""
+    await startup_event()
+    try:
+        yield
+    finally:
+        await shutdown_event()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -2175,12 +2184,14 @@ async def check_ai_services():
 
 
 # FastAPI startup and shutdown handlers
-@app.on_event("startup")
 async def startup_event():
     """Initialize resources when FastAPI app starts"""
     global cleanup_task, startup_time
     startup_time = time.time()
-    
+
+    if not initialize_database_runtime():
+        logger.warning("[WARNING] Database runtime initialization failed")
+
     # Verify database integrity before proceeding
     if not verify_database_health():
         logger.warning("[WARNING] Database health check failed - app may not function correctly")
@@ -2251,7 +2262,6 @@ async def startup_event():
     cleanup_task = asyncio.create_task(periodic_cleanup())
     logger.info("Periodic cleanup task started")
 
-@app.on_event("shutdown")
 async def shutdown_event():
     """Clean up resources when the FastAPI app shuts down"""
     global cleanup_task, snapshot_http_client
@@ -2883,20 +2893,20 @@ def split_messages_by_window(
     """
     if not messages:
         return ([], [])
-    
-    exchange_count = 0
-    split_index = 0
-    
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].role == 'user':
-            exchange_count += 1
-            if exchange_count > max_exchanges:
-                split_index = i + 1
-                break
-    
+
+    if max_exchanges <= 0:
+        return ([], messages)
+
+    user_indices = [i for i, msg in enumerate(messages) if msg.role == 'user']
+    if len(user_indices) <= max_exchanges:
+        return (messages, [])
+
+    # Keep complete exchanges by splitting at the first user message
+    # of the retained window.
+    split_index = user_indices[-max_exchanges]
     old_messages = messages[:split_index]
     recent_messages = messages[split_index:]
-    
+
     return (recent_messages, old_messages)
 
 def calculate_turn_for_message(messages: List[ChatMessage], target_index: int) -> int:
@@ -3025,9 +3035,10 @@ async def trigger_cast_change_summarization(
             logger.info(f"Cast-change summarization: no old messages for chat {chat_id}")
             return
 
-        old_start_index = len(chat_messages) - len(recent) - len(old)
+        old_start_index = 0
+        old_end_index = len(old) - 1
         start_turn = calculate_turn_for_message(chat_messages, old_start_index)
-        end_turn = calculate_turn_for_message(chat_messages, len(chat_messages) - 1)
+        end_turn = calculate_turn_for_message(chat_messages, old_end_index)
 
         departed_names = [entity_to_name.get(e, e) for e in departed_characters]
         departed_note = f"Note: {', '.join(departed_names)} exited during this scene. Mention their departure."
@@ -5183,22 +5194,17 @@ async def chat(request: PromptRequest):
                 )
 
             # 2. Turn-based summarization with percentage backstop
-            # Trigger if: turn >= trigger_turn OR tokens >= threshold%
+            # Trigger if: turn == trigger_turn OR prompt tokens >= threshold%
             max_context = request.settings.get('max_context', CONFIG['context']['max_context'])
-            all_messages_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in current_request.messages])
-            all_messages_tokens = await get_token_count(all_messages_text)
-            existing_summary_tokens = await get_token_count(current_request.summary or "")
-            total_tokens = all_messages_tokens + existing_summary_tokens
-            
-            over_turn_limit = absolute_turn >= summarize_trigger_turn
-            over_token_limit = total_tokens >= (max_context * summarize_threshold)
+            over_turn_limit = absolute_turn == summarize_trigger_turn
+            over_token_limit = tokens >= (max_context * summarize_threshold)
             
             if over_turn_limit or over_token_limit:
                 data["_summarization_triggered"] = True
                 if over_turn_limit and not over_token_limit:
-                    print(f"[SUMMARIZE] Turn-based trigger: turn {absolute_turn} >= {summarize_trigger_turn}")
+                    print(f"[SUMMARIZE] Turn-based trigger: turn {absolute_turn} == {summarize_trigger_turn}")
                 elif over_token_limit and not over_turn_limit:
-                    print(f"[SUMMARIZE] Token-based backstop: {total_tokens} >= {int(max_context * summarize_threshold)} ({int(summarize_threshold*100)}%)")
+                    print(f"[SUMMARIZE] Token-based backstop: {tokens} >= {int(max_context * summarize_threshold)} ({int(summarize_threshold*100)}%)")
                 await trigger_threshold_summarization(
                     chat_id=current_request.chat_id,
                     canon_law_entries=canon_law_entries
@@ -5206,14 +5212,15 @@ async def chat(request: PromptRequest):
 
             # 3. Summary word count limit - condense summary if it gets too long
             summary_word_limit = CONFIG['context'].get('summary_word_limit', 1200)
-            current_summary = current_request.summary or ""
+            latest_chat = db_get_chat(current_request.chat_id) if current_request.chat_id else None
+            current_summary = (latest_chat or {}).get('summary', '') or ""
             summary_word_count = len(current_summary.split())
             
             if summary_word_count >= summary_word_limit:
                 print(f"[SUMMARIZE] Summary word limit: {summary_word_count} >= {summary_word_limit}")
                 condensed_summary = await summarize_text(current_summary)
                 if condensed_summary:
-                    chat = db_get_chat(current_request.chat_id)
+                    chat = latest_chat or db_get_chat(current_request.chat_id)
                     if chat:
                         chat['summary'] = condensed_summary
                         db_save_chat(current_request.chat_id, chat)
@@ -5282,23 +5289,17 @@ async def chat(request: PromptRequest):
                 )
 
             # 2. Turn-based summarization with percentage backstop
-            # Trigger if: turn >= trigger_turn OR tokens >= threshold%
+            # Trigger if: turn == trigger_turn OR prompt tokens >= threshold%
             max_context = request.settings.get('max_context', CONFIG['context']['max_context'])
-            all_messages_text = "\n".join([f"{m.speaker or m.role}: {m.content}" for m in current_request.messages])
-            all_messages_tokens = await get_token_count(all_messages_text)
-            ai_response_text = response.get("results", [{}])[0].get("text", "")
-            ai_response_tokens = await get_token_count(ai_response_text)
-            total_tokens = all_messages_tokens + ai_response_tokens
-            
-            over_turn_limit = absolute_turn >= summarize_trigger_turn
-            over_token_limit = total_tokens >= (max_context * summarize_threshold)
+            over_turn_limit = absolute_turn == summarize_trigger_turn
+            over_token_limit = tokens >= (max_context * summarize_threshold)
             
             if over_turn_limit or over_token_limit:
                 response["_summarization_triggered"] = True
                 if over_turn_limit and not over_token_limit:
-                    print(f"[SUMMARIZE] Turn-based trigger: turn {absolute_turn} >= {summarize_trigger_turn}")
+                    print(f"[SUMMARIZE] Turn-based trigger: turn {absolute_turn} == {summarize_trigger_turn}")
                 elif over_token_limit and not over_turn_limit:
-                    print(f"[SUMMARIZE] Token-based backstop: {total_tokens} >= {int(max_context * summarize_threshold)} ({int(summarize_threshold*100)}%)")
+                    print(f"[SUMMARIZE] Token-based backstop: {tokens} >= {int(max_context * summarize_threshold)} ({int(summarize_threshold*100)}%)")
                 await trigger_threshold_summarization(
                     chat_id=current_request.chat_id,
                     canon_law_entries=canon_law_entries
@@ -5306,14 +5307,15 @@ async def chat(request: PromptRequest):
 
             # 3. Summary word count limit - condense summary if it gets too long
             summary_word_limit = CONFIG['context'].get('summary_word_limit', 1200)
-            current_summary = current_request.summary or ""
+            latest_chat = db_get_chat(current_request.chat_id) if current_request.chat_id else None
+            current_summary = (latest_chat or {}).get('summary', '') or ""
             summary_word_count = len(current_summary.split())
             
             if summary_word_count >= summary_word_limit:
                 print(f"[SUMMARIZE] Summary word limit: {summary_word_count} >= {summary_word_limit}")
                 condensed_summary = await summarize_text(current_summary)
                 if condensed_summary:
-                    chat = db_get_chat(current_request.chat_id)
+                    chat = latest_chat or db_get_chat(current_request.chat_id)
                     if chat:
                         chat['summary'] = condensed_summary
                         db_save_chat(current_request.chat_id, chat)
@@ -5498,7 +5500,14 @@ class SnapshotRequest(BaseModel):
     mode: Optional[str] = None  # Mode for primary character selection
     negative_prompt: Optional[str] = None  # Use manual generation negative prompt if provided
 
-def get_primary_character_name(selected_mode: Optional[str], active_characters: List[str], character_names: List[str]) -> Optional[str]:
+def get_primary_character_name(
+    selected_mode: Optional[str],
+    active_characters: List[str],
+    character_names: List[str],
+    chars_data: Optional[List[Dict]] = None,
+    messages: Optional[List[Dict]] = None,
+    metadata: Optional[Dict] = None
+) -> Optional[str]:
     """
     Determine primary character name based on selected mode.
 
@@ -5506,6 +5515,9 @@ def get_primary_character_name(selected_mode: Optional[str], active_characters: 
         selected_mode: Mode from frontend ("auto", "narrator", "focus:Alice", etc.)
         active_characters: List of character references (filenames or npc_ids)
         character_names: List of character names extracted from data
+        chars_data: Character metadata list from get_active_characters_data()
+        messages: Chat messages for recent-speaker fallback
+        metadata: Chat metadata containing previous_focus_character
 
     Returns:
         Character name for primary character, or None for narrator mode
@@ -5525,8 +5537,27 @@ def get_primary_character_name(selected_mode: Optional[str], active_characters: 
             return focus_char_name
         return None
 
-    # Auto mode - use first active character
+    # Auto mode - prefer most recently focused/speaking character
     if selected_mode == "auto" and character_names:
+        if chars_data:
+            # 1) Primary source: last resolved focus from chat metadata
+            previous_focus_entity = (metadata or {}).get("previous_focus_character")
+            if previous_focus_entity:
+                for char in chars_data:
+                    if char.get("entity_id") == previous_focus_entity:
+                        return char.get("name")
+
+            # 2) Fallback: last assistant speaker that matches active character names
+            if messages:
+                names_by_lower = {name.lower(): name for name in character_names if name}
+                for msg in reversed(messages):
+                    if msg.get("role") != "assistant":
+                        continue
+                    speaker = (msg.get("speaker") or "").strip().lower()
+                    if speaker in names_by_lower:
+                        return names_by_lower[speaker]
+
+        # 3) Final fallback: first active character
         return character_names[0]
 
     return None
@@ -5549,14 +5580,26 @@ def filter_characters_by_mode(chars_data: List[Dict], mode: Optional[str],
     if not chars_data:
         return []
     
-    if not mode or mode == "auto":
+    if not mode:
         return chars_data
-    
+
     if mode == "narrator":
-        return chars_data if for_counting else []
-    
-    if mode.startswith("focus:") and primary_char_name:
-        return [c for c in chars_data if c.get('name') == primary_char_name]
+        # Narrator mode should include all active entities in snapshot prompt context.
+        return chars_data
+
+    if mode == "auto":
+        if for_counting:
+            return chars_data
+        if primary_char_name:
+            return [c for c in chars_data if c.get('name') == primary_char_name]
+        return chars_data[:1]
+
+    if mode.startswith("focus:"):
+        if for_counting:
+            return chars_data
+        if primary_char_name:
+            return [c for c in chars_data if c.get('name') == primary_char_name]
+        return []
     
     return chars_data
 
@@ -5685,6 +5728,7 @@ def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_ca
             extensions = data.get('extensions', {})
             
             char_dict = {
+                'entity_id': char_ref,
                 'name': npc_data.get('name', 'Unknown'),
                 'description': data.get('description', ''),
                 'personality': data.get('personality', ''),
@@ -5709,6 +5753,7 @@ def get_active_characters_data(chat: Dict, max_chars: int = 3, include_visual_ca
             extensions = data.get('extensions', {})
             
             char_dict = {
+                'entity_id': char_ref,
                 'name': get_character_name(char_data),
                 'description': data.get('description', ''),
                 'personality': data.get('personality', ''),
@@ -5889,7 +5934,10 @@ async def generate_chat_snapshot(request: SnapshotRequest):
         primary_char_name = get_primary_character_name(
             request.mode,
             chat.get("activeCharacters", []),
-            character_names
+            character_names,
+            chars_data=chars_data,
+            messages=messages,
+            metadata=chat.get("metadata", {})
         )
 
         # Load primary character card if specific character selected

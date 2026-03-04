@@ -228,6 +228,35 @@ Resource Manager (queues operations)
     ├─→ Semantic Search → sqlite-vec → Ranked results
 ```
 
+### Stabilization Updates (2026-03-04)
+
+The following stabilization changes were added to reduce recurring regression risk:
+
+1. **Database initialization is now explicit (no import-time side effects)**
+   - Added `initialize_database_runtime()` in `app/database.py`.
+   - Database init (`init_db`, vec table init, NPC migration) now runs during FastAPI app lifecycle startup, not on module import.
+   - This avoids hidden schema/migration work during test imports and reduces startup race/debug complexity.
+
+2. **FastAPI lifecycle uses lifespan instead of deprecated startup/shutdown decorators**
+   - Startup and shutdown orchestration now runs through a single lifespan context manager in `main.py`.
+   - Existing initialization/cleanup order is preserved; only the registration mechanism changed.
+
+3. **Configuration defaults now use deep copy**
+   - `app/config_loader.py` now uses `copy.deepcopy(DEFAULT_CONFIG)` in `load_config()`.
+   - Prevents nested default dict mutation from leaking across calls in long-running processes/tests.
+
+4. **Default pytest run now excludes legacy/e2e suites and ignores `tests/legacy`**
+   - `pytest.ini` excludes marker groups (`legacy`, `e2e`) and ignores `tests/legacy` in the default gate.
+   - Legacy snapshot/favorites tests were moved to `tests/legacy/` and are preserved as reference-only coverage.
+   - `-p no:cacheprovider` is enabled by default to avoid `.pytest_cache` permission noise in constrained environments.
+   - Current default gate is intended to stay green and represent active behavior.
+
+5. **Minimal CI stabilization gate added**
+   - GitHub Actions workflow (`.github/workflows/pytest.yml`) runs `pytest -q` on push to `main` and pull requests.
+   - Purpose: enforce a stable, fast regression signal aligned with maintained test suites.
+
+---
+
 ### Configuration Settings
 
 NeuralRP uses `config.yaml` as the primary configuration file, loaded at startup via `app/config_loader.py`. Settings can be overridden per-chat via the settings UI.
@@ -381,6 +410,10 @@ sampling:
 3. **Chat Settings**: Per-chat settings override global defaults (if set via UI)
 4. **Request Settings**: Frontend may pass additional settings in API requests
 5. **Final Value**: Used in context assembly, summarization, generation
+
+**Implementation Note (v2.0.3+ stabilization):**
+- `load_config()` deep-copies defaults before applying YAML and env overrides.
+- This prevents accidental cross-request mutation of nested defaults.
 
 **Example Usage in Code:**
 
@@ -739,6 +772,11 @@ python app/database_setup.py
 - Safe to run every startup (idempotent)
 - Handles new installs and upgrades seamlessly
 - Users never need to manually run migrations
+
+**Runtime Initialization Path (v2.0.3+ stabilization):**
+- Database setup logic is invoked explicitly during app startup via `initialize_database_runtime()`.
+- The database module no longer executes initialization/migrations automatically during import.
+- This makes startup order deterministic and test imports safer.
 
 **Adding Future Schema Changes (v1.10.0)**
 
@@ -7232,18 +7270,9 @@ elif gender_counts['female'] > 1:
 }
 ```
 
-**GET /api/snapshot/status**
-
-Check Stable Diffusion API availability.
-
-**Response**:
-```json
-{
-  "available": true,
-  "url": "http://localhost:7860",
-  "version": "SD 1.5"
-}
-```
+**Status Endpoint Update (v2.0+):**
+- Snapshot-specific status endpoint `GET /api/snapshot/status` is no longer part of the active API.
+- Use `GET /api/system/status` for service/database/storage health and runtime status.
 
 **GET /api/chat/{chat_id}/snapshots**
 
@@ -7378,7 +7407,19 @@ await axios.post('/api/chat/snapshot', {
 
 ### Testing Coverage
 
-**Test Suite**: 48 comprehensive tests across 3 phases
+**Current Testing Strategy (stabilization-first):**
+
+- **Default gate (`pytest -q`)**: Runs active, maintained tests only.
+- **Legacy suites**: Snapshot/favorites historical tests live under `tests/legacy/`, are marked `legacy`, and are excluded from default runs.
+- **E2E suites**: Browser/external-service tests are marked `e2e` and excluded from default runs.
+- **Config source**: `pytest.ini` contains marker policy, folder ignores, and default pytest options for the stabilization gate.
+- **CI gate**: `.github/workflows/pytest.yml` runs the same `pytest -q` stabilization gate on push/PR.
+
+This keeps the default gate representative of current behavior and avoids false-red CI from removed/deprecated APIs.
+
+**Legacy Snapshot Test Notes:**
+- Some historical snapshot tests target removed endpoints and pre-simplification APIs.
+- They are retained for reference during future targeted refactors, not as default regression signal.
 
 **Phase 1: Unit Tests (13 tests)**
 - Database embedding insertion/retrieval

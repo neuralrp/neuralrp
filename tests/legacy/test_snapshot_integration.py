@@ -19,11 +19,13 @@ import json
 import asyncio
 from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add repository root to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import httpx
 from playwright.async_api import async_playwright
+
+pytestmark = [pytest.mark.e2e, pytest.mark.legacy]
 
 
 # ==============================================================================

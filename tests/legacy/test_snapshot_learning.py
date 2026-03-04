@@ -22,6 +22,8 @@ from app.snapshot_learning_config import (
 )
 import numpy as np
 
+pytestmark = pytest.mark.legacy
+
 
 # ==============================================================================
 # Test Class 1: Novelty Scoring

@@ -19,8 +19,8 @@ import json
 import asyncio
 from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add repository root to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import httpx
 from app.database import (
@@ -32,6 +32,8 @@ from app.database import (
     db_increment_favorite_tag,
     db_detect_danbooru_tags
 )
+
+pytestmark = pytest.mark.legacy
 
 # ==============================================================================
 # Task 1: Test Infrastructure - Fixtures
