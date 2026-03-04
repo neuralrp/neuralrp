@@ -87,7 +87,9 @@ CHARACTER_INJECTION_FIX.md
 Migrations.md
 SNAPSHOT_SEMANTIC_SEARCH.md
 demo_snapshot_semantic_search.py
+.claude/
 .opencode/
+.codex/
 
 # ============================================
 # CACHE DATABASES
