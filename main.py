@@ -1163,11 +1163,18 @@ from collections import OrderedDict
 
 # Semantic Search Engine
 import numpy as np
-from sentence_transformers import SentenceTransformer
 import hashlib
 import threading
 import gc
 import torch
+
+SENTENCE_TRANSFORMERS_IMPORT_ERROR = None
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception as e:
+    # Keep semantic search optional so test/import paths don't hard-fail.
+    SentenceTransformer = None
+    SENTENCE_TRANSFORMERS_IMPORT_ERROR = e
 
 class LRUCache:
     def __init__(self, max_size=1000):
@@ -1388,6 +1395,10 @@ class SemanticSearchEngine:
     
     def load_model(self):
         """Load the sentence transformer model with proper race condition handling and device detection"""
+        if SentenceTransformer is None:
+            print(f"[WARN] sentence-transformers not available: {SENTENCE_TRANSFORMERS_IMPORT_ERROR}")
+            return False
+
         with self.lock:
             if self.model is not None:
                 return True
